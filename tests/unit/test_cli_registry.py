@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from click.testing import CliRunner
 from cryptography.fernet import Fernet
 
+from family_logistics import cli as cli_module
 from family_logistics.cli import SCHEMA_BEHIND_MESSAGE, cli
 from family_logistics.core import config as config_module
 
@@ -49,6 +52,23 @@ class TestRegistryLoad:
         assert again.output.startswith(
             "Applied: create 0, update 0, deactivate 0, unchanged 18"
         )
+
+    def test_load_uses_the_configured_local_day(self, env, monkeypatch):
+        migrated()
+        zone = "Pacific/Kiritimati"
+        monkeypatch.setenv("FL_TIMEZONE", zone)
+        config_module.get_settings.cache_clear()
+        seen: dict[str, object] = {}
+        real_apply = cli_module.apply_seed
+
+        def spy(*args, **kwargs):
+            seen["today"] = kwargs.get("today")
+            return real_apply(*args, **kwargs)
+
+        monkeypatch.setattr(cli_module, "apply_seed", spy)
+        result = run("registry", "load", str(EXAMPLE), "--allow-repo-path")
+        assert result.exit_code == 0, result.output
+        assert seen["today"] == datetime.now(ZoneInfo(zone)).date()
 
     def test_seed_path_from_settings(self, env, monkeypatch):
         migrated()

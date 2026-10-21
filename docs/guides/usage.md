@@ -72,7 +72,22 @@ mkdir -p ~/.config/family-logistics
 cp config/registry.example.yaml ~/.config/family-logistics/registry.yaml
 # edit it, then:
 export FL_REGISTRY_SEED=~/.config/family-logistics/registry.yaml
-export FL_DATA_KEY="$(uv run python -c 'from family_logistics.core.crypto import generate_key; print(generate_key())')"
+```
+
+`FL_DATA_KEY` encrypts the stored addresses and coordinates. Generate it
+**once**, the first time only, and store it with your other secrets:
+
+```bash
+# First time only: print a new key and save it in your secret store.
+uv run python -c 'from family_logistics.core.crypto import generate_key; print(generate_key())'
+```
+
+Every later run reuses that same stored value. A different or lost key
+cannot read addresses that are already stored, and they cannot be
+recovered; never regenerate the key for an existing database.
+
+```bash
+export FL_DATA_KEY="<the key from your secret store>"
 uv run family-logistics registry load --dry-run
 uv run family-logistics registry load
 uv run family-logistics registry show

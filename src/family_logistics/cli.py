@@ -21,9 +21,11 @@ from __future__ import annotations
 import ipaddress
 import logging
 import sys
+from datetime import datetime
 from http.client import HTTPConnection, HTTPException
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
+from zoneinfo import ZoneInfo
 
 import click
 
@@ -37,7 +39,7 @@ from family_logistics.core.database import (
     directory_problems,
     integrity_ok,
 )
-from family_logistics.core.exceptions import ConfigurationError
+from family_logistics.core.exceptions import ConfigurationError, ValidationError
 from family_logistics.db import migrations_api
 from family_logistics.db.registry import RegistryError, RegistryStore
 from family_logistics.services.registry_seed import (
@@ -397,9 +399,22 @@ def registry_load(
     try:
         seed = load_seed_file(seed_path, allow_repo_path=allow_repo_path)
         plan = apply_seed(
-            engine, seed, cipher=_cipher(settings), actor=actor, dry_run=dry_run
+            engine,
+            seed,
+            cipher=_cipher(settings),
+            audit_key=settings.audit_key,
+            audit_key_version=settings.audit_key_version,
+            actor=actor,
+            dry_run=dry_run,
+            today=datetime.now(ZoneInfo(settings.timezone)).date(),
         )
-    except (SeedError, RegistryError, ConfigurationError, ProtectedDataError) as exc:
+    except (
+        SeedError,
+        RegistryError,
+        ConfigurationError,
+        ValidationError,
+        ProtectedDataError,
+    ) as exc:
         _fail(str(exc))
     finally:
         engine.dispose()
