@@ -28,7 +28,8 @@ def client_with(handler) -> AppriseClient:
 @pytest.mark.unit
 class TestAppriseClient:
     def test_configured_tags_are_dedicated(self):
-        assert TAGS == {
+        configured = TAGS
+        assert configured == {
             "fl-report",
             "fl-status",
             "fl-warning",
