@@ -63,11 +63,10 @@ class TestAudit:
         AuditRepository(engine).record(
             actor="system", object_ref="x:1", action="create"
         )
-        with (
-            engine.begin() as connection,
-            pytest.raises(DatabaseError, match="append-only"),
-        ):
-            connection.execute(text(statement))
+        with engine.begin() as connection:
+            query = text(statement)
+            with pytest.raises(DatabaseError, match="append-only"):
+                connection.execute(query)
 
     @pytest.mark.parametrize("field", ["actor", "object_ref", "action"])
     def test_reference_fields_validated(self, engine, field):
