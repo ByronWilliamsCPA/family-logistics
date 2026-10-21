@@ -28,14 +28,14 @@ def client_with(handler) -> AppriseClient:
 @pytest.mark.unit
 class TestAppriseClient:
     def test_configured_tags_are_dedicated(self):
-        assert {
+        assert TAGS == {
             "fl-report",
             "fl-status",
             "fl-warning",
             "fl-urgent",
             "fl-ops",
             "fl-shadow",
-        } == TAGS
+        }
 
     def test_sends_to_tag_endpoint(self):
         seen = []
@@ -52,8 +52,9 @@ class TestAppriseClient:
         def handler(_request: httpx.Request) -> httpx.Response:
             raise AssertionError("no request expected")
 
+        client = client_with(handler)
         with pytest.raises(NotificationTagError):
-            client_with(handler).notify(tag, "t", "b")
+            client.notify(tag, "t", "b")
 
     @pytest.mark.parametrize("status", [400, 424, 500])
     def test_non_2xx_is_not_delivered(self, status):

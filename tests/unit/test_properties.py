@@ -72,7 +72,7 @@ class TestConfirmationProperties:
     def test_code_is_deterministic_and_ignores_free_text(self, free):
         base = trip(notes())
         with_free = trip(notes(free=free))
-        assert confirmation_code(base) == confirmation_code(base)
+        assert confirmation_code(trip(notes())) == confirmation_code(base)
         assert confirmation_code(with_free) == confirmation_code(base)
 
     @FAST

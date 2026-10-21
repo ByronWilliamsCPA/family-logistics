@@ -64,20 +64,21 @@ class TestAudit:
             actor="system", object_ref="x:1", action="create"
         )
         with (
-            pytest.raises(DatabaseError, match="append-only"),
             engine.begin() as connection,
+            pytest.raises(DatabaseError, match="append-only"),
         ):
             connection.execute(text(statement))
 
     @pytest.mark.parametrize("field", ["actor", "object_ref", "action"])
     def test_reference_fields_validated(self, engine, field):
         values = {"actor": "a", "object_ref": "b", "action": "c"}
+        repository = AuditRepository(engine)
         values[field] = ""
         with pytest.raises(ValueError, match=field):
-            AuditRepository(engine).record(**values)
+            repository.record(**values)
         values[field] = "x" * 200
         with pytest.raises(ValueError, match=field):
-            AuditRepository(engine).record(**values)
+            repository.record(**values)
 
     def test_hash_is_canonical(self):
         assert state_hash({"a": 1, "b": 2}) == state_hash({"b": 2, "a": 1})
