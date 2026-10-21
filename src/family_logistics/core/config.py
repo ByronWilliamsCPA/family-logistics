@@ -148,6 +148,7 @@ FIELD_STATUS: dict[str, str] = {
     "port": CONSUMED,
     "timezone": M1,
     "database_path": CONSUMED,
+    "registry_seed": CONSUMED,
     "caldav_url": M1,
     "caldav_username": M1,
     "caldav_app_password": M1,
@@ -211,6 +212,8 @@ class Settings(BaseSettings):
         port: Listen port.
         timezone: IANA zone used for all human-facing times; storage is UTC.
         database_path: SQLite database file (WAL mode, single writer).
+        registry_seed: Private registry seed YAML, kept outside the repository;
+            ``registry load`` reads it when no path is given.
         caldav_url: iCloud CalDAV base URL.
         caldav_username: Apple ID used by the read-only collector.
         caldav_app_password: App-specific password for that Apple ID.
@@ -297,6 +300,7 @@ class Settings(BaseSettings):
     port: int = Field(default=8080, ge=1, le=65535)
     timezone: str = "America/Los_Angeles"
     database_path: Path = Path("/data/family_logistics.db")
+    registry_seed: Path | None = None
 
     caldav_url: str = "https://caldav.icloud.com"
     caldav_username: str | None = None
@@ -548,6 +552,21 @@ class Settings(BaseSettings):
             msg = "the FL_APPRISE_TAG_* values must be distinct"
             raise ValueError(msg)
         return self
+
+    @field_validator("registry_seed", mode="before")
+    @classmethod
+    def _blank_seed_is_unset(cls, value: object) -> object:
+        """Treat an empty ``FL_REGISTRY_SEED`` as unset, not the current directory.
+
+        Args:
+            value: Raw value from the environment or a constructor argument.
+
+        Returns:
+            None for blank text; other values unchanged for validation.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @field_validator(
         "proxy_trusted_cidrs", "ui_allowed_users", "caldav_allowed_hosts", mode="before"
