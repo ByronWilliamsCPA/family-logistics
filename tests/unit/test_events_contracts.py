@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -26,7 +27,7 @@ from family_logistics.domain.models import SourceEventKey
 START = datetime(2026, 10, 23, 22, 0, tzinfo=UTC)
 
 
-def source_event(recurrence_id: str = "") -> SourceEvent:
+def source_event(recurrence_id: str = "", *, is_override: bool = False) -> SourceEvent:
     return SourceEvent(
         calendar_id="cal-transport",
         uid="uid-1",
@@ -40,7 +41,7 @@ def source_event(recurrence_id: str = "") -> SourceEvent:
         status="confirmed",
         etag='"etag-1"',
         raw_hash="0" * 64,
-        is_override=bool(recurrence_id),
+        is_override=is_override,
         series_uid_has_rrule=bool(recurrence_id),
         last_seen=START,
     )
@@ -57,6 +58,18 @@ class TestSourceEvent:
         event = source_event("2026-10-23T22:00:00+00:00")
         assert event.occurrence_key[2] == "2026-10-23T22:00:00+00:00"
         assert event.to_key().recurrence_id == "2026-10-23T22:00:00+00:00"
+        assert event.is_override is False
+
+    def test_override_event_sets_override_status(self):
+        event = source_event("2026-10-23T22:00:00+00:00", is_override=True)
+        assert event.is_override is True
+
+    def test_repr_omits_raw_calendar_text(self):
+        text = repr(source_event())
+        assert "Lesson pickup" not in text
+        assert "Music Studio" not in text
+        assert "FL_VERSION" not in text
+        assert "uid-1" in text
 
     def test_is_immutable(self):
         event = source_event()
@@ -114,7 +127,9 @@ class TestTransportDefault:
             effective_from=date(2026, 10, 20), effective_to=date(2026, 10, 22)
         )
         assert rule.applies_on(date(2026, 10, 19)) is False
+        assert rule.applies_on(date(2026, 10, 20)) is True
         assert rule.applies_on(date(2026, 10, 21)) is True
+        assert rule.applies_on(date(2026, 10, 22)) is True
         assert rule.applies_on(date(2026, 10, 23)) is False
 
 
@@ -132,11 +147,16 @@ class TestEngineInputs:
         )
         assert activity.classification is ActivityClassification.OTHER
         assert activity.stays_until_end is True
+        assert "Music Studio" not in repr(activity)
+        nested = AssessmentInput(
+            window_start=START, window_end=START, activities=(activity,)
+        )
+        assert "Music Studio" not in repr(nested)
 
     def test_school_day(self):
         day = SchoolDay(
             person_id="jordan",
-            date=date(2026, 10, 21),
+            date=date(2026, 10, 23),
             location_id="school-jordan",
             start=START,
             end=START,
@@ -144,6 +164,8 @@ class TestEngineInputs:
             source="district",
         )
         assert day.kind is SchoolDayKind.NO_SCHOOL
+        local = ZoneInfo("America/Los_Angeles")
+        assert day.start.astimezone(local).date() == day.date
 
     def test_assessment_input_freshness_lookup(self):
         fresh = START - timedelta(minutes=10)
