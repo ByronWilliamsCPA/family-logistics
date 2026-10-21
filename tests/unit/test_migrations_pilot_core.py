@@ -60,8 +60,21 @@ class TestPilotCoreMigration:
         migrations_api.upgrade(engine)
         inspector = inspect(engine)
         for name, table in schema.metadata.tables.items():
-            migrated = {column["name"] for column in inspector.get_columns(name)}
-            assert migrated == set(table.columns.keys()), name
+            migrated = {
+                column["name"]: column["nullable"]
+                for column in inspector.get_columns(name)
+            }
+            declared = {column.name: column.nullable for column in table.columns}
+            assert migrated == declared, name
+            migrated_fks = {
+                (tuple(fk["constrained_columns"]), fk["referred_table"])
+                for fk in inspector.get_foreign_keys(name)
+            }
+            declared_fks = {
+                (tuple(c.name for c in fk.columns), fk.referred_table.name)
+                for fk in table.foreign_key_constraints
+            }
+            assert migrated_fks == declared_fks, name
 
     def test_source_event_occurrence_is_unique(self, engine):
         migrations_api.upgrade(engine)

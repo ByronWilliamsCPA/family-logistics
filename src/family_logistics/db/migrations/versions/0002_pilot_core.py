@@ -36,11 +36,64 @@ def _location_fk(name: str, *, nullable: bool = True) -> sa.Column[str]:
 def upgrade() -> None:
     """Create the pilot-core tables in dependency order."""
     op.create_table(
+        "location",
+        sa.Column("location_id", sa.String(64), primary_key=True),
+        sa.Column("name", sa.String(200), nullable=False),
+        sa.Column("ha_zone_entity_id", sa.String(128), nullable=True),
+        sa.Column("address_ciphertext", sa.LargeBinary, nullable=True),
+        sa.Column("latlon_ciphertext", sa.LargeBinary, nullable=True),
+        sa.Column(
+            "verification_state",
+            sa.String(16),
+            nullable=False,
+            server_default="unverified",
+        ),
+    )
+    op.create_table(
+        "vehicle",
+        sa.Column("vehicle_id", sa.String(64), primary_key=True),
+        sa.Column("display_name", sa.String(120), nullable=False),
+        sa.Column("seat_capacity", sa.Integer, nullable=True),
+    )
+    op.create_table(
+        "household",
+        sa.Column("household_id", sa.String(64), primary_key=True),
+        sa.Column("label", sa.String(120), nullable=False),
+        sa.Column(
+            "privacy_scope", sa.String(32), nullable=False, server_default="external"
+        ),
+    )
+    op.create_table(
+        "person",
+        sa.Column("person_id", sa.String(64), primary_key=True),
+        sa.Column("display_name", sa.String(120), nullable=False),
+        sa.Column("role", sa.String(16), nullable=False),
+        sa.Column("active", sa.Boolean, nullable=False, server_default=sa.true()),
+        sa.Column("can_drive", sa.Boolean, nullable=False, server_default=sa.false()),
+        sa.Column(
+            "default_vehicle_id",
+            sa.String(64),
+            sa.ForeignKey("vehicle.vehicle_id"),
+            nullable=True,
+        ),
+        sa.Column(
+            "monitoring_enabled", sa.Boolean, nullable=False, server_default=sa.true()
+        ),
+        sa.Column("monitoring_start", sa.Date, nullable=True),
+        sa.Column("monitoring_end", sa.Date, nullable=True),
+        _location_fk("home_location_id"),
+    )
+    op.create_table(
         "calendar_source",
         sa.Column("calendar_id", sa.String(128), primary_key=True),
         sa.Column("display_name", sa.String(200), nullable=False),
         sa.Column("kind", sa.String(32), nullable=False),
-        sa.Column("person_id", sa.String(64), nullable=True),
+        sa.Column(
+            "person_id",
+            sa.String(64),
+            sa.ForeignKey("person.person_id"),
+            nullable=True,
+        ),
         sa.Column("enabled", sa.Boolean, nullable=False, server_default=sa.true()),
         sa.Column("last_success", _TZ, nullable=True),
         sa.Column("last_error", sa.String(500), nullable=True),
@@ -92,54 +145,6 @@ def upgrade() -> None:
         sa.Column("sync_token", sa.Text, nullable=True),
         sa.Column("ctag", sa.String(255), nullable=True),
         sa.Column("last_full_sync", _TZ, nullable=True),
-    )
-    op.create_table(
-        "location",
-        sa.Column("location_id", sa.String(64), primary_key=True),
-        sa.Column("name", sa.String(200), nullable=False),
-        sa.Column("ha_zone_entity_id", sa.String(128), nullable=True),
-        sa.Column("address_ciphertext", sa.LargeBinary, nullable=True),
-        sa.Column("latlon_ciphertext", sa.LargeBinary, nullable=True),
-        sa.Column(
-            "verification_state",
-            sa.String(16),
-            nullable=False,
-            server_default="unverified",
-        ),
-    )
-    op.create_table(
-        "vehicle",
-        sa.Column("vehicle_id", sa.String(64), primary_key=True),
-        sa.Column("display_name", sa.String(120), nullable=False),
-        sa.Column("seat_capacity", sa.Integer, nullable=True),
-    )
-    op.create_table(
-        "household",
-        sa.Column("household_id", sa.String(64), primary_key=True),
-        sa.Column("label", sa.String(120), nullable=False),
-        sa.Column(
-            "privacy_scope", sa.String(32), nullable=False, server_default="external"
-        ),
-    )
-    op.create_table(
-        "person",
-        sa.Column("person_id", sa.String(64), primary_key=True),
-        sa.Column("display_name", sa.String(120), nullable=False),
-        sa.Column("role", sa.String(16), nullable=False),
-        sa.Column("active", sa.Boolean, nullable=False, server_default=sa.true()),
-        sa.Column("can_drive", sa.Boolean, nullable=False, server_default=sa.false()),
-        sa.Column(
-            "default_vehicle_id",
-            sa.String(64),
-            sa.ForeignKey("vehicle.vehicle_id"),
-            nullable=True,
-        ),
-        sa.Column(
-            "monitoring_enabled", sa.Boolean, nullable=False, server_default=sa.true()
-        ),
-        sa.Column("monitoring_start", sa.Date, nullable=True),
-        sa.Column("monitoring_end", sa.Date, nullable=True),
-        _location_fk("home_location_id"),
     )
     op.create_table(
         "external_passenger",
@@ -249,12 +254,12 @@ def downgrade() -> None:
     op.drop_index("ux_alias_kind_alias", table_name="alias")
     op.drop_table("alias")
     op.drop_table("external_passenger")
-    op.drop_table("person")
-    op.drop_table("household")
-    op.drop_table("vehicle")
-    op.drop_table("location")
     op.drop_table("sync_state")
     op.drop_index("ix_source_event_deleted", table_name="source_event")
     op.drop_index("ix_source_event_start", table_name="source_event")
     op.drop_table("source_event")
     op.drop_table("calendar_source")
+    op.drop_table("person")
+    op.drop_table("household")
+    op.drop_table("vehicle")
+    op.drop_table("location")

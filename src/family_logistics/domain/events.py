@@ -121,9 +121,11 @@ class SourceEvent:
     start: datetime
     end: datetime
     all_day: bool
-    summary: str
-    location: str | None
-    description: str | None
+    # Raw calendar text can hold addresses or other household detail, so it
+    # never appears in repr() (and therefore never in logs or tracebacks).
+    summary: str = field(repr=False)
+    location: str | None = field(repr=False)
+    description: str | None = field(repr=False)
     status: EventStatus
     etag: str | None
     raw_hash: str
@@ -221,7 +223,7 @@ class Activity:
     activity_id: str
     participant_ids: tuple[str, ...]
     location_id: str | None
-    location_text: str | None
+    location_text: str | None = field(repr=False)
     start: datetime
     end: datetime
     source_key: OccurrenceKey

@@ -57,7 +57,7 @@ calendar_source = Table(
     Column("calendar_id", String(128), primary_key=True),
     Column("display_name", String(200), nullable=False),
     Column("kind", String(32), nullable=False),
-    Column("person_id", String(64), nullable=True),
+    Column("person_id", String(64), ForeignKey("person.person_id"), nullable=True),
     Column("enabled", Boolean, nullable=False, default=True),
     Column("last_success", DateTime(timezone=True), nullable=True),
     Column("last_error", String(500), nullable=True),
