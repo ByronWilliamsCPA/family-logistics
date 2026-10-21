@@ -12,6 +12,12 @@ MOVE, COPY, POST, PATCH, PROPPATCH, MKCALENDAR, MKCOL, LOCK, UNLOCK, ACL).
 Tests prove each is blocked with no I/O.
 #ASSUME: External resources: a dedicated Apple ID that holds only View-Only
 shares makes this server-enforced as well. #VERIFY in M0 check 1.
+#CRITICAL: Security: every request (including redirects) must use HTTPS,
+because Basic credentials accompany it. Plain HTTP is refused before I/O.
+
+GET stays allowed: collectors fetch individual calendar objects by href with
+GET (RFC 4791 section 7.8 and 5.3.4), and RFC 6764 service discovery may
+follow redirects from ``/.well-known/caldav``.
 """
 
 from __future__ import annotations
@@ -31,12 +37,19 @@ class ReadOnlyViolationError(RuntimeError):
     """Raised when code attempts a non-read method against CalDAV."""
 
 
+class InsecureTransportError(RuntimeError):
+    """Raised when a CalDAV request would leave HTTPS."""
+
+
 def _check(request: httpx.Request) -> None:
-    """Raise ReadOnlyViolationError unless the request method is a read method."""
+    """Refuse non-read methods and non-HTTPS URLs before any I/O."""
     method = request.method.upper()
     if method not in ALLOWED_METHODS:
         msg = f"CalDAV collector is read-only; refused {method} {request.url.path}"
         raise ReadOnlyViolationError(msg)
+    if request.url.scheme != "https":
+        msg = f"CalDAV collector requires https; refused {request.url.scheme}://"
+        raise InsecureTransportError(msg)
 
 
 class ReadOnlyTransport(httpx.BaseTransport):
@@ -116,7 +129,16 @@ def build_readonly_client(  # noqa: PLR0913 - keyword-only options
 
     Returns:
         A configured client.
+
+    Raises:
+        InsecureTransportError: If ``base_url`` is not an https URL.
     """
+    if not base_url.lower().startswith("https://"):
+        msg = "CalDAV base URL must use https://"
+        raise InsecureTransportError(msg)
+    # #ASSUME: External resources: iCloud answers within 30 s; a timeout is a
+    # source failure (DATA-011, run incomplete), never an empty calendar.
+    # Retries with backoff belong to the collector (M1), not this transport.
     return httpx.Client(
         base_url=base_url,
         auth=auth,

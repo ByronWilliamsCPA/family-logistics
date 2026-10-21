@@ -24,6 +24,7 @@ services:
       FL_HA_TOKEN: ${FL_HA_TOKEN:?set FL_HA_TOKEN (>= 32 chars) in .env}
       FL_TIMEZONE: ${FL_TIMEZONE:-America/Los_Angeles}
       FL_NOTIFICATION_MODE: shadow
+      FL_JSON_LOGS: ${FL_JSON_LOGS:-true}
       FL_ROUTE_PROVIDER: ${FL_ROUTE_PROVIDER:-static}
       FL_LLM_ENABLED: "false"
     volumes:

@@ -35,13 +35,12 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 
 def _attach_optional_details(
-    details: dict[str, Any],
-    **fields: Any,
-) -> dict[str, Any]:
+    details: dict[str, object],
+    **fields: object,
+) -> dict[str, object]:
     """Add non-None field values to a details dict.
 
     Used by exception ``__init__`` methods to consolidate the repeated
@@ -108,7 +107,7 @@ class ProjectBaseError(Exception):
         self,
         message: str,
         *,
-        details: dict[str, Any] | None = None,
+        details: dict[str, object] | None = None,
         error_code: str | None = None,
     ) -> None:
         super().__init__(message)
@@ -116,13 +115,13 @@ class ProjectBaseError(Exception):
         self.details = details or {}
         self.error_code = error_code
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         """Convert exception to dictionary for API responses.
 
         Returns:
             Dictionary with error details suitable for JSON serialization.
         """
-        result: dict[str, Any] = {
+        result: dict[str, object] = {
             "error": self.__class__.__name__,
             "message": self.message,
         }
@@ -173,8 +172,8 @@ class ValidationError(ProjectBaseError):
         message: str,
         *,
         field: str | None = None,
-        value: Any = None,
-        details: dict[str, Any] | None = None,
+        value: object = None,
+        details: dict[str, object] | None = None,
         error_code: str | None = None,
     ) -> None:
         details = _attach_optional_details(details or {}, field=field)
@@ -215,7 +214,7 @@ class ResourceNotFoundError(ProjectBaseError):
         *,
         resource_type: str | None = None,
         resource_id: str | None = None,
-        details: dict[str, Any] | None = None,
+        details: dict[str, object] | None = None,
         error_code: str | None = None,
     ) -> None:
         details = _attach_optional_details(
@@ -244,7 +243,7 @@ class AuthenticationError(ProjectBaseError):
         self,
         message: str = "Authentication failed",
         *,
-        details: dict[str, Any] | None = None,
+        details: dict[str, object] | None = None,
         error_code: str | None = None,
     ) -> None:
         super().__init__(
@@ -278,7 +277,7 @@ class AuthorizationError(ProjectBaseError):
         *,
         required_permission: str | None = None,
         resource: str | None = None,
-        details: dict[str, Any] | None = None,
+        details: dict[str, object] | None = None,
         error_code: str | None = None,
     ) -> None:
         details = _attach_optional_details(
@@ -315,7 +314,7 @@ class ExternalServiceError(ProjectBaseError):
         *,
         service_name: str | None = None,
         status_code: int | None = None,
-        details: dict[str, Any] | None = None,
+        details: dict[str, object] | None = None,
         error_code: str | None = None,
     ) -> None:
         details = _attach_optional_details(
@@ -360,7 +359,7 @@ class APIError(ExternalServiceError):
         status_code: int | None = None,
         retry_after: int | None = None,
         context: APIErrorContext | None = None,
-        details: dict[str, Any] | None = None,
+        details: dict[str, object] | None = None,
         error_code: str | None = None,
     ) -> None:
         if context is not None:
@@ -411,7 +410,7 @@ class DatabaseError(ExternalServiceError):
         *,
         operation: str | None = None,
         table: str | None = None,
-        details: dict[str, Any] | None = None,
+        details: dict[str, object] | None = None,
         error_code: str | None = None,
     ) -> None:
         details = _attach_optional_details(
@@ -452,8 +451,8 @@ class BusinessLogicError(ProjectBaseError):
         message: str,
         *,
         rule: str | None = None,
-        context: dict[str, Any] | None = None,
-        details: dict[str, Any] | None = None,
+        context: dict[str, object] | None = None,
+        details: dict[str, object] | None = None,
         error_code: str | None = None,
     ) -> None:
         details = _attach_optional_details(

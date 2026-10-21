@@ -53,7 +53,8 @@ ENV PYTHONPATH=/opt/app \
     PYTHONUNBUFFERED=1 \
     FL_DATABASE_PATH=/data/family_logistics.db \
     FL_BIND_HOST=0.0.0.0 \
-    FL_PORT=8080
+    FL_PORT=8080 \
+    FL_JSON_LOGS=true
 
 # Bare numeric UID: no /etc/passwd entry needed on distroless. The host state
 # directory /data/family-logistics is created owned by 65532 before the first
@@ -68,4 +69,7 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=30s \
     CMD ["python", "-m", "family_logistics", "healthcheck"]
 
 ENTRYPOINT ["python", "-m", "family_logistics"]
-CMD ["serve"]
+# The app is the database's only writer and owns its schema: it upgrades to the
+# packaged head at start. Downgrades are an explicit operator action
+# (`migrate --downgrade --revision <rev>`).
+CMD ["serve", "--upgrade-db"]

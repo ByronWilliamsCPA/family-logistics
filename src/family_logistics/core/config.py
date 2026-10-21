@@ -2,7 +2,9 @@
 
 Settings are loaded from environment variables with the prefix ``FL_`` (for
 example ``FL_TIMEZONE``). Secrets are typed as ``SecretStr`` so they never
-appear in ``repr()`` output or structured logs.
+appear in ``repr()`` output or structured logs, and validation errors never
+echo the rejected input (``hide_input_in_errors``); ``load_settings`` turns a
+validation failure into a ``ConfigurationError`` that names fields only.
 
 #CRITICAL: Security: secrets (CalDAV app password, HA token, routing and LLM
 keys) arrive only through the environment, injected by the deployment's secret
@@ -19,7 +21,10 @@ from typing import Annotated, Literal
 
 from cryptography.fernet import Fernet
 from pydantic import Field, SecretStr, field_validator
+from pydantic import ValidationError as PydanticValidationError
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from family_logistics.core.exceptions import ConfigurationError
 
 HA_TOKEN_MIN_LENGTH = 32
 """Minimum length of the bearer token Home Assistant presents (ADR-0007)."""
@@ -32,6 +37,56 @@ CommaList = Annotated[list[str], NoDecode]
 DEFAULT_PROXY_TRUSTED_CIDRS: tuple[str, ...] = ()
 """No proxy is trusted by default: identity headers are ignored until the
 deployment sets ``FL_PROXY_TRUSTED_CIDRS`` to its reverse proxy's address."""
+
+
+CONSUMED = "consumed"
+M1, M2, M3, M4, M5 = "M1", "M2", "M3", "M4", "M5"
+
+FIELD_STATUS: dict[str, str] = {
+    "log_level": CONSUMED,
+    "json_logs": CONSUMED,
+    "include_timestamp": CONSUMED,
+    "bind_host": CONSUMED,
+    "port": CONSUMED,
+    "timezone": M1,
+    "database_path": CONSUMED,
+    "caldav_url": M1,
+    "caldav_username": M1,
+    "caldav_app_password": M1,
+    "caldav_calendars": M1,
+    "ha_token": CONSUMED,
+    "apprise_url": CONSUMED,
+    "apprise_tag_report": M3,
+    "apprise_tag_status": M3,
+    "apprise_tag_warning": M3,
+    "apprise_tag_urgent": M3,
+    "apprise_tag_ops": CONSUMED,
+    "apprise_tag_shadow": M3,
+    "proxy_trusted_cidrs": M4,
+    "ui_allowed_users": M4,
+    "data_key": CONSUMED,
+    "route_provider": M3,
+    "google_routes_api_key": M3,
+    "routes_monthly_budget_usd": M3,
+    "routes_budget_warn_usd": M3,
+    "llm_enabled": M5,
+    "llm_base_url": M5,
+    "llm_api_key": M5,
+    "llm_model": M5,
+    "weekly_cron": M3,
+    "daily_cron": M3,
+    "change_scan_minutes": M3,
+    "notification_mode": CONSUMED,
+    "quiet_hours_start": M3,
+    "quiet_hours_end": M3,
+    "imminent_window_minutes": M3,
+}
+"""Whether each setting is read today or waits for a milestone.
+
+Settings marked with a milestone are defined ahead of the code that reads
+them so the deployment contract is stable; a test fails when a field is added
+without an entry here, so no setting can become silently dead.
+"""
 
 
 class Settings(BaseSettings):
@@ -93,6 +148,9 @@ class Settings(BaseSettings):
         env_prefix="FL_",
         case_sensitive=False,
         extra="ignore",
+        # #CRITICAL: Security: a rejected secret (short HA token, malformed
+        # data key) must never be echoed in an error or traceback.
+        hide_input_in_errors=True,
     )
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
@@ -167,6 +225,27 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return value
 
+    @field_validator("caldav_url")
+    @classmethod
+    def _caldav_url_is_https(cls, value: str) -> str:
+        """Require HTTPS for the CalDAV endpoint.
+
+        Args:
+            value: The configured base URL.
+
+        Returns:
+            The unchanged value.
+
+        Raises:
+            ValueError: If the URL does not use the https scheme.
+        """
+        # #CRITICAL: Security: Basic credentials (the app-specific password)
+        # travel with every CalDAV request; plain HTTP would expose them.
+        if not value.lower().startswith("https://"):
+            msg = "FL_CALDAV_URL must use https://"
+            raise ValueError(msg)
+        return value
+
     @field_validator("proxy_trusted_cidrs", "ui_allowed_users", mode="before")
     @classmethod
     def _split_comma_list(cls, value: object) -> object:
@@ -234,6 +313,28 @@ class Settings(BaseSettings):
         return [c.strip() for c in self.caldav_calendars.split(",") if c.strip()]
 
 
+def load_settings() -> Settings:
+    """Build settings from the environment without leaking rejected values.
+
+    Returns:
+        Settings built from the environment.
+
+    Raises:
+        ConfigurationError: If any setting is invalid. The message and details
+            name the offending ``FL_`` variables and the reason only, never
+            the value.
+    """
+    try:
+        return Settings()
+    except PydanticValidationError as exc:
+        problems = [
+            f"FL_{'_'.join(str(part) for part in error['loc']).upper()}: {error['msg']}"
+            for error in exc.errors(include_input=False, include_url=False)
+        ]
+        msg = "Invalid configuration: " + "; ".join(problems)
+        raise ConfigurationError(msg, details={"problems": problems}) from None
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return the process-wide settings instance.
@@ -241,4 +342,4 @@ def get_settings() -> Settings:
     Returns:
         Cached Settings built from the environment.
     """
-    return Settings()
+    return load_settings()

@@ -145,9 +145,10 @@ class TestCli:
         monkeypatch.setattr(uvicorn, "run", lambda app, **kw: calls.update(kw))
         monkeypatch.setenv("FL_BIND_HOST", ALL_INTERFACES)
         monkeypatch.setenv("FL_PORT", "8081")
-        result = CliRunner().invoke(cli, ["serve"])
+        result = CliRunner().invoke(cli, ["serve", "--upgrade-db"])
         assert result.exit_code == 0, result.output
         assert calls["workers"] == 1
+        assert calls["log_config"] is None
         assert (calls["host"], calls["port"]) == (ALL_INTERFACES, 8081)
 
     def test_healthcheck_fails_when_nothing_listens(self, monkeypatch, fresh_settings):

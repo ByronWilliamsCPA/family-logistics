@@ -1,8 +1,8 @@
 """Health endpoint.
 
 ``GET /healthz`` is the only unauthenticated route. It reports whether the
-process is up and the database answers; it reveals nothing else. Uptime Kuma
-and the container healthcheck both use it.
+process is up and the database answers; it reveals nothing else. The external
+uptime monitor and the container healthcheck both use it.
 """
 
 from __future__ import annotations

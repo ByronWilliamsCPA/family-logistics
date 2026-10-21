@@ -95,3 +95,32 @@ async def test_async_transport_blocks_and_allows():
         response = await client.request("REPORT", "https://x.invalid/a")
     assert response.status_code == 207
     assert recorder.seen == ["REPORT"]
+
+
+@pytest.mark.unit
+class TestHttpsOnly:
+    def test_client_refuses_http_base_url(self):
+        from family_logistics.adapters.caldav.readonly_transport import (
+            InsecureTransportError,
+        )
+
+        with pytest.raises(InsecureTransportError):
+            build_readonly_client("http://caldav.example.invalid")
+
+    def test_redirect_to_http_refused_before_io(self):
+        from family_logistics.adapters.caldav.readonly_transport import (
+            InsecureTransportError,
+        )
+
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            return httpx.Response(301, headers={"Location": "http://x.invalid/b"})
+
+        client = build_readonly_client(
+            "https://x.invalid", inner=httpx.MockTransport(handler)
+        )
+        with pytest.raises(InsecureTransportError):
+            client.request("PROPFIND", "/a")
+        assert calls == ["https://x.invalid/a"]
