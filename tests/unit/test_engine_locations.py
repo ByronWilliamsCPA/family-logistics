@@ -58,6 +58,14 @@ class TestKeys:
         assert resolver.key_for("studio", "sam") == "studio"
         assert resolver.key_for("home", None) == "home"
 
+    def test_keys_map_back_to_registry_locations(self, resolver):
+        assert resolver.location_id_of("home:sam") == "home"
+        assert resolver.location_id_of("home:riley") == "home"
+        assert resolver.location_id_of("studio") == "studio"
+        assert resolver.location_id_of("home:ext-driver-s") is None
+        assert resolver.location_id_of("home:nobody") is None
+        assert resolver.location_id_of(text_key("Some Park")) is None
+
     def test_labels_never_reveal_addresses(self, resolver):
         assert resolver.label("home:sam") == "home"
         assert resolver.label("studio") == "Music Studio"

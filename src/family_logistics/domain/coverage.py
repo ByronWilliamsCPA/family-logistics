@@ -116,8 +116,13 @@ def _driver_busy(ctx: AssessmentContext, driver_id: str, tr: Transition) -> bool
     """Report whether a default's driver is committed elsewhere at the move."""
     start = tr.reference_time
     end = start + ctx.settings.pickup_tolerance
+    keys = {tr.from_key, tr.to_key}
+    ids = {ctx.resolver.location_id_of(k) for k in keys} - {None}
     return any(
-        c.start < end and start < c.end and c.start_key not in {tr.from_key, tr.to_key}
+        c.start < end
+        and start < c.end
+        and c.start_key not in keys
+        and c.start_location_id not in ids
         for c in commitments(ctx, driver_id)
     )
 

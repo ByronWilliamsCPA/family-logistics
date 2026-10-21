@@ -13,8 +13,10 @@ one place. Rules:
 - A *transition* is a required move: home to the first stay of a day, between
   stays at different places, and from the last stay of a day back home. A
   child is never inferred home because an activity ended.
-- A stay that continues at the same place the next day (an overnight) needs no
-  return home and no morning trip there.
+- A stay that continues at the same place the next local day after an idle
+  gap of at most the overnight limit (an overnight) needs no return home and
+  no morning trip there. The same place on later days, or after a longer gap
+  (a weekly lesson), still needs both moves.
 
 Times are UTC; "day" means the local calendar day in the assessment timezone.
 """
@@ -32,6 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
     from datetime import date, datetime, timedelta, tzinfo
 
+    from family_logistics.domain.context import EngineSettings
     from family_logistics.domain.events import Activity, AssessmentInput, SchoolDay
     from family_logistics.domain.locations import LocationResolver
     from family_logistics.domain.models import Person
@@ -246,8 +249,34 @@ def _local_day(value: datetime, zone: tzinfo) -> date:
     return value.astimezone(zone).date()
 
 
+def _overnight(a: Stay, b: Stay, zone: tzinfo, limit: timedelta) -> bool:
+    """Report whether stay ``b`` continues stay ``a`` overnight.
+
+    #ASSUME: Timing: a same-place stay is an overnight only when it starts on
+    the next local day within ``limit`` of the previous one ending.
+    #VERIFY during the shadow period that the limit neither hides a weekly or
+    daily repeat at one place nor flags a genuine sleepover.
+
+    Args:
+        a: The earlier stay.
+        b: The stay right after it.
+        zone: Local timezone for day boundaries.
+        limit: Largest idle gap that still counts as staying overnight.
+
+    Returns:
+        True when both stays are at the same place, ``b`` starts on the local
+        day after ``a`` started, and the idle gap is at most ``limit``.
+    """
+    next_day = _local_day(a.start, zone).toordinal() + 1
+    return (
+        a.key == b.key
+        and _local_day(b.start, zone).toordinal() == next_day
+        and b.start - a.end <= limit
+    )
+
+
 def transitions_for(
-    stays: Sequence[Stay], home_key: str, zone: tzinfo
+    stays: Sequence[Stay], home_key: str, zone: tzinfo, overnight_gap: timedelta
 ) -> tuple[Transition, ...]:
     """Derive the moves a person must make between stays and home.
 
@@ -255,6 +284,8 @@ def transitions_for(
         stays: The person's stays in time order.
         home_key: Location key of the person's home.
         zone: Local timezone for day boundaries.
+        overnight_gap: Largest idle gap between same-place stays on
+            consecutive days that still counts as staying overnight.
 
     Returns:
         Required moves in time order.
@@ -266,7 +297,7 @@ def transitions_for(
         nxt = stays[index + 1] if index + 1 < len(stays) else None
         first_today = prev is None or _local_day(prev.start, zone) != day
         if first_today:
-            overnight = prev is not None and prev.key == stay.key
+            overnight = prev is not None and _overnight(prev, stay, zone, overnight_gap)
             if not overnight and stay.key != home_key:
                 moves.append(
                     Transition(
@@ -293,7 +324,7 @@ def transitions_for(
                 )
             )
         last_today = nxt is None or _local_day(nxt.start, zone) != day
-        continues = nxt is not None and nxt.key == stay.key
+        continues = nxt is not None and _overnight(stay, nxt, zone, overnight_gap)
         if last_today and not continues and stay.key != home_key:
             moves.append(
                 Transition(
@@ -328,7 +359,7 @@ def monitored_children(inp: AssessmentInput) -> tuple[Person, ...]:
 def build_timelines(
     inp: AssessmentInput,
     resolver: LocationResolver,
-    gap: timedelta,
+    settings: EngineSettings,
     zone: tzinfo,
 ) -> tuple[DayTimeline, ...]:
     """Build day timelines for every monitored child.
@@ -339,7 +370,8 @@ def build_timelines(
     Args:
         inp: Assessment input.
         resolver: Location resolver.
-        gap: Same-location merge gap.
+        settings: Engine thresholds (the same-location merge gap and the
+            overnight gap).
         zone: Local timezone.
 
     Returns:
@@ -359,8 +391,10 @@ def build_timelines(
             if sd.person_id == pid
             and (block := _school_block(sd, resolver)) is not None
         )
-        stays = merge_blocks(pid, blocks, gap)
-        moves = transitions_for(stays, resolver.home_key(pid), zone)
+        stays = merge_blocks(pid, blocks, settings.same_location_gap)
+        moves = transitions_for(
+            stays, resolver.home_key(pid), zone, settings.overnight_gap
+        )
         days = sorted({_local_day(s.start, zone) for s in stays})
         timelines.extend(
             DayTimeline(

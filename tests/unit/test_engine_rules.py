@@ -10,6 +10,7 @@ from fl_engine import (
     MINUTE,
     NOW,
     PEOPLE,
+    THURSDAY,
     activity,
     assessment,
     at,
@@ -30,6 +31,18 @@ from family_logistics.domain.events import (
 from family_logistics.domain.models import RunStatus, Severity
 
 pytestmark = pytest.mark.unit
+
+
+class RecordingRoutes(StaticRouteProvider):
+    """Static provider that records every requested leg."""
+
+    def __init__(self, matrix):
+        super().__init__(matrix)
+        self.calls = []
+
+    def estimate(self, origin, destination, departure_time, mode):
+        self.calls.append((origin, destination))
+        return super().estimate(origin, destination, departure_time, mode)
 
 
 def confirmed(t):
@@ -188,6 +201,42 @@ class TestCoverage:
         assert len(busy) == 1
         assert "Riley" in busy[0].message
 
+    def test_parent_default_driver_at_the_shared_home_is_not_busy(self):
+        inp = assessment(
+            school_days=(school("jordan", at(8), at(15), location_id="middle-school"),),
+            activities=(activity("work", ("riley",), "home", at(14), at(16)),),
+            defaults=(
+                default(
+                    "jordan",
+                    TransportDirection.FROM_SCHOOL,
+                    TransportMode.PARENT,
+                    driver_id="riley",
+                    school_id="middle-school",
+                ),
+                default(
+                    "jordan",
+                    TransportDirection.TO_SCHOOL,
+                    TransportMode.WALK,
+                    school_id="middle-school",
+                ),
+            ),
+        )
+        assert rules(run(inp), "DRIVER-006") == []
+
+    def test_same_lesson_on_consecutive_days_needs_both_rides(self):
+        thursday = activity(
+            "lesson-thu",
+            ("sam",),
+            "studio",
+            at(16, day=THURSDAY),
+            at(17, day=THURSDAY),
+        )
+        missing = rules(run(assessment(activities=(thursday, LESSON))), "RIDE-005")
+        assert sorted(f.entity_keys[2:] for f in missing) == [
+            ("from:home:sam", "to:studio"),
+            ("from:studio", "to:home:sam"),
+        ]
+
     def test_unregistered_place_is_incomplete(self):
         park = activity("park", ("sam",), None, at(16), at(17), text="Some Park")
         result = run(assessment(activities=(park,)))
@@ -260,6 +309,17 @@ class TestDriver:
         result = run(assessment(activities=(LESSON, watching), trips=(FROM_LESSON,)))
         assert rules(result, "DRIVER-006") == []
 
+    def test_driver_at_home_is_not_a_conflict_for_a_home_pickup(self):
+        at_home = activity("desk", ("riley",), "home", at(15), at(15, 45))
+        result = run(assessment(activities=(LESSON, at_home), trips=(TO_LESSON,)))
+        assert rules(result, "DRIVER-006") == []
+
+    def test_driver_at_home_conflicts_with_a_pickup_elsewhere(self):
+        at_home = activity("desk", ("riley",), "home", at(16, 50), at(17, 20))
+        result = run(assessment(activities=(LESSON, at_home), trips=(FROM_LESSON,)))
+        flagged = rules(result, "DRIVER-006")
+        assert [f.severity for f in flagged] == [Severity.CRITICAL]
+
     def test_unregistered_driver_event_is_a_warning(self):
         errand = activity("errand", ("riley",), None, at(17), at(17, 20), text="Errand")
         result = run(assessment(activities=(errand,), trips=(FROM_LESSON,)))
@@ -305,6 +365,22 @@ class TestDriver:
         )
         result = run(assessment(trips=(first, second)), StaticRouteProvider({}))
         assert any("pickup" in f.message for f in rules(result, "ROUTE-010"))
+
+    def test_next_pickup_at_the_same_home_needs_no_route(self):
+        dropoff = ride("drop", at(16), at(16, 30))
+        outbound = ride(
+            "out",
+            at(16, 40),
+            at(17, 10),
+            pickup="Home",
+            family="Jordan",
+            destinations=(("Jordan", "Music Studio"),),
+        )
+        provider = RecordingRoutes({})
+        result = run(assessment(trips=(dropoff, outbound)), provider)
+        assert not any("pickup" in f.message for f in rules(result, "ROUTE-010"))
+        assert [c for c in provider.calls if c[0] == c[1]] == []
+        assert rules(result, "DRIVER-006") == []
 
 
 class TestRide:

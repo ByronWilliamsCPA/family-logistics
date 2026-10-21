@@ -187,7 +187,7 @@ def assess(  # noqa: PLR0913 - settings and history are keyword-only options
     settings = settings or EngineSettings()
     history = history or AssessmentHistory()
     ctx = AssessmentContext.create(inp, settings, route_provider, now)
-    timelines = build_timelines(inp, ctx.resolver, settings.same_location_gap, ctx.zone)
+    timelines = build_timelines(inp, ctx.resolver, settings, ctx.zone)
     stays: dict[str, tuple[Stay, ...]] = {}
     for timeline in timelines:
         stays[timeline.person_id] = (

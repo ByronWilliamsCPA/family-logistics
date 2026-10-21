@@ -141,6 +141,23 @@ def _leg_findings(
     ]
 
 
+def _same_place(
+    key: str | None,
+    location_id: str | None,
+    keys: set[str | None],
+    location_ids: set[str | None],
+) -> bool:
+    """Report whether a place matches any of others by key or registry ID.
+
+    A driver's own home activity is keyed ``home:<driver>`` while a ride
+    pickup at the same registered home is keyed by its location ID, so keys
+    alone miss same-place matches; the registry ID settles them.
+    """
+    if key is not None and key in keys:
+        return True
+    return location_id is not None and location_id in location_ids
+
+
 def _overlap(a: Commitment, b: Commitment) -> bool:
     """Report whether two commitments overlap in time."""
     return a.start < b.end and b.start < a.end
@@ -153,7 +170,12 @@ def _overlap_findings(
     if ride.trip is None:  # pragma: no cover - callers pass rides only
         return []
     known = ride.start_key is not None and other.start_key is not None
-    if known and ride.start_key in {other.start_key, other.end_key}:
+    if known and _same_place(
+        ride.start_key,
+        ride.start_location_id,
+        {other.start_key, other.end_key},
+        {other.start_location_id, other.end_location_id},
+    ):
         return []
     who = ctx.display_name(ride.driver_id)
     message = f"{who} is also committed to {other.label} at {ctx.when(other.start)}."
@@ -175,7 +197,10 @@ def _reachability_findings(
     if nxt.trip is None or prev.end_key is None or nxt.start_key is None:
         return []
     gap = nxt.start - prev.end
-    if prev.end_key == nxt.start_key or not (
+    same = _same_place(
+        prev.end_key, prev.end_location_id, {nxt.start_key}, {nxt.start_location_id}
+    )
+    if same or not (
         gap.total_seconds() >= 0 and gap <= ctx.settings.reachability_window
     ):
         return []

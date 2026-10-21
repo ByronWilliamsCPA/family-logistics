@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 from fl_engine import (
+    FRIDAY,
     LOCATIONS,
     MINUTE,
     PEOPLE,
@@ -15,17 +18,26 @@ from fl_engine import (
     school,
 )
 
+from family_logistics.domain.context import EngineSettings
 from family_logistics.domain.events import SchoolDayKind
 from family_logistics.domain.locations import LocationResolver
 from family_logistics.domain.timeline import build_timelines
 
 pytestmark = pytest.mark.unit
 GAP = 60 * MINUTE
+OVERNIGHT = 14 * 60 * MINUTE
+WEDNESDAY = date(2026, 10, 21)
 
 
-def timelines(inp):
+def timelines(inp, overnight=OVERNIGHT):
     resolver = LocationResolver(LOCATIONS, PEOPLE, inp.external_passengers)
-    return build_timelines(inp, resolver, GAP, ZONE)
+    settings = EngineSettings(same_location_gap=GAP, overnight_gap=overnight)
+    return build_timelines(inp, resolver, settings, ZONE)
+
+
+def all_moves(inp, overnight=OVERNIGHT):
+    days = [t for t in timelines(inp, overnight) if t.person_id == "sam"]
+    return [(m.day, m.from_key, m.to_key) for d in days for m in d.transitions]
 
 
 def only(inp, person_id="sam"):
@@ -136,6 +148,58 @@ class TestMoves:
             ("game", "home:sam"),
         ]
         assert moves[0].day == THURSDAY
+
+    def test_same_place_on_consecutive_days_is_not_an_overnight(self):
+        inp = assessment(
+            activities=(
+                activity(
+                    "l1", ("sam",), "studio", at(16, day=THURSDAY), at(17, day=THURSDAY)
+                ),
+                activity("l2", ("sam",), "studio", at(16), at(17)),
+            )
+        )
+        assert all_moves(inp) == [
+            (THURSDAY, "home:sam", "studio"),
+            (THURSDAY, "studio", "home:sam"),
+            (FRIDAY, "home:sam", "studio"),
+            (FRIDAY, "studio", "home:sam"),
+        ]
+
+    def test_overnight_gap_beyond_the_limit_is_not_exempt(self):
+        inp = assessment(
+            activities=(
+                activity(
+                    "s1", ("sam",), "game", at(19, day=THURSDAY), at(23, day=THURSDAY)
+                ),
+                activity("s2", ("sam",), "game", at(8), at(10)),
+            )
+        )
+        assert all_moves(inp, overnight=8 * 60 * MINUTE) == [
+            (THURSDAY, "home:sam", "game"),
+            (THURSDAY, "game", "home:sam"),
+            (FRIDAY, "home:sam", "game"),
+            (FRIDAY, "game", "home:sam"),
+        ]
+
+    def test_same_place_two_days_apart_is_not_exempt(self):
+        inp = assessment(
+            activities=(
+                activity(
+                    "s1",
+                    ("sam",),
+                    "game",
+                    at(20, day=WEDNESDAY),
+                    at(23, day=WEDNESDAY),
+                ),
+                activity("s2", ("sam",), "game", at(8), at(10)),
+            )
+        )
+        assert all_moves(inp, overnight=48 * 60 * MINUTE) == [
+            (WEDNESDAY, "home:sam", "game"),
+            (WEDNESDAY, "game", "home:sam"),
+            (FRIDAY, "home:sam", "game"),
+            (FRIDAY, "game", "home:sam"),
+        ]
 
     def test_activity_at_home_needs_no_move(self):
         inp = assessment(activities=(activity("h", ("sam",), "home", at(16), at(17)),))

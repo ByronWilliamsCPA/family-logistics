@@ -48,6 +48,9 @@ class EngineSettings:
     Attributes:
         same_location_gap: Largest idle gap that still merges two activities at
             one place into a single stay.
+        overnight_gap: Largest idle gap between same-place stays on
+            consecutive local days that still counts as staying overnight
+            (no return home, no morning trip).
         travel_buffer: Arrive this long before a deadline.
         stop_buffer: Loading or unloading time per stop.
         pickup_tolerance: A ride covering a pickup must start no later than
@@ -65,6 +68,7 @@ class EngineSettings:
     """
 
     same_location_gap: timedelta = timedelta(minutes=60)
+    overnight_gap: timedelta = timedelta(hours=14)
     travel_buffer: timedelta = timedelta(minutes=10)
     stop_buffer: timedelta = timedelta(minutes=5)
     pickup_tolerance: timedelta = timedelta(minutes=30)
@@ -87,6 +91,7 @@ class EngineSettings:
         """
         return cls(
             same_location_gap=timedelta(minutes=settings.same_location_gap_minutes),
+            overnight_gap=timedelta(hours=settings.overnight_gap_hours),
             travel_buffer=timedelta(minutes=settings.travel_buffer_minutes),
             stop_buffer=timedelta(minutes=settings.stop_buffer_minutes),
             imminent_window=timedelta(minutes=settings.imminent_window_minutes),
