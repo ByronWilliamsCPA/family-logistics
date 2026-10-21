@@ -17,8 +17,10 @@
 # Stage 1: builder. The -dev variant has a shell and package tooling.
 # Source: dhi.io/python 3.12 debian13 -dev, mirrored at
 # ghcr.io/byronwilliamscpa/dhi-python. Digest-only pin: the tag floats.
+# Digests refreshed 2026-10-21 (3.12-debian13-dev / 3.12-debian13) for fixed
+# HIGH CVEs in sqlite, openssl and util-linux.
 # -----------------------------------------------------------------------------
-FROM ghcr.io/byronwilliamscpa/dhi-python@sha256:fe90645fdf287796e54df8b16360094e0001c607f7105ce3c15f026a6bcf2a3b AS builder
+FROM ghcr.io/byronwilliamscpa/dhi-python@sha256:a023ddf6381a557057fc1a003ebd3bc95463cedee8955bd2744db1add26a7f0c AS builder
 
 WORKDIR /build
 COPY --from=ghcr.io/astral-sh/uv:0.8.17@sha256:e4644cb5bd56fdc2c5ea3ee0525d9d21eed1603bccd6a21f887a938be7e85be1 /uv /usr/local/bin/uv
@@ -38,7 +40,7 @@ RUN uv export --frozen --no-dev --no-emit-project --output-file /tmp/requirement
 # Source: dhi.io/python 3.12 debian13, mirrored at
 # ghcr.io/byronwilliamscpa/dhi-python. Digest-only pin.
 # -----------------------------------------------------------------------------
-FROM ghcr.io/byronwilliamscpa/dhi-python@sha256:a5425367554af74a6894e94ed3e98fee761973235307fc92438850163bf5f200
+FROM ghcr.io/byronwilliamscpa/dhi-python@sha256:5484dba6d3ba3feebcecd30804b3c795446d63643b6062bc7e8e2d54836f8aef
 
 LABEL org.opencontainers.image.title="family-logistics"
 LABEL org.opencontainers.image.description="Deterministic family transportation assurance"
