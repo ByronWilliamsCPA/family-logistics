@@ -113,12 +113,14 @@ class TestHistory:
 def test_engine_settings_from_config():
     settings = Settings(
         same_location_gap_minutes=45,
+        overnight_gap_hours=10,
         travel_buffer_minutes=12,
         stop_buffer_minutes=3,
         imminent_window_minutes=60,
     )
     engine = EngineSettings.from_config(settings)
     assert engine.same_location_gap == timedelta(minutes=45)
+    assert engine.overnight_gap == timedelta(hours=10)
     assert engine.travel_buffer == timedelta(minutes=12)
     assert engine.stop_buffer == timedelta(minutes=3)
     assert engine.imminent_window == timedelta(minutes=60)

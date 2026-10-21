@@ -89,6 +89,7 @@ FIELD_STATUS: dict[str, str] = {
     "quiet_hours_end": M3,
     "imminent_window_minutes": CONSUMED,
     "same_location_gap_minutes": CONSUMED,
+    "overnight_gap_hours": CONSUMED,
     "travel_buffer_minutes": CONSUMED,
     "stop_buffer_minutes": CONSUMED,
 }
@@ -163,6 +164,9 @@ class Settings(BaseSettings):
             unverified destination on them is critical.
         same_location_gap_minutes: Largest idle gap between two activities at
             one place that still counts as a single stay (no ride needed).
+        overnight_gap_hours: Largest idle gap between stays at one place on
+            consecutive local days that still counts as staying overnight (no
+            return home and no morning trip).
         travel_buffer_minutes: Arrive this long before a passenger's next
             activity.
         stop_buffer_minutes: Loading or unloading time per ride stop.
@@ -239,6 +243,7 @@ class Settings(BaseSettings):
     # #ASSUME: Timing: proposed defaults pending owner approval (defaults
     # register); tuned during the shadow period.
     same_location_gap_minutes: int = Field(default=60, ge=0)
+    overnight_gap_hours: int = Field(default=14, ge=0)
     travel_buffer_minutes: int = Field(default=10, ge=0)
     stop_buffer_minutes: int = Field(default=5, ge=0)
 

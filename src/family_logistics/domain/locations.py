@@ -161,6 +161,25 @@ class LocationResolver:
             return self.home_key(person.person_id)
         return location_id
 
+    def location_id_of(self, key: str) -> str | None:
+        """Return the registry location a location key refers to.
+
+        Keys from different perspectives (``home:<person>`` for one person,
+        the bare location ID for another) name the same place when they map
+        to the same registry location.
+
+        Args:
+            key: Location key.
+
+        Returns:
+            The person's registered home for a home key, the location ID for a
+            registry key, or None for an unregistered place or home.
+        """
+        if key.startswith(HOME_PREFIX):
+            person = self._people.get(key.removeprefix(HOME_PREFIX))
+            return person.home_location_id if person is not None else None
+        return key if key in self._locations else None
+
     def label(self, key: str) -> str:
         """Return a display label for a location key (never an address).
 
