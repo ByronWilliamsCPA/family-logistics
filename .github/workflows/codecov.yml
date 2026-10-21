@@ -9,6 +9,8 @@ name: Codecov Upload
 
 on:
   # Trigger after CI workflow completes
+  # zizmor: ignore[dangerous-triggers] -- only consumes coverage artifacts from
+  # same-repository CI runs (job condition); never checks out or runs PR code.
   workflow_run:
     workflows: ["CI"]
     types: [completed]
@@ -22,8 +24,10 @@ jobs:
   codecov:
     name: Upload Coverage
     # Only run on successful CI completion
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-codecov.yml@main
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-codecov.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
     with:
       artifact-name: 'coverage-reports'
       coverage-files: '*.xml'
@@ -36,12 +40,13 @@ jobs:
   report-failure:
     name: Report CI Failure
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: ${{ github.event.workflow_run.conclusion == 'failure' }}
     permissions:
       contents: read
     steps:
       - name: Harden the runner
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
 

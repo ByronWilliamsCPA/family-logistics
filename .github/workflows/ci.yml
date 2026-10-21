@@ -1,18 +1,18 @@
 # CI/CD Pipeline
-# Runs tests, linting, type checking, and security scans.
+# Runs tests, linting, type checking, security tests and an advisory dead-code
+# scan through the organization's reusable CI workflow.
 #
-# Features:
-#   - Standard quality checks (tests, linting, type checking)
-#   - Security scanning (Bandit)
-#   - Optional SonarCloud/Codecov integration
+# SonarCloud and Codecov run in their own workflows (sonarcloud.yml and
+# codecov.yml); python-ci.yml takes no SonarCloud/Codecov inputs or secrets,
+# and passing undeclared inputs makes GitHub reject the run at startup.
 name: CI
 
 on:
   push:
-    branches: [main, master, develop]
+    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened]
-    branches: [main, master, develop]
+    branches: [main]
   workflow_dispatch:
 
 # Cancel in-progress runs for same PR/branch
@@ -22,47 +22,45 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write
-  checks: write
 
-# Uses org-level reusable workflow
 jobs:
   ci:
     name: CI Pipeline
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-ci.yml@main
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-ci.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
+    permissions:
+      contents: read
     with:
       python-version: '3.12'
       coverage-threshold: 80
       source-directory: 'src'
       test-directory: 'tests'
-      enable-sonarcloud: true
-      sonarcloud-organization: 'ByronWilliamsCPA'
-      sonarcloud-project-key: 'ByronWilliamsCPA_family_logistics'
-      enable-codecov: true
       run-integration-tests: true
       run-security-tests: true
       fail-on-llm-tags: false
-    secrets:
-      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      # Advisory only: vulture findings are reported, never fail the build.
+      enable-dead-code-check: true
+      fail-on-dead-code: false
 
   ci-gate:
     name: CI Gate
     runs-on: ubuntu-latest
     needs: [ci]
     if: always()
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
       - name: Harden the runner
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
 
       - name: Check CI results
+        env:
+          CI_RESULT: ${{ needs.ci.result }}
         run: |
-          if [ "${{ needs.ci.result }}" != "success" ]; then
-            echo "CI Gate failed"
+          if [ "$CI_RESULT" != "success" ]; then
+            echo "CI Gate failed: $CI_RESULT"
             exit 1
           fi
           echo "CI Gate passed"

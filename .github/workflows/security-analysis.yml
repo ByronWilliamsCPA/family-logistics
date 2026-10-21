@@ -15,7 +15,7 @@ name: Security Analysis
     branches: [main, master]
   schedule:
     # Run security scans weekly on Monday at 9 AM UTC
-    - cron: '0 9 * * 1'
+    - cron: '23 9 * * 2'
   workflow_dispatch:
 
 # Cancel in-progress runs for same PR/branch
@@ -25,14 +25,15 @@ concurrency:
 
 permissions:
   contents: read
-  security-events: write
-  pull-requests: write
 
 # Uses org-level reusable workflow
 jobs:
   security:
     name: Security Scan
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-security-analysis.yml@main
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-security-analysis.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
+    permissions:
+      contents: read
+      pull-requests: read
     with:
       source-directory: 'src'
       python-version: '3.12'
@@ -46,21 +47,24 @@ jobs:
   security-gate-success:
     name: Security Gate Validation
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [security]
     if: always()
     permissions:
       contents: read
     steps:
       - name: Harden the runner
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
 
       - name: Check security scan results
+        env:
+          SECURITY_RESULT: ${{ needs.security.result }}
         run: |
-          if [ "${{ needs.security.result }}" == "success" ]; then
+          if [ "$SECURITY_RESULT" == "success" ]; then
             echo "Security Gate passed"
           else
-            echo "Security Gate failed: ${{ needs.security.result }}"
+            echo "Security Gate failed: $SECURITY_RESULT"
             exit 1
           fi

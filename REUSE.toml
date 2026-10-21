@@ -1,132 +1,89 @@
-# REUSE Software Bill of Materials
-# https://reuse.software/
-# This file provides centralized licensing information for the entire project
-# avoiding the need for SPDX headers in individual files.
-
+# REUSE configuration (https://reuse.software, specification 3.3).
+#
+# Files that cannot carry an SPDX header are annotated here by glob. Code is
+# MIT, prose documentation is CC-BY-4.0, and configuration, lock files and
+# generated or placeholder files are CC0-1.0. Only these three license texts
+# live in LICENSES/; `reuse lint` fails on unused license texts.
 version = 1
-SPDX-PackageName = "family_logistics"
+SPDX-PackageName = "family-logistics"
 SPDX-PackageSupplier = "Byron Williams"
 SPDX-PackageDownloadLocation = "https://github.com/ByronWilliamsCPA/family-logistics"
 
-# Source code (Python, tools, tests) - MIT
+# Source code, tests, tooling and scripts - MIT
 [[annotations]]
 path = [
     "src/**",
-    "tools/**",
     "tests/**",
-    "validation/**",
-    "fuzz/**",
-    "benchmarks/**/*.py",
+    "tools/**",
     "scripts/**/*.py",
-    "modal/**/*.py",
+    ".claude/**/*.py",
     "*.py",
-    "noxfile.py",
+    "Dockerfile",
 ]
 SPDX-License-Identifier = "MIT"
-SPDX-FileCopyrightText = "2025 Byron Williams"
+SPDX-FileCopyrightText = "2026 Byron Williams"
 
-# Documentation - CC-BY-4.0
+# Prose documentation - CC-BY-4.0
 [[annotations]]
 path = [
     "docs/**",
     "*.md",
-    "tmp_cleanup/**/*.md",  # Temporary reference files
-    "benchmarks/*.md",  # Benchmark documentation (not reports)
-    "!LICENSES/*.txt",  # Exclude actual license text files
+    "scripts/**/*.md",
+    "!LICENSES/*.txt",
 ]
 SPDX-License-Identifier = "CC-BY-4.0"
-SPDX-FileCopyrightText = "2025 Byron Williams"
+SPDX-FileCopyrightText = "2026 Byron Williams"
 
-# Configuration files - CC0-1.0 (public domain dedication)
+# Configuration, metadata, lock files and placeholders - CC0-1.0
 [[annotations]]
 path = [
     "*.toml",
     "*.yml",
     "*.yaml",
+    "*.json",
+    "uv.lock",
     ".github/**",
+    ".claude/**",
+    ".standards/**",
+    ".qlty/**",
     ".gitignore",
     ".gitattributes",
-    ".pre-commit-config.yaml",
-    ".readthedocs.yaml",
-    "mkdocs.yml",
-    "poetry.lock",  # Dependency lockfile for reproducible builds
-    "requirements/**/*.txt",  # Generated from poetry export
-    "benchmarks/labelmaps/**/*.yaml",  # Benchmark label mappings
-    ".zenodo.json",  # Zenodo metadata for DOI
+    ".dockerignore",
+    ".editorconfig",
+    ".env.example",
+    ".cruft.json",
+    ".infisical.json",
+    ".markdownlint.json",
+    ".markdownlintignore",
+    ".mutmut_config",
+    ".prettierrc",
+    ".secrets.baseline",
+    ".shellcheckrc",
+    ".yamllint",
+    ".gitleaks.toml",
+    "sonar-project.properties",
+    "overrides/**",
+    "configs/**",
+    "data/.gitkeep",
+    "scripts/**/*.sh",
+    "scripts/.gitkeep",
 ]
 SPDX-License-Identifier = "CC0-1.0"
-SPDX-FileCopyrightText = "2025 Byron Williams"
+SPDX-FileCopyrightText = "2026 Byron Williams"
 
-# Data files and models - ODbL-1.0 (Open Database License)
-[[annotations]]
-path = [
-    "data/**",
-    "models/**",
-]
-SPDX-License-Identifier = "ODbL-1.0"
-SPDX-FileCopyrightText = "2025 Byron Williams"
-
-# Build artifacts and generated files - excluded from licensing
+# Build output and caches, if they are ever present in a working tree.
 [[annotations]]
 path = [
     "build/**",
     "dist/**",
     "site/**",
     "*.egg-info/**",
-    "__pycache__/**",
+    "**/__pycache__/**",
     ".venv/**",
-    "venv/**",
     ".nox/**",
-    ".mypy_cache/**",
     ".pytest_cache/**",
     ".ruff_cache/**",
-    "*.pyc",
-    "*.pyo",
 ]
 precedence = "override"
 SPDX-License-Identifier = "CC0-1.0"
-SPDX-FileCopyrightText = "2025 Byron Williams"
-
-# Additional configuration and temporary files - CC0-1.0
-[[annotations]]
-path = [
-    ".claude/settings.local.json",
-    ".claude/**/*.json",  # Claude configuration files
-    ".claude/**/*.md",  # Claude documentation files
-    ".standards/**",  # Baseline standards (auto-updated by cruft)
-    ".clusterfuzzlite/**",
-    ".sonarlint/**",  # SonarLint IDE configuration
-    ".qlty/**",  # Qlty configuration
-    ".coderabbit.yaml",  # CodeRabbit AI review configuration
-    ".vscode/**",  # VS Code settings
-    ".idea/**",  # IntelliJ/PyCharm settings
-    "concept.txt",
-    "image_reference_sets.txt",
-    "overrides/**",
-    "renovate.json",
-    "validate_workflows.sh",
-    "scripts/**/*.sh",  # Shell scripts for automation
-    "tmp_cleanup/**/*.txt",  # Temporary text files
-    "tmp_cleanup/.gitkeep",  # Directory placeholder
-    "sonar-project.properties",  # SonarCloud/SonarQube configuration
-    "codemeta.json",  # CodeMeta software metadata
-    ".zenodo.json",  # Zenodo DOI metadata
-    "Makefile",  # Build automation
-    "justfile",  # Just command runner
-    "Taskfile.yml",  # Task runner configuration
-]
-SPDX-License-Identifier = "CC0-1.0"
-SPDX-FileCopyrightText = "2025 Byron Williams"
-
-# Benchmark results and generated metadata files - CC0-1.0
-[[annotations]]
-path = [
-    "benchmarks/reports/**/*.json",
-    "benchmarks/reports/**/*.md",
-    "codemeta.json",
-    "benchmarks/LICENSES.md",
-    "benchmarks/registry.yml",
-    "notebooks/**/*.ipynb",  # Jupyter notebooks (Colab training examples)
-]
-SPDX-License-Identifier = "CC0-1.0"
-SPDX-FileCopyrightText = "2025 Byron Williams"
+SPDX-FileCopyrightText = "2026 Byron Williams"

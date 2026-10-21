@@ -1,0 +1,100 @@
+# Container Image
+# Builds the application image from the repository Dockerfile (digest-pinned
+# DHI bases) and publishes it to GHCR. This is the only distribution channel:
+# the app is not published to PyPI.
+#
+#   pull_request   build only (never pushes; fork PRs are always build-only)
+#   push to main   push ghcr.io/byronwilliamscpa/family-logistics:sha-<7>
+#   workflow_call  called by release.yml after a release, adding the semver tag
+#
+# Every pushed image gets BuildKit SLSA provenance and an SBOM in the registry
+# (from the reusable workflow) plus a GitHub build-provenance attestation on
+# its digest, verifiable with:
+#   gh attestation verify oci://ghcr.io/byronwilliamscpa/family-logistics:<tag> \
+#     --repo ByronWilliamsCPA/family-logistics
+name: Container Image
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'src/**'
+      - '.github/workflows/container-image.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'src/**'
+      - '.github/workflows/container-image.yml'
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Release version to add as an image tag (e.g. 1.2.3)'
+        type: string
+        required: false
+        default: ''
+
+concurrency:
+  group: container-image-${{ github.event.pull_request.number || github.ref }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: Build Image
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-docker.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write
+    with:
+      image-name: 'byronwilliamscpa/family-logistics'
+      # The deployment target is amd64; the DHI base digests are pinned for amd64.
+      platforms: 'linux/amd64'
+      push: ${{ github.event_name != 'pull_request' }}
+      push-on-fork: false
+      tag-sha: true
+      tag-pr: false
+      tag-latest: false
+      tag-semver: false
+      additional-tags: ${{ inputs.version && format('type=raw,value={0}', inputs.version) || '' }}
+      enable-trivy-scan: true
+      trivy-ignore-unfixed: true
+      enable-sbom: true
+      enable-provenance: true
+      enable-pr-comment: false
+      # Bases come from the public GHCR DHI mirror, not dhi.io.
+      enable-dhi-login: false
+
+  attest:
+    name: Attest Image Provenance
+    needs: [image]
+    if: github.event_name != 'pull_request' && needs.image.outputs.image-digest != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/byronwilliamscpa/family-logistics
+          subject-digest: ${{ needs.image.outputs.image-digest }}
+          push-to-registry: false

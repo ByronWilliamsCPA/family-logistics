@@ -24,18 +24,19 @@ on:
       - "pyproject.toml"
       - "uv.lock"
   schedule:
-    # Weekly scan every Monday at 8:00 AM UTC
-    - cron: "0 8 * * 1"
+    # Weekly scan every Monday at 08:17 UTC
+    - cron: "17 8 * * 1"
   workflow_dispatch:
 
 permissions:
   contents: read
-  security-events: write
 
 jobs:
   sbom:
     name: SBOM & Security
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-sbom.yml@main
+    permissions:
+      contents: read
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-sbom.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
     with:
       python-version: '3.12'
       fail-on-vulnerabilities: true

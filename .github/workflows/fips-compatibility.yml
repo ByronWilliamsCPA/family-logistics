@@ -29,8 +29,8 @@ on:
       - 'pyproject.toml'
       - 'requirements*.txt'
   schedule:
-    # Run weekly on Monday at 10 AM UTC
-    - cron: '0 10 * * 1'
+    # Run weekly on Friday at 10:07 UTC
+    - cron: '7 10 * * 5'
   workflow_dispatch:
     inputs:
       strict_mode:
@@ -46,45 +46,52 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   fips-check:
     name: FIPS Compliance Check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     permissions:
       contents: read
       pull-requests: write
     steps:
       - name: Harden the runner
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
 
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
 
       - name: Set up Python
         run: uv python install 3.12
 
+      - name: Install dependencies
+        run: uv sync --all-extras --frozen
+
       - name: Run FIPS compatibility check
         id: fips-check
+        env:
+          STRICT_MODE: ${{ inputs.strict_mode }}
         run: |
           # Run the FIPS check script
           STRICT_FLAG=""
-          if [[ "${{ github.event.inputs.strict_mode }}" == "true" ]]; then
+          if [[ "$STRICT_MODE" == "true" ]]; then
             STRICT_FLAG="--strict"
           fi
 
           # Run check and capture output
           set +e
-          uv run python scripts/check_fips_compatibility.py \
+          uv run --frozen python scripts/check_fips_compatibility.py \
             --fix-hints \
             --include-tests \
             $STRICT_FLAG \
@@ -93,7 +100,7 @@ jobs:
           set -e
 
           # Also generate JSON report
-          uv run python scripts/check_fips_compatibility.py \
+          uv run --frozen python scripts/check_fips_compatibility.py \
             --json \
             --include-tests \
             > fips-report.json 2>/dev/null || true
@@ -122,11 +129,15 @@ jobs:
       - name: Comment on PR
         if: github.event_name == 'pull_request'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          FIPS_ERRORS: ${{ steps.fips-check.outputs.errors }}
+          FIPS_WARNINGS: ${{ steps.fips-check.outputs.warnings }}
+          FIPS_INFO: ${{ steps.fips-check.outputs.info }}
         with:
           script: |
-            const errors = parseInt('${{ steps.fips-check.outputs.errors }}') || 0;
-            const warnings = parseInt('${{ steps.fips-check.outputs.warnings }}') || 0;
-            const info = parseInt('${{ steps.fips-check.outputs.info }}') || 0;
+            const errors = parseInt(process.env.FIPS_ERRORS) || 0;
+            const warnings = parseInt(process.env.FIPS_WARNINGS) || 0;
+            const info = parseInt(process.env.FIPS_INFO) || 0;
 
             let status = '✅ PASSED';
             let emoji = '✅';
@@ -148,7 +159,7 @@ jobs:
 
             **Status:** ${status}
 
-            ${errors > 0 ? '⚠️ This PR introduces FIPS-incompatible code or dependencies. Please review the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.' : ''}
+            ${errors > 0 ? '⚠️ This PR introduces FIPS-incompatible code or dependencies. Please review the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.' : ''}
             ${warnings > 0 && errors === 0 ? 'ℹ️ Some packages may need verification for FIPS compliance. See the workflow artifacts for details.' : ''}
 
             <details>
@@ -204,22 +215,25 @@ jobs:
   fips-runtime-test:
     name: FIPS Runtime Test
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event.inputs.strict_mode == 'true'
+    timeout-minutes: 15
+    if: github.event_name == 'schedule' || inputs.strict_mode
     needs: fips-check
 
     permissions:
       contents: read
     steps:
       - name: Harden the runner
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
 
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
 
@@ -227,13 +241,13 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --all-extras
+        run: uv sync --all-extras --frozen
 
       - name: Test crypto imports in simulated FIPS mode
         run: |
           # This tests if the code can import without using non-FIPS algorithms
           # Note: Full FIPS testing requires an actual FIPS-enabled kernel
-          uv run python -c "
+          uv run --frozen python -c "
           import os
           import sys
 

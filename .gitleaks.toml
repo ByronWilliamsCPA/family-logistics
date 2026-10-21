@@ -39,6 +39,9 @@ id = "street-address"
 description = "Street address"
 regex = '''\b\d{1,6}\s+(?:[NSEW]\.?\s+)?[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:St|Street|Ave|Avenue|Rd|Road|Dr|Drive|Blvd|Boulevard|Ln|Lane|Ct|Court|Way|Pl|Place|Ter|Terrace|Cir|Circle|Pkwy|Parkway)\b\.?'''
 keywords = ["st", "ave", "rd", "dr", "blvd", "ln", "ct", "way", "pl", "ter", "cir", "pkwy", "street", "avenue", "road", "drive", "lane", "court", "place"]
+[rules.allowlist]
+# Fictional fixtures: streets named "Example" or "Sample" are never real addresses.
+regexes = ['''\b\d{1,6}\s+(?:Example|Sample)\s+[A-Z][a-z]+\b''']
 
 [allowlist]
 description = "Lock files and generated artifacts"

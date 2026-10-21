@@ -7,9 +7,9 @@
 name: Mutation Testing
 
 on:
-  # Weekly schedule - Sundays at 2 AM UTC
+  # Weekly schedule - Saturdays at 02:37 UTC
   schedule:
-    - cron: '0 2 * * 0'
+    - cron: '37 2 * * 6'
   # Manual trigger with configurable threshold
   workflow_dispatch:
     inputs:
@@ -25,20 +25,21 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   mutation:
     name: Mutation Testing
     # Skip on forks (no PR comment permissions)
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-mutation.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-mutation.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
     with:
       python-version: '3.12'
       source-directory: 'src'
       test-directory: 'tests'
-      mutation-threshold: ${{ github.event.inputs.mutation_threshold && fromJSON(github.event.inputs.mutation_threshold) || 80 }}
+      mutation-threshold: ${{ inputs.mutation_threshold && fromJSON(inputs.mutation_threshold) || 80 }}
       fail-under-threshold: ${{ github.event_name != 'schedule' }}
-      post-pr-comment: true
+      # Schedule and manual runs only, so there is no PR to comment on.
+      post-pr-comment: false
       timeout-minutes: 60
-    secrets: inherit

@@ -23,7 +23,7 @@ on:
       - 'uv.lock'
   schedule:
     # Weekly scan on Wednesdays at 7 AM UTC
-    - cron: '0 7 * * 3'
+    - cron: '29 7 * * 3'
   workflow_dispatch:
 
 # Cancel in-progress runs for same PR/branch
@@ -33,23 +33,28 @@ concurrency:
 
 permissions:
   contents: read
-  security-events: write
-  packages: read
 
 jobs:
   container-security:
     name: Container Security Scan
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-container-security.yml@main
+    permissions:
+      contents: read
+      security-events: write
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-container-security.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
     with:
       dockerfile-path: 'Dockerfile'
       build-context: '.'
-      image-tag: 'family_logistics:scan'
+      image-tag: 'family-logistics:scan'
       build-image: true
       severity-threshold: 'CRITICAL,HIGH'
       fail-on-vulnerabilities: true
+      # Base-image CVEs with no upstream fix cannot be patched here; they are
+      # retired by refreshing the digest-pinned DHI base image.
+      ignore-unfixed: true
+      # Bases come from the public GHCR DHI mirror, not dhi.io.
+      enable-dhi-login: false
       run-hadolint: true
       hadolint-failure-threshold: 'warning'
       generate-sbom: true
       upload-sarif: true
       artifact-retention-days: 90
-    secrets: inherit

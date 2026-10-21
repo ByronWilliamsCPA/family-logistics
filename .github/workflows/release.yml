@@ -1,56 +1,63 @@
 ---
-# Release Workflow
-# Handles automated releases with semantic versioning or
-# manual tag-based releases.
+# Semantic Release
+# After CI passes on main, python-semantic-release derives the next version
+# from Conventional Commits, tags it and writes the GitHub release and
+# changelog. A released version then publishes the container image with that
+# version as an extra tag (container-image.yml). Nothing is published to PyPI:
+# the app ships only as a GHCR image.
 #
-# Features:
-#   - Pre-release testing
-#   - Semantic versioning (if enabled) or manual tag-based releases
-#   - PyPI publishing with OIDC trusted publishing
-#   - GitHub Release creation
+# Triggered by workflow_run rather than push: the reusable workflow re-attaches
+# HEAD to the branch only for workflow_run events, and python-semantic-release
+# cannot match a release branch from a detached HEAD.
 name: Semantic Release
 
 "on":
-  push:
-    branches:
-      - main
-      - master
-  workflow_dispatch:
-    inputs:
-      force_release:
-        description: 'Force release type (leave empty for auto)'
-        required: false
-        type: choice
-        options:
-          - ''
-          - patch
-          - minor
-          - major
-          - prerelease
+  # zizmor: ignore[dangerous-triggers] -- runs only for successful CI on pushes to
+  # main from this repository (job condition); never for pull requests.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
 
-# Prevent concurrent releases
 concurrency:
-  group: "release-${{ github.ref }}"
+  group: "release-main"
   cancel-in-progress: false
 
 permissions:
-  contents: write
-  issues: write
-  pull-requests: write
-  id-token: write
-  attestations: write
+  contents: read
 
-# Uses org-level reusable workflow
 jobs:
   release:
     name: Release Pipeline
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-release.yml@main
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-release.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+      attestations: write
     with:
       python-version: '3.12'
       coverage-threshold: 80
       source-directory: 'src'
       semantic-release: true
-      force-release: "${{ github.event.inputs.force_release || '' }}"
-      publish-to-pypi: true
-      pypi-package-name: 'family-logistics'
+      publish-to-pypi: false
       run-tests: true
+
+  image:
+    name: Release Image
+    needs: [release]
+    if: needs.release.outputs.released == 'true'
+    uses: ./.github/workflows/container-image.yml
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write
+      id-token: write
+      attestations: write
+    with:
+      version: ${{ needs.release.outputs.version }}

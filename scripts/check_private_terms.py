@@ -11,11 +11,19 @@ outside the working tree:
 3. ``~/.config/family-logistics/private-terms.txt``.
 
 Blank lines and lines starting with ``#`` in the list are ignored. Matching is
-case-insensitive on word boundaries. Findings report the file, line and term
-number only, never the term, so CI logs do not reveal the list.
+case-insensitive on word boundaries. File contents and file paths are scanned;
+``--git-range`` also scans every commit message and diff in a revision range,
+so a term that was added and later removed is still caught. Findings report
+the location and term number only, never the term, so CI logs do not reveal
+the list.
 
-Exit codes: 0 clean (or no list configured, unless ``--require-list``),
-1 a private term was found, 2 ``--require-list`` was given but no list exists.
+When no list is configured the check skips with a warning, because a
+contributor without the list cannot run it. Pass ``--require-list`` or set
+``FL_PRIVATE_TERMS_REQUIRED=1`` to fail closed instead (CI and the owner's
+machines).
+
+Exit codes: 0 clean (or skipped), 1 a private term was found, 2 a list is
+required but none is configured, 3 git failed while reading ``--git-range``.
 """
 
 from __future__ import annotations
@@ -23,6 +31,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess  # nosec B404 - fixed argv lists, no shell
 import sys
 from pathlib import Path
 
@@ -48,21 +57,53 @@ def load_terms() -> list[str]:
     ]
 
 
-def scan(paths: list[str], terms: list[str]) -> int:
-    """Scan files for private terms and print redacted findings.
+def compile_patterns(terms: list[str]) -> list[re.Pattern[str]]:
+    """Compile one case-insensitive word-boundary pattern per term.
 
     Args:
-        paths: Files to scan.
         terms: Private terms to search for.
+
+    Returns:
+        The compiled patterns, in list order.
+    """
+    return [
+        re.compile(rf"(?<!\w){re.escape(term)}(?!\w)", re.IGNORECASE) for term in terms
+    ]
+
+
+def scan_text(label: str, text: str, patterns: list[re.Pattern[str]]) -> int:
+    """Scan text and print one redacted finding per matching line and term.
+
+    Args:
+        label: Location prefix printed with each finding.
+        text: Text to scan.
+        patterns: Compiled private-term patterns.
 
     Returns:
         The number of findings.
     """
-    patterns = [
-        re.compile(rf"(?<!\w){re.escape(term)}(?!\w)", re.IGNORECASE) for term in terms
-    ]
+    findings = 0
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        for index, pattern in enumerate(patterns, start=1):
+            if pattern.search(line):
+                print(f"{label}:{lineno}: private term #{index}")
+                findings += 1
+    return findings
+
+
+def scan_files(paths: list[str], patterns: list[re.Pattern[str]]) -> int:
+    """Scan file paths and file contents.
+
+    Args:
+        paths: Files to scan.
+        patterns: Compiled private-term patterns.
+
+    Returns:
+        The number of findings.
+    """
     findings = 0
     for name in paths:
+        findings += scan_text(f"{name} (path)", name, patterns)
         path = Path(name)
         if not path.is_file():
             continue
@@ -70,11 +111,42 @@ def scan(paths: list[str], terms: list[str]) -> int:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
-        for lineno, line in enumerate(text.splitlines(), start=1):
-            for index, pattern in enumerate(patterns, start=1):
-                if pattern.search(line):
-                    print(f"{name}:{lineno}: private term #{index}")
-                    findings += 1
+        findings += scan_text(name, text, patterns)
+    return findings
+
+
+def _git(*args: str) -> str:
+    """Run a read-only git command and return its output.
+
+    Args:
+        *args: Arguments after ``git``.
+
+    Returns:
+        Standard output decoded as UTF-8 with replacement.
+    """
+    result = subprocess.run(  # nosec B603 B607 - fixed git argv, no shell
+        ["git", *args],
+        check=True,
+        capture_output=True,
+    )
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def scan_git_range(rev_range: str, patterns: list[re.Pattern[str]]) -> int:
+    """Scan every commit message and diff in a revision range.
+
+    Args:
+        rev_range: A git revision range such as ``base..head``, or a single
+            revision to scan its whole history.
+        patterns: Compiled private-term patterns.
+
+    Returns:
+        The number of findings.
+    """
+    findings = 0
+    for sha in _git("rev-list", rev_range).split():
+        show = _git("show", "--no-color", "--format=%B", "-p", sha)
+        findings += scan_text(f"commit {sha[:12]}", show, patterns)
     return findings
 
 
@@ -89,20 +161,33 @@ def main() -> int:
     parser.add_argument(
         "--require-list",
         action="store_true",
-        help="fail when no private-terms list is configured (used in CI)",
+        help="fail when no private-terms list is configured (CI, owner machines)",
+    )
+    parser.add_argument(
+        "--git-range",
+        metavar="RANGE",
+        help="also scan commit messages and diffs in this git revision range",
     )
     args = parser.parse_args()
+    required = args.require_list or os.environ.get("FL_PRIVATE_TERMS_REQUIRED") == "1"
     terms = load_terms()
     if not terms:
-        if args.require_list:
+        if required:
             print("No private-terms list configured (FL_PRIVATE_TERMS).")
             return 2
         print(
-            "private-terms: no list configured, skipping. Create "
-            f"{DEFAULT_LIST} to enable this check locally."
+            "WARNING private-terms: no list configured, check SKIPPED. Create "
+            f"{DEFAULT_LIST} (or set FL_PRIVATE_TERMS_REQUIRED=1 to fail closed)."
         )
         return 0
-    findings = scan(args.files, terms)
+    patterns = compile_patterns(terms)
+    findings = scan_files(args.files, patterns)
+    if args.git_range:
+        try:
+            findings += scan_git_range(args.git_range, patterns)
+        except subprocess.CalledProcessError:
+            print(f"git failed while reading range {args.git_range!r}.")
+            return 3
     if findings:
         print(
             f"{findings} private term(s) found. Replace them with the fictional "
