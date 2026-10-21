@@ -55,12 +55,16 @@ FIELD_STATUS: dict[str, str] = {
     "include_timestamp": CONSUMED,
     "bind_host": CONSUMED,
     "port": CONSUMED,
-    "timezone": M1,
+    "timezone": CONSUMED,
     "database_path": CONSUMED,
-    "caldav_url": M1,
-    "caldav_username": M1,
-    "caldav_app_password": M1,
-    "caldav_calendars": M1,
+    "caldav_url": CONSUMED,
+    "caldav_username": CONSUMED,
+    "caldav_app_password": CONSUMED,
+    "caldav_calendars": CONSUMED,
+    "caldav_transport_calendar": CONSUMED,
+    "collect_days_back": CONSUMED,
+    "collect_days_ahead": CONSUMED,
+    "source_max_staleness_minutes": CONSUMED,
     "ha_token": CONSUMED,
     "apprise_url": CONSUMED,
     "apprise_config_key": CONSUMED,
@@ -120,7 +124,14 @@ class Settings(BaseSettings):
         caldav_url: iCloud CalDAV base URL.
         caldav_username: Apple ID used by the read-only collector.
         caldav_app_password: App-specific password for that Apple ID.
-        caldav_calendars: Calendar hrefs or IDs to collect (discovered in M0).
+        caldav_calendars: Calendars to collect, by display name or calendar
+            ID (comma-separated). Discovered calendars not listed are ignored.
+        caldav_transport_calendar: Display name of the shared transportation
+            calendar; it is registered with the TRANSPORT kind.
+        collect_days_back: Local days before today included in a collection.
+        collect_days_ahead: Local days after today included in a collection.
+        source_max_staleness_minutes: A calendar whose last complete
+            collection is older than this raises DATA-011 (incomplete).
         ha_token: Bearer token Home Assistant presents to the HA-only routes.
         apprise_url: Apprise API base URL.
         apprise_config_key: Apprise API persistent-configuration key; the
@@ -182,6 +193,10 @@ class Settings(BaseSettings):
     caldav_username: str | None = None
     caldav_app_password: SecretStr | None = None
     caldav_calendars: str = ""
+    caldav_transport_calendar: str = "Family Transportation"
+    collect_days_back: int = Field(default=2, ge=0, le=31)
+    collect_days_ahead: int = Field(default=14, ge=1, le=62)
+    source_max_staleness_minutes: int = Field(default=120, ge=15)
 
     ha_token: SecretStr | None = None
 
