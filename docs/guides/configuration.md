@@ -38,7 +38,11 @@ shows non-secret values only.
 | `FL_CALDAV_URL` | `https://caldav.icloud.com` | CalDAV base URL; must use `https://` |
 | `FL_CALDAV_USERNAME` | unset | Dedicated Apple ID holding View Only calendar shares |
 | `FL_CALDAV_APP_PASSWORD` | unset | **Secret.** App-specific password for that Apple ID |
-| `FL_CALDAV_CALENDARS` | empty | Comma-separated calendar hrefs to collect |
+| `FL_CALDAV_CALENDARS` | empty | Calendars to collect, by display name or calendar ID (comma-separated); unlisted calendars are never read |
+| `FL_CALDAV_TRANSPORT_CALENDAR` | `Family Transportation` | Display name of the shared ride calendar (registered as the transport calendar) |
+| `FL_COLLECT_DAYS_BACK` | `2` | Local days before today in each collection window |
+| `FL_COLLECT_DAYS_AHEAD` | `14` | Local days after today in each collection window |
+| `FL_SOURCE_MAX_STALENESS_MINUTES` | `120` | A calendar not collected completely within this time raises DATA-011 (incomplete) |
 
 ## Home Assistant and the registry UI
 
