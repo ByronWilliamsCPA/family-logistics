@@ -17,6 +17,7 @@ path = [
     "src/**",
     "tests/**",
     "tools/**",
+    "typings/**",
     "scripts/**/*.py",
     "*.py",
     "Dockerfile",
