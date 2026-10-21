@@ -11,7 +11,7 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 license = {text = "MIT"}
-keywords = []
+keywords = ["caldav", "icalendar", "carpool", "transportation", "scheduling", "home-assistant", "validation"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -42,7 +42,16 @@ dependencies = [
     "cryptography>=43.0.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/ByronWilliamsCPA/family-logistics"
+Repository = "https://github.com/ByronWilliamsCPA/family-logistics"
+Issues = "https://github.com/ByronWilliamsCPA/family-logistics/issues"
+Documentation = "https://byronwilliamscpa.github.io/family-logistics/"
+
 # Optional dependency groups
+# NOTE: PEP 735 [dependency-groups] migration is deliberately deferred: the org
+# reusable CI workflows (ByronWilliamsCPA/.github) install with
+# `uv sync --all-extras`, so moving `dev` out of extras must happen fleet-wide.
 [project.optional-dependencies]
 # Development dependencies
 dev = [
@@ -61,12 +70,14 @@ dev = [
     "vulture>=2.11",  # Dead code detection
     "pip-audit>=2.7.0",  # Python vulnerability scanning
     "pydoclint>=0.8.4",  # Docstring argument validation
+    "yamllint>=1.35.0",  # YAML lint (pre-commit hook runs the locked version)
+    "detect-secrets>=1.5.0",  # Pre-push secret baseline regression check
 
     # Pre-commit
     "pre-commit>=3.3.0",
     # Documentation
-    "mkdocs>=1.6.0",
-    "mkdocs-material>=9.5.0",
+    "mkdocs>=1.6,<2",  # MkDocs 2.0 is a breaking release
+    "mkdocs-material>=9.5,<10",
     "mkdocstrings[python]>=0.26.0",
     "griffe-pydantic>=1.1.0",
     "mkdocs-gen-files>=0.5.0",

@@ -31,19 +31,24 @@ test_patterns = [
     "**/*_test.py",
 ]
 
+# Plugin definitions come from the official qlty plugin repository.
+[sources.default]
+repository = "https://github.com/qltysh/qlty"
+tag = "v0.659.0"
+
 # ============================================================================
-# Python Linting and Formatting - Ruff
+# Enabled plugins
 # ============================================================================
-# Ruff is an extremely fast Python linter and code formatter written in Rust.
-# It replaces Flake8, Black, isort, pyupgrade, and more.
-# Configuration: pyproject.toml [tool.ruff] section
-#
-# Note: Qlty auto-detects Ruff from pyproject.toml.
-# To enable Ruff plugin:
-#   qlty plugins enable ruff
-#
-# Ruff configuration is in pyproject.toml [tool.ruff] section.
-# See: https://docs.qlty.sh/analysis/coverage-linters#ruff
+# Ruff and Bandit read their configuration from pyproject.toml.
+# BasedPyright has no qlty plugin (the registry ships neither pyright nor
+# basedpyright); it runs as a pre-commit hook and in the org CI workflow.
+# Plugin versions float with the source tag; pre-commit and CI pin the exact
+# tool versions through uv.lock.
+[[plugin]]
+name = "ruff"
+
+[[plugin]]
+name = "bandit"
 
 # ============================================================================
 # Code Quality Metrics - Maintainability and Complexity
