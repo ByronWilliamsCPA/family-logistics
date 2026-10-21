@@ -1,0 +1,39 @@
+# Local development stack for Family Logistics.
+#
+# Production deploys from the private deployment repository (a Portainer
+# Git stack pulling ghcr.io/byronwilliamscpa/family-logistics:sha-<7>). This
+# file builds from source with the same hardening so local runs behave like
+# production. No real credentials: copy .env.example to .env and fill in only
+# throwaway or test values.
+
+services:
+  family-logistics:
+    build: .
+    image: family-logistics:dev
+    container_name: family-logistics-dev
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    environment:
+      FL_HA_TOKEN: ${FL_HA_TOKEN:?set FL_HA_TOKEN (>= 32 chars) in .env}
+      FL_TIMEZONE: ${FL_TIMEZONE:-America/Los_Angeles}
+      FL_NOTIFICATION_MODE: shadow
+      FL_ROUTE_PROVIDER: ${FL_ROUTE_PROVIDER:-static}
+      FL_LLM_ENABLED: "false"
+    volumes:
+      # Create ./data/dev owned by 65532 first: `sudo install -d -o 65532 -g 65532 data/dev`
+      - ./data/dev:/data
+    ports:
+      - "127.0.0.1:8080:8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    restart: unless-stopped

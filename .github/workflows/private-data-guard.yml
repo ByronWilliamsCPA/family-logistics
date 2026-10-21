@@ -1,0 +1,46 @@
+---
+# Blocks household data from reaching this PUBLIC repository.
+#
+# gitleaks runs on every push and pull request. The private-terms check needs
+# the FL_PRIVATE_TERMS secret (newline-separated real names and places), which
+# GitHub withholds from pull requests opened from forks; those runs skip it
+# and a maintainer must not merge them until a same-repository run passes.
+name: Private Data Guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: Scan full history with gitleaks
+        run: uvx pre-commit run gitleaks --all-files
+
+  private-terms:
+    name: Private household terms
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Scan tracked files
+        env:
+          FL_PRIVATE_TERMS: ${{ secrets.FL_PRIVATE_TERMS }}
+        run: |
+          if [ -z "${FL_PRIVATE_TERMS}" ]; then
+            echo "::warning::FL_PRIVATE_TERMS is unavailable (fork PR or secret not set); private-terms check skipped."
+            exit 0
+          fi
+          git ls-files -z | xargs -0 python3 scripts/check_private_terms.py --require-list

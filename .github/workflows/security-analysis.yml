@@ -1,0 +1,66 @@
+---
+# Security Analysis Workflow
+# Runs security scans including Bandit and dependency checks.
+#
+# Features:
+#   - Bandit static analysis for Python
+#   - OSV-Scanner dependency vulnerability scanning
+#   - Weekly scheduled scans
+name: Security Analysis
+
+"on":
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Run security scans weekly on Monday at 9 AM UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+# Cancel in-progress runs for same PR/branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+
+# Uses org-level reusable workflow
+jobs:
+  security:
+    name: Security Scan
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-security-analysis.yml@main
+    with:
+      source-directory: 'src'
+      python-version: '3.12'
+      fail-on-high: true
+      fail-on-medium: false
+      run-codeql: true
+      run-dependency-review: true
+      run-bandit: true
+      run-osv: true
+
+  security-gate-success:
+    name: Security Gate Validation
+    runs-on: ubuntu-latest
+    needs: [security]
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Check security scan results
+        run: |
+          if [ "${{ needs.security.result }}" == "success" ]; then
+            echo "Security Gate passed"
+          else
+            echo "Security Gate failed: ${{ needs.security.result }}"
+            exit 1
+          fi

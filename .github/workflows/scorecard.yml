@@ -1,0 +1,33 @@
+---
+# OpenSSF Scorecard for Family Logistics
+# Security posture assessment and supply chain security validation.
+#
+# Dashboard: https://securityscorecards.dev/viewer/?uri=github.com/ByronWilliamsCPA/family_logistics
+# Documentation: https://github.com/ossf/scorecard
+name: OpenSSF Scorecard
+
+on:
+  branch_protection_rule:
+  schedule:
+    # Weekly on Tuesdays at 21:21 UTC
+    - cron: '21 21 * * 2'
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  id-token: write
+  actions: read
+
+# Uses org-level reusable workflow
+jobs:
+  scorecard:
+    name: Scorecard Analysis
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-scorecard.yml@main
+    with:
+      upload-sarif: true
+      artifact-retention-days: 5

@@ -1,0 +1,768 @@
+# NOTE: This project uses UV as the package manager.
+# Dependencies are defined in [project.dependencies] and [project.optional-dependencies] sections below.
+# UV uses standard PEP 621 pyproject.toml format with uv.lock for reproducible builds.
+[project]
+name = "family-logistics"
+version = "0.1.0"
+description = "Deterministic family transportation assurance: validates iCloud ride commitments before a child is stranded"
+authors = [
+    {name = "Byron Williams", email = "byron@byronwilliams.dev"}
+]
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = {text = "MIT"}
+keywords = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+]
+
+# Core production dependencies
+dependencies = [
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "structlog>=23.1.0",
+    "rich>=13.5.0",
+    "click>=8.1.0",
+    # API and persistence
+    "fastapi>=0.120.1",
+    "starlette>=0.49.1",  # security floor for FastAPI's transitive dependency
+    "uvicorn>=0.30.0",
+    "sqlalchemy>=2.0.0",
+    "alembic>=1.12.0",
+    # Calendar ingestion (read-only CalDAV over httpx; see adapters/caldav)
+    "httpx>=0.27.0",
+    "icalendar>=6.0.0",
+    "recurring-ical-events>=3.3.0",
+    # In-process scheduler (single writer). 4.x is a different API; stay on 3.x.
+    "apscheduler>=3.10,<4",
+    "cryptography>=43.0.0",
+]
+
+# Optional dependency groups
+[project.optional-dependencies]
+# Development dependencies
+dev = [
+    # Testing
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-xdist>=3.3.0",
+    "pytest-randomly>=3.15.0",
+    "hypothesis>=6.82.0",
+
+    # Code Quality (always included)
+    "ruff>=0.9.0",
+    "basedpyright>=1.18.0",  # Stricter type checker (replaces mypy)
+    "bandit>=1.7.0",
+    "vulture>=2.11",  # Dead code detection
+    "pip-audit>=2.7.0",  # Python vulnerability scanning
+    "pydoclint>=0.8.4",  # Docstring argument validation
+
+    # Pre-commit
+    "pre-commit>=3.3.0",
+    # Documentation
+    "mkdocs>=1.6.0",
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=0.26.0",
+    "griffe-pydantic>=1.1.0",
+    "mkdocs-gen-files>=0.5.0",
+    "mkdocs-section-index>=0.3.0",
+    "mkdocs-autorefs>=1.2.0",
+    "mkdocs-git-revision-date-localized-plugin>=1.3.0",
+    "python-frontmatter>=1.1.0",
+    "ruamel-yaml>=0.18.0",
+    # Development Tools
+    "interrogate>=1.7.0",
+    "jupyter>=1.0.0",
+    "ipykernel>=6.25.0",
+    "nox>=2024.10.16",  # Fixed: was 2025 (typo)
+    "nox-uv>=0.6.3",    # Fixed: max available version is 0.6.3, not 1.0.0
+    # Google Cloud Assured OSS (optional - uncomment if using Assured OSS)
+    "google-auth>=2.0.0",
+    # "google-cloud-assured-oss>=0.1.0",  # Package not yet available in PyPI
+    "google-api-core>=2.0.0",
+    "python-dotenv>=1.0.0",  # For loading .env files
+]
+
+# Supply chain security tools
+supply-chain = [
+    "cyclonedx-bom>=4.6.0",          # SBOM generation (CycloneDX format)
+    "pip-audit>=2.7.0",              # Python vulnerability scanning
+    "pip-licenses>=4.0.0",           # License compliance checking
+    "keyrings.google-artifactregistry-auth>=1.1.0",  # GCP Artifact Registry auth
+]
+
+
+[project.scripts]
+family-logistics = "family_logistics.cli:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/family_logistics"]
+
+# Ruff Configuration - Consolidated Linting & Formatting
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+exclude = [
+    ".git",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "dist",
+    "build",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
+
+[tool.ruff.lint]
+# Rule selection aligned with Google Python Style Guide + PyStrict enhancements
+# Reference: https://google.github.io/styleguide/pyguide.html
+# Reference: https://github.com/Ranteck/PyStrict-strict-python
+select = [
+    # Core Python style (Google-aligned)
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # Pyflakes
+    "I",    # isort (import sorting)
+    "N",    # pep8-naming (Google naming conventions)
+    "D",    # pydocstyle (Google docstring style)
+    "UP",   # pyupgrade (modern Python syntax)
+
+    # Type annotations (Google requires type hints)
+    "ANN",  # flake8-annotations (type hint enforcement)
+    "TCH",  # flake8-type-checking (TYPE_CHECKING imports)
+    "FA",   # flake8-future-annotations (use from __future__ import annotations)
+
+    # Code quality (Pylint-equivalent rules)
+    "C4",   # flake8-comprehensions
+    "C90",  # mccabe complexity
+    "PL",   # Pylint rules (Google uses Pylint)
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "ARG",  # flake8-unused-arguments
+    "RET",  # flake8-return
+    "PIE",  # flake8-pie
+
+    # Security
+    "S",    # flake8-bandit
+
+    # Best practices
+    "T10",  # flake8-debugger (no debugger statements in production)
+    "T20",  # flake8-print (no print in production)
+    "PT",   # flake8-pytest-style
+    "Q",    # flake8-quotes
+    "PTH",  # flake8-use-pathlib
+    "A",    # flake8-builtins
+    "DTZ",  # flake8-datetimez
+
+    # Performance and modernization
+    "PERF", # Performance anti-patterns
+    "FURB", # Refurb - modernization
+
+    # Additional quality
+    "LOG",  # Logging best practices
+    "G",    # flake8-logging-format (logging string formatting)
+    "TRY",  # Exception handling
+    "ERA",  # Commented-out code
+    "FBT",  # Boolean trap detection
+    "ASYNC",# Async/await best practices
+    "RUF",  # Ruff-specific rules
+
+    # PyStrict additions (stricter standards)
+    "BLE",  # flake8-blind-except (no bare except or except Exception)
+    "EM",   # flake8-errmsg (error message best practices)
+    "SLF",  # flake8-self (private member access)
+    "INP",  # flake8-no-pep420 (require __init__.py in packages)
+    "ISC",  # flake8-implicit-str-concat (implicit string concatenation)
+    "PGH",  # pygrep-hooks (deprecated type comments, blanket ignores)
+    "RSE",  # flake8-raise (raise statement best practices)
+    "TID",  # flake8-tidy-imports (banned imports, relative imports)
+    "YTT",  # flake8-2020 (Python version checks)
+]
+
+ignore = [
+    # Formatting (handled by ruff format)
+    "E501",   # line too long (handled by formatter)
+    "COM812", # missing trailing comma (handled by formatter)
+    "ISC001", # implicit string concatenation (handled by formatter)
+
+    # Docstring style (Google convention conflicts)
+    "D203",   # one-blank-line-before-class (conflicts with D211)
+    "D212",   # multi-line-summary-first-line (conflicts with D213)
+    "D105",   # missing docstring in magic method (__str__, etc.)
+    "D107",   # missing docstring in __init__ (class docstring sufficient)
+
+    # Type annotations (pragmatic exceptions)
+    # Note: ANN101/ANN102 removed - rules deprecated in Ruff (self/cls annotation not needed)
+    "ANN401", # dynamically typed expressions (Any) - sometimes necessary
+
+    # Pylint rules (too strict for all cases)
+    "PLR2004", # magic value comparison - too noisy
+    "PLW2901", # outer loop variable overwritten - sometimes intentional
+
+    # Practical exceptions
+    "B008",   # function calls in defaults (Pydantic/FastAPI pattern)
+    "S101",   # assert (pytest uses assert statements)
+    "PTH123", # open() vs pathlib (sometimes direct open is clearer)
+    "FBT001", # Boolean positional arg (acceptable in DSLs)
+    "FBT002", # Boolean default arg (acceptable in DSLs)
+    "TRY003", # Long exception messages (descriptive is good)
+]
+
+# McCabe Complexity Configuration (Google/Pylint alignment)
+[tool.ruff.lint.mccabe]
+max-complexity = 10  # Google/Pylint default
+
+# Pylint Configuration (Function complexity limits)
+[tool.ruff.lint.pylint]
+max-args = 4           # Function argument limit
+max-statements = 100   # Function length hard limit
+max-branches = 12      # Nesting/branching limit
+max-nested-blocks = 4  # Explicit nesting limit
+max-returns = 6        # Return statement limit
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+known-first-party = ["family_logistics"]
+
+[tool.ruff.lint.per-file-ignores]
+# Module init files
+"__init__.py" = ["F401", "D104"]
+
+# Exception classes legitimately require multiple context parameters in __init__
+"**/core/exceptions.py" = ["PLR0913"]
+
+# Security middleware uses keyword-only args for a rich configuration surface
+"**/middleware/security.py" = ["PLR0913"]
+
+# Test files (relaxed rules for test code)
+"tests/**/*.py" = [
+    "ANN",    # Type annotations not required in tests
+    "ARG",    # Unused arguments (fixtures)
+    "D",      # Docstrings not required in tests
+    "PLR",    # Pylint refactor suggestions
+    "PLC0415", # Imports inside test functions are idiomatic
+    "ERA",    # Commented code (test debugging)
+    "SLF",    # Private member access (testing internals)
+    "BLE",    # Blind except (test error handling)
+    "EM",     # Error messages (test exceptions)
+    "TRY",    # Exception handling (test assertions)
+    "INP",    # No __init__.py required for test directories
+    # Security rules OK to skip in tests (specific, not blanket S)
+    "S101",   # assert_used - pytest uses asserts
+    "S105",   # hardcoded_password_string - test credentials are fake
+    "S106",   # hardcoded_password_funcarg - test fixtures with fake passwords
+    "S107",   # hardcoded_password_default - test default values
+    "S108",   # hardcoded_tmp_directory - test temp paths are intentional
+    "S311",   # random - non-crypto random in tests is fine
+    "S113",   # request_without_timeout - test HTTP calls may be mocked
+]
+
+# Scripts (utility code - not packages)
+"scripts/**/*.py" = [
+    "ANN", "D", "T20", "TRY", "PTH", "PLR",
+    "INP",    # Scripts are not packages
+    "EM",     # Utility scripts don't need perfect error messages
+    "T10",    # Debugger allowed during script development
+    "BLE",    # Blind except (error handling in scripts)
+    "C901",   # Complexity allowed in utility scripts
+    "RUF012", # Class variable annotations (not needed in scripts)
+    "SIM",    # Simplification suggestions (scripts prioritize clarity)
+    "F821",   # Allow dynamic imports
+    "G201",   # Logging patterns (scripts may use .error with exc_info)
+    # Security rules OK to skip in scripts (specific, not blanket S)
+    "S101",   # assert_used - scripts may use asserts for validation
+    "S104",   # hardcoded_bind_all_interfaces - dev scripts may bind 0.0.0.0
+    "S108",   # hardcoded_tmp_directory - scripts use /tmp intentionally
+    "S311",   # random - non-crypto random in scripts is fine
+    "S603",   # subprocess_without_shell_equals_true - scripts validate inputs
+    "S607",   # start_process_with_partial_path - scripts use PATH
+]
+
+# Benchmarks (performance testing)
+"benchmarks/**/*.py" = [
+    "ANN", "D", "T20", "ARG", "TRY", "PLR",
+    "INP",    # Benchmarks are not packages
+    "EM",     # Benchmark exceptions
+]
+
+# Tools (development utilities)
+"tools/**/*.py" = [
+    "ANN", "D", "T20", "TRY", "PLR",
+    "INP",    # Tools are not packages
+    "EM",     # Tool exceptions
+    "BLE",    # Blind except (error handling in tools)
+    "C901",   # Complexity allowed in utility scripts
+]
+
+# Nox configuration
+"noxfile.py" = ["ANN", "D", "T20", "PLR", "INP", "PLC0415", "ERA001", "SIM105"]
+# Fuzz testing (Atheris harnesses have specific patterns)
+"fuzz/**/*.py" = [
+    "N802",   # TestOneInput required by Atheris
+    "S110",   # try-except-pass is intentional for fuzzing
+    "BLE",    # Blind except is necessary in fuzz targets
+    "INP",    # Fuzz tests are not packages
+    "ANN", "D", "TRY",
+]
+
+# Claude skills and scripts
+".claude/**/*.py" = [
+    "T20",    # Print allowed for CLI output
+    "C901",   # Complexity allowed in utility scripts
+    "ANN", "D", "TRY", "PLR",
+    "INP",    # Not packages
+]
+
+# API health checks - Example code with template patterns
+
+# Security middleware - SSRF protection with intentional patterns
+"src/*/middleware/security.py" = [
+    "S104",    # 0.0.0.0 in BLOCKED_HOSTS list is intentional
+    "BLE001",  # Blind except for URL parsing resilience
+    "PLC0415", # Local imports to avoid circular dependencies
+    "TRY300",  # Return in try block is clearer for simple cases
+    "ANN001",  # call_next typing is complex (Starlette middleware)
+    "RUF012",  # ClassVar not needed for constants
+    "C416",    # Dict comprehension is clearer than dict()
+    "SIM102",  # Nested if is more readable for security checks
+]
+
+# Logging utilities - Structlog processor interface
+"src/*/utils/logging.py" = [
+    "ARG001",  # Unused args required by structlog processor interface
+    "TC002",   # Processor needs to be runtime-available
+]
+
+# Quality gate script - Intentional URL handling
+"scripts/check_quality_gate.py" = [
+    "S310",    # URL schemes are validated before use (see nosec comment)
+]
+
+# BasedPyright Configuration
+# Replaces MyPy with faster, stricter type checking
+# Reference: https://docs.basedpyright.com
+[tool.basedpyright]
+pythonVersion = "3.12"
+pythonPlatform = "All"
+
+# Type checking mode: basic, standard, strict, all
+# "strict" aligns with Google Python Style Guide requirements
+typeCheckingMode = "strict"
+
+# Source paths
+include = ["src"]
+exclude = [
+    "**/__pycache__",
+    "**/node_modules",
+    ".venv",
+    "build",
+    "dist",
+]
+
+# Strict mode customizations
+reportMissingImports = "error"
+reportMissingTypeStubs = "warning"
+reportUnusedImport = "error"
+reportUnusedClass = "error"
+reportUnusedFunction = "error"
+reportUnusedVariable = "error"
+reportDuplicateImport = "error"
+reportPrivateUsage = "warning"
+reportTypeCommentUsage = "warning"
+reportConstantRedefinition = "error"
+reportIncompatibleMethodOverride = "error"
+reportIncompatibleVariableOverride = "error"
+reportInconsistentConstructor = "error"
+reportOverlappingOverload = "error"
+reportUninitializedInstanceVariable = "warning"
+reportInvalidStringEscapeSequence = "error"
+reportUnknownParameterType = "warning"
+reportUnknownArgumentType = "warning"
+reportUnknownLambdaType = "warning"
+reportUnknownVariableType = "warning"
+reportUnknownMemberType = "warning"
+reportMissingParameterType = "warning"
+reportMissingTypeArgument = "warning"
+reportCallInDefaultInitializer = "warning"
+reportUnnecessaryIsInstance = "warning"
+reportUnnecessaryCast = "warning"
+reportUnnecessaryComparison = "warning"
+reportUnnecessaryContains = "warning"
+reportAssertAlwaysTrue = "error"
+reportSelfClsParameterName = "error"
+reportImplicitStringConcatenation = "warning"
+reportUndefinedVariable = "error"
+reportUnboundVariable = "error"
+reportUnhashable = "error"
+reportInvalidTypeVarUse = "error"
+
+# BasedPyright-specific enhancements
+reportUnreachable = "error"           # Detect unreachable code
+reportAny = "warning"                  # Flag usage of Any type
+reportExplicitAny = "warning"          # Flag explicit Any annotations
+reportIgnoreCommentWithoutRule = "warning"  # Require specific ignore rules
+
+# PyStrict strict inference settings
+strictListInference = true             # Infer list element types strictly
+strictDictionaryInference = true       # Infer dict key/value types strictly
+strictSetInference = true              # Infer set element types strictly
+strictParameterNoneValue = true        # Require explicit Optional for None defaults
+analyzeUnannotatedFunctions = true     # Analyze functions without type hints
+deprecateTypingAliases = true          # Warn on deprecated typing module aliases
+
+# Pytest Configuration
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+pythonpath = [".", "src"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--cov=src/family_logistics",
+    "--cov-report=html",
+    "--cov-report=term-missing:skip-covered",
+    "--cov-report=xml",
+    "--cov-fail-under=80",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+    "benchmark: marks tests as benchmark tests",
+    "py310: marks tests specific to Python 3.10",
+    "py311plus: marks tests requiring Python 3.11+",
+    "py313plus: marks tests requiring Python 3.13+ (PEP 594 removals)",
+    "py314plus: marks tests requiring Python 3.14+ (free-threaded, PEP 649)",
+]
+
+# Coverage Configuration
+# Note: Coverage source is specified via pytest's --cov argument in addopts above
+[tool.coverage.run]
+branch = true
+relative_files = true  # Required for SonarCloud in GitHub Actions
+omit = [
+    # Test files
+    "*/tests/*",
+    "*/test_*.py",
+
+    # Python internals
+    "*/__pycache__/*",
+    "*/site-packages/*",
+
+    # Development artifacts (from image_detection best practices)
+    "validation/*",     # Validation/verification scripts
+    "benchmarks/*",     # Benchmarking framework
+    "data/*",           # Data processing scripts
+    "scripts/*",        # Utility scripts
+    "notebooks/*",      # Jupyter notebooks
+    "tmp_cleanup/*",    # Temporary files
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+precision = 2
+show_missing = true
+
+# Interrogate Configuration (Docstring Coverage)
+[tool.interrogate]
+verbose = 1
+fail-under = 85
+exclude = ["tests", "docs", "build", "dist"]
+ignore-init-method = true
+ignore-init-module = true
+color = true
+
+# Pydoclint Configuration (Docstring Argument Validation)
+# Validates that docstring arguments match function signatures
+# Reference: https://github.com/jsh9/pydoclint
+[tool.pydoclint]
+style = "google"
+exclude = '\.git|tests/|scripts/|benchmarks/|tools/|noxfile\.py|\.claude/'
+arg-type-hints-in-docstring = false  # CLAUDE.md Google style: types live in signatures only
+check-return-types = false  # return types are checked by BasedPyright, not duplicated in docstrings
+arg-type-hints-in-signature = true
+skip-checking-raises = false
+require-return-section-when-returning-nothing = false
+
+# Mutation Testing Configuration (mutmut)
+[tool.mutmut]
+paths_to_mutate = "src/"
+backup = false
+runner = "uv run pytest -x --assert=plain -o addopts=''"
+tests_dir = "tests/"
+dict_synonyms = "Struct, NamedStruct"
+
+# Bandit Security Configuration
+# Run: uv run bandit -c pyproject.toml -r src/
+# Reference: https://bandit.readthedocs.io/
+[tool.bandit]
+# Directories to exclude from scanning
+exclude_dirs = [
+    "tests",
+    "scripts",
+    "benchmarks",
+    "tools",
+    "fuzz",
+    "docs",
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+]
+
+# Skip these checks (false positives or acceptable in context)
+skips = [
+    "B101",  # assert_used - pytest uses assert statements
+    "B104",  # hardcoded_bind_all_interfaces - often intentional for dev servers
+    "B311",  # random - non-crypto random is fine for non-security purposes
+    "B404",  # import_subprocess - subprocess is needed, usage is checked
+    "B603",  # subprocess_without_shell_equals_true - we validate inputs
+]
+
+# Targets to scan (can be overridden on command line)
+targets = ["src"]
+
+# Severity and confidence levels
+# Run with -ll (medium+) or -lll (high only) for less noise
+# These are applied when using -c pyproject.toml
+[tool.bandit.assert_used]
+skips = ["**/test_*.py", "**/*_test.py"]
+
+# Vulture Configuration (Dead Code Detection)
+# Detects unused code to maintain clean codebase
+# Run: uv run vulture src/
+[tool.vulture]
+min_confidence = 80
+paths = ["src/"]
+exclude = [
+    "tests/",
+    "docs/",
+    ".venv/",
+    "venv/",
+    "build/",
+    "dist/",
+]
+# Whitelist common false positives
+ignore_names = [
+    "visit_*",  # AST visitor methods
+    "setUp",
+    "tearDown",
+    "setUpClass",
+    "tearDownClass",
+    "__*__",  # Magic methods
+]
+
+# UV Configuration
+[tool.uv]
+# Note: UV now recommends using [dependency-groups] instead of dev-dependencies
+# We use [project.optional-dependencies] for dev dependencies (PEP 621 standard)
+
+# =============================================================================
+# SUPPLY CHAIN SECURITY - Package Index Configuration
+# =============================================================================
+# Priority order:
+#   1. Assured OSS (Google-verified, SLSA Level 3) - third-party packages
+#   2. Internal (python-libs) - internal shared packages
+#   3. PyPI (fallback) - packages not in Assured OSS
+#
+# Documentation: https://cloud.google.com/assured-open-source-software/docs
+# =============================================================================
+
+[[tool.uv.index]]
+name = "assured-oss"
+url = "https://us-python.pkg.dev/cloud-aoss/cloud-aoss-python/simple"
+explicit = true
+# Google Assured OSS - curated packages with SLSA Level 3 provenance
+# explicit = true: packages must be directed here via [tool.uv.sources]
+# This prevents auth failures when GCP credentials are not configured
+# Full list: https://cloud.google.com/assured-open-source-software/docs/supported-packages
+
+[[tool.uv.index]]
+name = "internal"
+url = "https://us-central1-python.pkg.dev/assured-oss-457903/python-libs/simple"
+explicit = true
+# Internal packages from your organization's Artifact Registry
+# explicit = true: packages must be directed here via [tool.uv.sources]
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+# PyPI is the default - all packages resolve from here unless explicitly directed
+
+# =============================================================================
+# Package Sources - Direct specific packages to secure indexes
+# =============================================================================
+# After configuring GCP authentication, uncomment packages to pull from Assured OSS:
+#
+# [tool.uv.sources]
+# numpy = { index = "assured-oss" }
+# pandas = { index = "assured-oss" }
+# requests = { index = "assured-oss" }
+# flask = { index = "assured-oss" }
+# django = { index = "assured-oss" }
+#
+# For internal packages:
+# your-internal-package = { index = "internal" }
+#
+# Setup: ./scripts/setup-supply-chain.sh
+# Packages: https://cloud.google.com/assured-open-source-software/docs/supported-packages
+
+# Semantic Release Configuration
+# Automates versioning and changelog generation based on conventional commits
+# Reference: https://python-semantic-release.readthedocs.io/
+[tool.semantic_release]
+# Version location in this file
+version_toml = ["pyproject.toml:project.version"]
+
+# Commit message parsing
+commit_parser = "conventional_commits"
+commit_parser_options = { parse_squash_commits = true, ignore_merge_commits = true }
+
+# Version behavior
+major_on_zero = false  # Don't bump to 1.0.0 automatically
+allow_zero_version = true  # Allow 0.x.x versions
+
+# Branches configuration
+[tool.semantic_release.branches.main]
+match = "(main|master)"
+prerelease = false
+
+[tool.semantic_release.branches.develop]
+match = "develop"
+prerelease = true
+prerelease_token = "dev"
+
+[tool.semantic_release.branches.release]
+match = "release/*"
+prerelease = true
+prerelease_token = "rc"
+
+# Changelog configuration
+[tool.semantic_release.changelog]
+template_dir = "templates"
+changelog_file = "CHANGELOG.md"
+exclude_commit_patterns = [
+    "^chore\\(release\\):",
+    "^ci:",
+    "^build:",
+]
+
+[tool.semantic_release.changelog.environment]
+block_start_string = "{%"
+block_end_string = "%}"
+variable_start_string = "{{"
+variable_end_string = "}}"
+comment_start_string = "{#"
+comment_end_string = "#}"
+trim_blocks = true
+lstrip_blocks = true
+keep_trailing_newline = true
+
+# Remote configuration
+[tool.semantic_release.remote]
+type = "github"
+token = { env = "GH_TOKEN" }
+
+# Publishing configuration
+[tool.semantic_release.publish]
+dist_glob_patterns = ["dist/*"]
+upload_to_vcs_release = true
+# Cruft skip list: paths to preserve across `cruft update` runs.
+# Cruft reads this section at update time from the live project directory,
+# so these values survive cruft regenerating .cruft.json. The post-gen hook
+# no longer writes to .cruft.json for this purpose; this section is the
+# canonical skip list.
+[tool.cruft]
+skip = [
+    # Git internals (binary objects)
+    ".git",
+    ".git/*",
+    "**/.git/**",
+    # Python bytecode and caches
+    "*.pyc",
+    "**/__pycache__/**",
+    "*.egg-info/**",
+    ".mypy_cache/**",
+    ".pytest_cache/**",
+    ".ruff_cache/**",
+    ".tox/**",
+    # Virtual environments
+    ".venv/**",
+    "venv/**",
+    # Lock files (frequently change, can have binary-like content)
+    "*.lock",
+    "uv.lock",
+    "poetry.lock",
+    # Build artifacts
+    "*.whl",
+    "dist/**",
+    "build/**",
+    # Coverage and test artifacts
+    ".coverage",
+    "htmlcov/**",
+    # Database files (binary)
+    "*.db",
+    "*.sqlite",
+    "*.sqlite3",
+    # IDE and tool caches
+    ".qlty/**",
+    ".sonarlint/**",
+    ".idea/**",
+    ".vscode/**",
+    # Node modules (if any JS tooling)
+    "node_modules/**",
+    # Frontend user customizations (don't overwrite with cruft update)
+    "frontend/src/components/**",
+    "frontend/src/hooks/**",
+    "frontend/src/pages/**",
+    "frontend/src/routes/**",
+    "frontend/src/App.tsx",
+    "frontend/src/App.css",
+    "frontend/public/**",
+    # Frontend generated/build files
+    "frontend/src/client/**",
+    "frontend/dist/**",
+    "frontend/node_modules/**",
+    "frontend/.vite/**",
+    "frontend/coverage/**",
+    # Template-specific files that should remain project-owned
+    "CLAUDE.md",
+    "REUSE.toml",
+    "docs/template_feedback.md",
+# Community health pointer files: user-customised to reference the org's
+    # .github/ defaults; preserve across cruft updates so local edits survive.
+    "CODE_OF_CONDUCT.md",
+    "GOVERNANCE.md",
+]

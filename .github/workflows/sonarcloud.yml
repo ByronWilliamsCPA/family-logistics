@@ -1,0 +1,45 @@
+# Family Logistics - SonarCloud Analysis
+# Thin caller for the organization's reusable SonarCloud workflow.
+#
+# The reusable workflow uses sonarqube-scan-action v7.2.0, which resolves
+# the /analysis/analyses 404 bug encountered with v4.x on new projects.
+#
+# SonarCloud Dashboard: https://sonarcloud.io/dashboard?id=ByronWilliamsCPA_family_logistics
+#
+# Note: This workflow requires SONAR_TOKEN secret to be configured.
+# If not configured, the reusable workflow will skip gracefully.
+name: SonarCloud
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sonarcloud:
+    name: SonarCloud Analysis
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-sonarcloud.yml@961eb17d8e9b7fe0d8bfc5dbe9d23c824484fb11  # main
+    with:
+      sonar-organization: 'byronwilliamscpa'
+      sonar-project-key: 'ByronWilliamsCPA_family_logistics'
+      python-version: '3.12'
+      source-directory: 'src'
+      coverage-paths: 'coverage.xml'
+      fail-on-quality-gate: ${{ github.event_name != 'pull_request' }}
+      skip-if-no-token: true
+      no-build: false  # generated project ships as an installable package; upstream default of true would block 'uv sync' from installing the editable project for coverage
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

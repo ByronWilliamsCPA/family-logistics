@@ -1,0 +1,68 @@
+# CI/CD Pipeline
+# Runs tests, linting, type checking, and security scans.
+#
+# Features:
+#   - Standard quality checks (tests, linting, type checking)
+#   - Security scanning (Bandit)
+#   - Optional SonarCloud/Codecov integration
+name: CI
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main, master, develop]
+  workflow_dispatch:
+
+# Cancel in-progress runs for same PR/branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+# Uses org-level reusable workflow
+jobs:
+  ci:
+    name: CI Pipeline
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-ci.yml@main
+    with:
+      python-version: '3.12'
+      coverage-threshold: 80
+      source-directory: 'src'
+      test-directory: 'tests'
+      enable-sonarcloud: true
+      sonarcloud-organization: 'ByronWilliamsCPA'
+      sonarcloud-project-key: 'ByronWilliamsCPA_family_logistics'
+      enable-codecov: true
+      run-integration-tests: true
+      run-security-tests: true
+      fail-on-llm-tags: false
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  ci-gate:
+    name: CI Gate
+    runs-on: ubuntu-latest
+    needs: [ci]
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Check CI results
+        run: |
+          if [ "${{ needs.ci.result }}" != "success" ]; then
+            echo "CI Gate failed"
+            exit 1
+          fi
+          echo "CI Gate passed"

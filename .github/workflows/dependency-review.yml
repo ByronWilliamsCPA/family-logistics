@@ -1,0 +1,44 @@
+# Dependency Review - Analyzes dependency changes in PRs
+# Checks for vulnerabilities and license compliance
+#
+# Features:
+#   - Vulnerability detection in dependency changes
+#   - License compliance checking
+#   - Blocks PRs with high severity vulnerabilities
+name: Dependency Review
+
+on:
+  pull_request:
+    branches: [main, master, develop]
+    paths:
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'requirements*.txt'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          # Deny copyleft and restrictive licenses (deny-list approach)
+          deny-licenses: AGPL-3.0, AGPL-3.0-only, AGPL-3.0-or-later, GPL-2.0-only, GPL-2.0-or-later, GPL-3.0-only, GPL-3.0-or-later, LGPL-2.0-only, LGPL-2.1-only, LGPL-3.0-only, LGPL-3.0-or-later
+          comment-summary-in-pr: on-failure

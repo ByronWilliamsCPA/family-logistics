@@ -1,0 +1,56 @@
+---
+# Release Workflow
+# Handles automated releases with semantic versioning or
+# manual tag-based releases.
+#
+# Features:
+#   - Pre-release testing
+#   - Semantic versioning (if enabled) or manual tag-based releases
+#   - PyPI publishing with OIDC trusted publishing
+#   - GitHub Release creation
+name: Semantic Release
+
+"on":
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: 'Force release type (leave empty for auto)'
+        required: false
+        type: choice
+        options:
+          - ''
+          - patch
+          - minor
+          - major
+          - prerelease
+
+# Prevent concurrent releases
+concurrency:
+  group: "release-${{ github.ref }}"
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+  attestations: write
+
+# Uses org-level reusable workflow
+jobs:
+  release:
+    name: Release Pipeline
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-release.yml@main
+    with:
+      python-version: '3.12'
+      coverage-threshold: 80
+      source-directory: 'src'
+      semantic-release: true
+      force-release: "${{ github.event.inputs.force_release || '' }}"
+      publish-to-pypi: true
+      pypi-package-name: 'family-logistics'
+      run-tests: true

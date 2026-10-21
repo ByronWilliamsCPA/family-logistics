@@ -1,0 +1,132 @@
+# REUSE Software Bill of Materials
+# https://reuse.software/
+# This file provides centralized licensing information for the entire project
+# avoiding the need for SPDX headers in individual files.
+
+version = 1
+SPDX-PackageName = "family_logistics"
+SPDX-PackageSupplier = "Byron Williams"
+SPDX-PackageDownloadLocation = "https://github.com/ByronWilliamsCPA/family-logistics"
+
+# Source code (Python, tools, tests) - MIT
+[[annotations]]
+path = [
+    "src/**",
+    "tools/**",
+    "tests/**",
+    "validation/**",
+    "fuzz/**",
+    "benchmarks/**/*.py",
+    "scripts/**/*.py",
+    "modal/**/*.py",
+    "*.py",
+    "noxfile.py",
+]
+SPDX-License-Identifier = "MIT"
+SPDX-FileCopyrightText = "2025 Byron Williams"
+
+# Documentation - CC-BY-4.0
+[[annotations]]
+path = [
+    "docs/**",
+    "*.md",
+    "tmp_cleanup/**/*.md",  # Temporary reference files
+    "benchmarks/*.md",  # Benchmark documentation (not reports)
+    "!LICENSES/*.txt",  # Exclude actual license text files
+]
+SPDX-License-Identifier = "CC-BY-4.0"
+SPDX-FileCopyrightText = "2025 Byron Williams"
+
+# Configuration files - CC0-1.0 (public domain dedication)
+[[annotations]]
+path = [
+    "*.toml",
+    "*.yml",
+    "*.yaml",
+    ".github/**",
+    ".gitignore",
+    ".gitattributes",
+    ".pre-commit-config.yaml",
+    ".readthedocs.yaml",
+    "mkdocs.yml",
+    "poetry.lock",  # Dependency lockfile for reproducible builds
+    "requirements/**/*.txt",  # Generated from poetry export
+    "benchmarks/labelmaps/**/*.yaml",  # Benchmark label mappings
+    ".zenodo.json",  # Zenodo metadata for DOI
+]
+SPDX-License-Identifier = "CC0-1.0"
+SPDX-FileCopyrightText = "2025 Byron Williams"
+
+# Data files and models - ODbL-1.0 (Open Database License)
+[[annotations]]
+path = [
+    "data/**",
+    "models/**",
+]
+SPDX-License-Identifier = "ODbL-1.0"
+SPDX-FileCopyrightText = "2025 Byron Williams"
+
+# Build artifacts and generated files - excluded from licensing
+[[annotations]]
+path = [
+    "build/**",
+    "dist/**",
+    "site/**",
+    "*.egg-info/**",
+    "__pycache__/**",
+    ".venv/**",
+    "venv/**",
+    ".nox/**",
+    ".mypy_cache/**",
+    ".pytest_cache/**",
+    ".ruff_cache/**",
+    "*.pyc",
+    "*.pyo",
+]
+precedence = "override"
+SPDX-License-Identifier = "CC0-1.0"
+SPDX-FileCopyrightText = "2025 Byron Williams"
+
+# Additional configuration and temporary files - CC0-1.0
+[[annotations]]
+path = [
+    ".claude/settings.local.json",
+    ".claude/**/*.json",  # Claude configuration files
+    ".claude/**/*.md",  # Claude documentation files
+    ".standards/**",  # Baseline standards (auto-updated by cruft)
+    ".clusterfuzzlite/**",
+    ".sonarlint/**",  # SonarLint IDE configuration
+    ".qlty/**",  # Qlty configuration
+    ".coderabbit.yaml",  # CodeRabbit AI review configuration
+    ".vscode/**",  # VS Code settings
+    ".idea/**",  # IntelliJ/PyCharm settings
+    "concept.txt",
+    "image_reference_sets.txt",
+    "overrides/**",
+    "renovate.json",
+    "validate_workflows.sh",
+    "scripts/**/*.sh",  # Shell scripts for automation
+    "tmp_cleanup/**/*.txt",  # Temporary text files
+    "tmp_cleanup/.gitkeep",  # Directory placeholder
+    "sonar-project.properties",  # SonarCloud/SonarQube configuration
+    "codemeta.json",  # CodeMeta software metadata
+    ".zenodo.json",  # Zenodo DOI metadata
+    "Makefile",  # Build automation
+    "justfile",  # Just command runner
+    "Taskfile.yml",  # Task runner configuration
+]
+SPDX-License-Identifier = "CC0-1.0"
+SPDX-FileCopyrightText = "2025 Byron Williams"
+
+# Benchmark results and generated metadata files - CC0-1.0
+[[annotations]]
+path = [
+    "benchmarks/reports/**/*.json",
+    "benchmarks/reports/**/*.md",
+    "codemeta.json",
+    "benchmarks/LICENSES.md",
+    "benchmarks/registry.yml",
+    "notebooks/**/*.ipynb",  # Jupyter notebooks (Colab training examples)
+]
+SPDX-License-Identifier = "CC0-1.0"
+SPDX-FileCopyrightText = "2025 Byron Williams"
