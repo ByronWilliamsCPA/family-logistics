@@ -113,6 +113,70 @@ class TestParsing:
         seed = parse_seed(seed_text(base_seed()))
         assert seed.transport_defaults[0].weekdays == frozenset({0, 2, 4})
 
+    def test_weekday_names_are_case_insensitive_and_stripped(self):
+        data = base_seed()
+        data["transport_defaults"][0]["weekdays"] = [" FRIDAY ", "Sun", "tue"]  # type: ignore[index]
+        seed = parse_seed(seed_text(data))
+        assert seed.transport_defaults[0].weekdays == frozenset({4, 6, 1})
+
+    @pytest.mark.parametrize(
+        "weekday", ["monkey", "friend", "satur", "mo", True, False, 7, -1]
+    )
+    def test_weekday_prefixes_and_booleans_are_rejected(self, weekday):
+        data = base_seed()
+        data["transport_defaults"][0]["weekdays"] = [weekday]  # type: ignore[index]
+        text_input = seed_text(data)
+        with pytest.raises(SeedError, match="weekdays must be"):
+            parse_seed(text_input)
+
+    def test_unprintable_character_is_a_seed_error(self):
+        with pytest.raises(SeedError, match="not valid YAML"):
+            parse_seed("version: 1\x07\n")
+
+    def test_duplicate_nested_key_names_line_only(self):
+        text_input = (
+            "version: 1\n"
+            "people:\n"
+            "  - id: riley\n"
+            "    name: Riley\n"
+            "    role: parent\n"
+            "    can_drive: false\n"
+            "    can_drive: true\n"
+        )
+        with pytest.raises(SeedError, match="near line 7") as caught:
+            parse_seed(text_input)
+        message = str(caught.value)
+        assert "can_drive" not in message
+        assert "true" not in message
+
+    def test_duplicate_top_level_section_names_line_only(self):
+        text_input = (
+            "version: 1\n"
+            "people:\n"
+            "  - {id: riley, name: Riley, role: parent}\n"
+            "people:\n"
+            "  - {id: alex, name: Alex, role: child}\n"
+        )
+        with pytest.raises(SeedError, match="near line 4") as caught:
+            parse_seed(text_input)
+        message = str(caught.value)
+        assert "people" not in message
+        assert "Alex" not in message
+
+    def test_duplicate_alias_within_a_kind_is_rejected(self):
+        data = base_seed()
+        data["locations"][0]["aliases"] = ["  central "]  # type: ignore[index]
+        text_input = seed_text(data)
+        with pytest.raises(SeedError, match="repeats an alias") as caught:
+            parse_seed(text_input)
+        assert "central" not in str(caught.value).casefold()
+
+    def test_same_alias_in_different_kinds_is_allowed(self):
+        data = base_seed()
+        data["people"][1]["aliases"] = ["Central"]  # type: ignore[index]
+        seed = parse_seed(seed_text(data))
+        assert seed.people[1].aliases == ("Central",)
+
     def test_example_inside_repo_is_refused(self):
         with pytest.raises(SeedError, match="inside a git working tree"):
             load_seed_file(EXAMPLE)
@@ -239,6 +303,44 @@ class TestApply:
         school = snapshot.location("school")
         assert school is not None
         assert school.aliases == ("Central",)
+
+    def test_alias_moves_between_locations(self, engine, cipher):
+        apply_seed(
+            engine, parse_seed(seed_text(base_seed())), cipher=cipher, today=TODAY
+        )
+        data = base_seed()
+        # "home" is written before "school", so without clearing first the
+        # alias would still belong to "school" when "home" claims it.
+        data["locations"][0]["aliases"] = ["central"]  # type: ignore[index]
+        data["locations"][1]["aliases"] = []  # type: ignore[index]
+        plan = apply_seed(
+            engine, parse_seed(seed_text(data)), cipher=cipher, today=TODAY
+        )
+        assert {(c.object_ref, c.action) for c in plan.changes} == {
+            ("location:home", "update"),
+            ("location:school", "update"),
+        }
+        snapshot = load_snapshot(engine, cipher)
+        home = snapshot.location("home")
+        school = snapshot.location("school")
+        assert home is not None
+        assert school is not None
+        assert home.aliases == ("central",)
+        assert school.aliases == ()
+
+    def test_audit_failure_rolls_back_registry_changes(
+        self, engine, cipher, monkeypatch
+    ):
+        def failing_record(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("audit unavailable")
+
+        monkeypatch.setattr(registry_seed, "record_on", failing_record)
+        seed = parse_seed(seed_text(base_seed()))
+        with pytest.raises(RuntimeError, match="audit unavailable"):
+            apply_seed(engine, seed, cipher=cipher, today=TODAY)
+        with engine.connect() as connection:
+            assert RegistryStore(connection).people() == []
+        assert audit_count(engine) == 0
 
     def test_dry_run_writes_nothing(self, engine, cipher):
         plan = apply_seed(

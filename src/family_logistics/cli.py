@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import datetime
 from http.client import HTTPConnection
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
+from zoneinfo import ZoneInfo
 
 import click
 from alembic.util import CommandError
@@ -342,7 +344,12 @@ def registry_load(
     try:
         seed = load_seed_file(seed_path, allow_repo_path=allow_repo_path)
         plan = apply_seed(
-            engine, seed, cipher=_cipher(settings), actor=actor, dry_run=dry_run
+            engine,
+            seed,
+            cipher=_cipher(settings),
+            actor=actor,
+            dry_run=dry_run,
+            today=datetime.now(ZoneInfo(settings.timezone)).date(),
         )
     except (SeedError, RegistryError, ConfigurationError, ProtectedDataError) as exc:
         _fail(str(exc))

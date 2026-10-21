@@ -44,7 +44,7 @@ from pydantic import (
 from pydantic import ValidationError as PydanticValidationError
 
 from family_logistics.core.exceptions import ConfigurationError, ValidationError
-from family_logistics.db.audit import AuditRepository
+from family_logistics.db.audit import record_on
 from family_logistics.db.registry import Household, RegistryStore
 from family_logistics.domain.events import (
     CalendarKind,
@@ -63,7 +63,7 @@ from family_logistics.domain.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Hashable, Sequence
     from pathlib import Path
 
     from sqlalchemy.engine import Engine
@@ -75,6 +75,15 @@ SLUG = r"^[a-z0-9][a-z0-9._-]{0,63}$"
 CALENDAR_ID = r"^[A-Za-z0-9._:-]{1,100}$"
 """Calendar IDs stay short enough for ``calendar:<id>`` audit references."""
 WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+WEEKDAY_NAMES = (
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+)
 COORDINATES = re.compile(r"^\s*-?\d{1,2}(\.\d+)?\s*,\s*-?\d{1,3}(\.\d+)?\s*$")
 MAX_SEED_BYTES = 1_000_000
 
@@ -305,6 +314,10 @@ class SeedTransportDefault(_Model):
     def _weekday_names(cls, value: object) -> object:
         """Accept weekday names as well as integers.
 
+        Names are matched case-insensitively and must be the exact
+        three-letter abbreviation or the full name (``mon`` or ``Monday``,
+        never a prefix such as ``monkey``). Booleans are not weekdays.
+
         Args:
             value: Raw list from the seed file.
 
@@ -319,9 +332,16 @@ class SeedTransportDefault(_Model):
         items = cast("Sequence[object]", value)
         days: list[int] = []
         for item in items:
-            if isinstance(item, str) and item.strip().lower()[:3] in WEEKDAYS:
-                days.append(WEEKDAYS.index(item.strip().lower()[:3]))
-            elif isinstance(item, int) and 0 <= item <= len(WEEKDAYS) - 1:
+            name = item.strip().casefold() if isinstance(item, str) else None
+            if name in WEEKDAYS:
+                days.append(WEEKDAYS.index(name))
+            elif name in WEEKDAY_NAMES:
+                days.append(WEEKDAY_NAMES.index(name))
+            elif (
+                isinstance(item, int)
+                and not isinstance(item, bool)
+                and 0 <= item <= len(WEEKDAYS) - 1
+            ):
                 days.append(item)
             else:
                 msg = "weekdays must be mon-sun or 0-6"
@@ -387,9 +407,14 @@ class RegistrySeed(_Model):
             The unchanged model.
 
         Raises:
-            ValueError: On a duplicate ID or an unresolved reference.
+            ValueError: On a duplicate ID, a duplicate alias within one kind
+                or an unresolved reference.
         """
-        problems = [*_duplicate_ids(self), *_unresolved_references(self)]
+        problems = [
+            *_duplicate_ids(self),
+            *_duplicate_aliases(self),
+            *_unresolved_references(self),
+        ]
         if problems:
             raise ValueError("; ".join(problems))
         return self
@@ -409,6 +434,35 @@ def _duplicate_ids(seed: RegistrySeed) -> list[str]:
         dupes = sorted({i for i in ids if ids.count(i) > 1})
         problems.extend(f"{section}: duplicate id {d}" for d in dupes)
     return problems
+
+
+def _alias_key(alias: str) -> str:
+    """Normalize an alias the way the registry's unique index compares it."""
+    return " ".join(alias.split()).casefold()
+
+
+def _duplicate_aliases(seed: RegistrySeed) -> list[str]:
+    """Return one problem per alias claimed by two targets of one kind.
+
+    Aliases are compared after collapsing whitespace and case-folding, the
+    same normalization ``RegistryStore.set_aliases`` applies. Only the kind
+    and the target IDs are named, never the alias text.
+    """
+    problems: list[str] = []
+    for section, targets in (
+        ("people", [(p.id, p.aliases) for p in seed.people]),
+        ("external_passengers", [(e.id, e.aliases) for e in seed.external_passengers]),
+        ("locations", [(x.id, x.aliases) for x in seed.locations]),
+    ):
+        owners: dict[str, str] = {}
+        for target_id, aliases in targets:
+            for key in {_alias_key(a) for a in aliases if a.strip()}:
+                owner = owners.setdefault(key, target_id)
+                if owner != target_id:
+                    problems.append(
+                        f"{section}: {target_id} repeats an alias of {owner}"
+                    )
+    return sorted(set(problems))
 
 
 def _unresolved_references(seed: RegistrySeed) -> list[str]:
@@ -468,6 +522,44 @@ def inside_git_worktree(path: Path) -> bool:
     return any((parent / ".git").exists() for parent in resolved.parents)
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects a mapping key listed twice.
+
+    Plain ``yaml.safe_load`` keeps the last duplicate silently, so a repeated
+    ``can_drive`` or a second ``people:`` section would quietly override the
+    first. The error carries only the position, never the key or value.
+    """
+
+    def construct_mapping(
+        self, node: yaml.MappingNode, deep: bool = False
+    ) -> dict[Hashable, object]:
+        """Build a mapping, refusing duplicate keys.
+
+        Args:
+            node: The YAML mapping node.
+            deep: Construct nested values immediately.
+
+        Returns:
+            The constructed mapping.
+
+        Raises:
+            yaml.constructor.ConstructorError: If a key appears twice.
+        """
+        seen: set[object] = set()
+        pairs = cast("list[tuple[yaml.Node, yaml.Node]]", node.value)
+        for key_node, _ in pairs:
+            # Third-party stub gap: types-PyYAML leaves construct_object's
+            # ``node`` parameter unannotated.
+            key = cast("object", self.construct_object(key_node, deep=deep))  # pyright: ignore[reportUnknownMemberType]
+            if key in seen:
+                raise yaml.constructor.ConstructorError(
+                    problem="duplicate mapping key",
+                    problem_mark=cast("yaml.Mark", key_node.start_mark),
+                )
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
 def parse_seed(text: str) -> RegistrySeed:
     """Validate seed YAML text.
 
@@ -481,8 +573,14 @@ def parse_seed(text: str) -> RegistrySeed:
         SeedError: If the YAML is malformed or fails validation. The message
             names locations and reasons, never values.
     """
+    # The SafeLoader subclass is driven directly (as ``yaml.load`` would) so
+    # only safe constructors run, plus duplicate-key rejection.
     try:
-        data = cast("object", yaml.safe_load(text))
+        loader = _UniqueKeyLoader(text)
+        try:
+            data = cast("object", loader.get_single_data())
+        finally:
+            loader.dispose()
     except yaml.YAMLError as exc:
         mark = getattr(exc, "problem_mark", None)
         line = getattr(mark, "line", None)
@@ -992,6 +1090,13 @@ def _apply(
 ) -> None:
     """Write a plan's changes, in foreign-key order, on the store's connection."""
     refs = {c.object_ref for c in plan.changes if c.action != "deactivate"}
+    # Clear the aliases of every changing target first, so an alias moving
+    # from one target to another never collides with its old owner on the
+    # unique (kind, lower(alias)) index; each upsert then rewrites its own.
+    for ref in sorted(refs):
+        kind, ident = ref.split(":", 1)
+        if kind in {"person", "passenger", "location"}:
+            store.set_aliases(kind, ident, ())
     inactive_since = store.passenger_inactive_since()
     wanted = seed_transport_defaults(seed)
     # Order matters for foreign keys: places and vehicles, then households,
@@ -1088,19 +1193,22 @@ def apply_seed(  # noqa: PLR0913 - keyword-only options
             store = RegistryStore(connection, cipher)
             _require_cipher_for(store, seed, cipher)
             return build_plan(store, seed)
+    # #CRITICAL: Data integrity: the audit rows are written on the same
+    # connection, so an audit failure rolls the registry changes back too.
+    # #VERIFY: test_audit_failure_rolls_back_registry_changes.
     with engine.begin() as connection:
         store = RegistryStore(connection, cipher)
         _require_cipher_for(store, seed, cipher)
         plan = build_plan(store, seed)
         _apply(store, seed, plan, day)
-    audit = AuditRepository(engine)
-    for change in plan.changes:
-        audit.record(
-            actor=actor,
-            object_ref=change.object_ref,
-            action=f"seed-{change.action}",
-            prior_state=change.prior,
-            new_state=change.new,
-            correlation_id=correlation_id,
-        )
+        for change in plan.changes:
+            record_on(
+                connection,
+                actor=actor,
+                object_ref=change.object_ref,
+                action=f"seed-{change.action}",
+                prior_state=change.prior,
+                new_state=change.new,
+                correlation_id=correlation_id,
+            )
     return plan
