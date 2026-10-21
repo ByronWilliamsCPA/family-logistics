@@ -87,7 +87,10 @@ FIELD_STATUS: dict[str, str] = {
     "notification_mode": CONSUMED,
     "quiet_hours_start": M3,
     "quiet_hours_end": M3,
-    "imminent_window_minutes": M3,
+    "imminent_window_minutes": CONSUMED,
+    "same_location_gap_minutes": CONSUMED,
+    "travel_buffer_minutes": CONSUMED,
+    "stop_buffer_minutes": CONSUMED,
 }
 """Whether each setting is read today or waits for a milestone.
 
@@ -156,7 +159,13 @@ class Settings(BaseSettings):
         quiet_hours_start: Start of quiet hours (local time).
         quiet_hours_end: End of quiet hours (local time).
         imminent_window_minutes: Rides starting within this window are
-            imminent; their critical issues bypass quiet hours.
+            imminent; their critical issues bypass quiet hours and an
+            unverified destination on them is critical.
+        same_location_gap_minutes: Largest idle gap between two activities at
+            one place that still counts as a single stay (no ride needed).
+        travel_buffer_minutes: Arrive this long before a passenger's next
+            activity.
+        stop_buffer_minutes: Loading or unloading time per ride stop.
     """
 
     model_config = SettingsConfigDict(
@@ -226,6 +235,12 @@ class Settings(BaseSettings):
     quiet_hours_start: time = time(22, 0)
     quiet_hours_end: time = time(6, 0)
     imminent_window_minutes: int = Field(default=180, ge=0)
+
+    # #ASSUME: Timing: proposed defaults pending owner approval (defaults
+    # register); tuned during the shadow period.
+    same_location_gap_minutes: int = Field(default=60, ge=0)
+    travel_buffer_minutes: int = Field(default=10, ge=0)
+    stop_buffer_minutes: int = Field(default=5, ge=0)
 
     @field_validator("ha_token")
     @classmethod
