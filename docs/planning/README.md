@@ -65,6 +65,7 @@ Flag any violations.
 ### Updating Documents
 
 Update documents when:
+
 - **Roadmap**: After completing tasks
 - **ADR**: When making architectural decisions
 - **Tech Spec**: When architecture changes

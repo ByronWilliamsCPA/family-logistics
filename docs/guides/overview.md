@@ -3,42 +3,46 @@ title: "Overview"
 schema_type: common
 status: published
 owner: core-maintainer
-purpose: "Overview of Family Logistics features and capabilities."
+purpose: "Overview of what Family Logistics checks and the rules it never breaks."
 tags:
   - guide
   - overview
 ---
 
-Deterministic family transportation assurance: validates iCloud ride commitments before a child is stranded
+Family Logistics answers one question for every upcoming day: does every child
+have a feasible way to get from where they are to where they need to be?
 
-## Key Features
+## What it checks
 
-### Modern Python Development
+- **Ride commitments** written as a versioned notes template on events in a
+  dedicated iCloud transportation calendar (driver, passengers, pickup, a
+  destination per passenger, status and a confirmation code).
+- **Location continuity**: consecutive activities at the same place need no
+  ride; every change of location needs a ride, a recorded transport mode (bus,
+  bike, walk) or an explicit exemption, and the last activity of the day needs
+  a way home.
+- **Passenger-level obligations**: each passenger's leg is tracked on its own,
+  so changing one child's plan never removes another child's ride. A confirmed
+  ride for a child from another family that disappears without replacement is
+  a critical finding.
+- **Drivers and timing**: double-booked drivers, unauthorized drivers, seat
+  capacity and travel time against arrival deadlines.
 
-- **Python 3.12+** with full type annotations
-- **UV** for fast dependency management
-- **Ruff** for linting and formatting
-- **BasedPyright** for strict type checking
+## Rules it never breaks
 
-### Quality Assurance
+- iCloud is the authoritative record; the application never writes to it.
+- The deterministic engine decides pass or fail. A language model may explain
+  findings but cannot create, dismiss or downgrade them.
+- A failed or incomplete analysis is never reported as clear.
 
-- **pytest** with comprehensive coverage
-- **Pre-commit hooks** for automated checks
-- **GitHub Actions** CI/CD pipeline
+## Run statuses
 
-### Command Line Interface
+| Status | Meaning |
+|--------|---------|
+| `clear` | All inputs fresh and no open warning or critical findings |
+| `attention_required` | At least one open warning or critical finding |
+| `incomplete` | Required inputs missing or stale; never shown as clear |
+| `failed` | The run itself errored |
 
-Built with Click for a robust CLI experience:
-
-```bash
-family_logistics --help
-```
-## Getting Started
-
-1. **Installation**: See the [Configuration Guide](configuration.md)
-2. **Usage**: Check the [Usage Guide](usage.md)
-3. **API**: Browse the [API Reference](../api-reference.md)
-
-## Architecture
-
-For details on the project architecture, see [Architecture](../development/architecture.md).
+See the [architecture decisions](../ADRs/README.md) for the reasoning behind
+each rule.

@@ -13,11 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - TBD
 
 ### Added
-- Initial project structure with Poetry package management
+- Initial project structure with uv package management
 - Pydantic v2 JSON schema validation
 - Structured logging with structlog and rich console output
 - Pre-commit hooks (Ruff format, Ruff lint, BasedPyright, Bandit, pip-audit)
-- Comprehensive test suite with pytest
+- Test suite with pytest and an 80% coverage gate
 - GitHub Actions CI/CD pipeline with quality gates
 - CLI tool foundation
 - License
@@ -29,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - References to ByronWilliamsCPA org-level Code of Conduct
 
 ### Infrastructure
-- Poetry dependency management with lock file
+- uv dependency management with a committed lock file
 - pytest test framework with coverage reporting
 - GitHub issue tracking and templates
 - Automated dependency security scanning (Safety, Bandit)

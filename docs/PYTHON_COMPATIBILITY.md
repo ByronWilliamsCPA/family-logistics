@@ -192,6 +192,7 @@ python -c "import sys; print(f'GIL enabled: {sys._is_gil_enabled()}')"
 ```
 
 **Important Considerations:**
+
 - Not all packages support free-threaded mode yet
 - Some C extensions require GIL
 - Performance may vary - benchmark your workload
@@ -213,6 +214,7 @@ def func(x: expensive_type_check()):  # Deferred until introspection
 ```
 
 **Impact on Runtime Type Checking:**
+
 - Libraries like Pydantic and dataclasses handle this automatically
 - Custom type introspection code may need updates
 - Access annotations via `__annotations__` or `inspect.get_annotations()`
@@ -231,12 +233,14 @@ This project does **not** require t-strings - standard f-strings work across all
 ### Deprecations
 
 **`from __future__ import annotations` is deprecated:**
+
 - This template's `check_type_hints.py` currently enforces this import
 - Deprecation in 3.14, removal not before Python 3.13 EOL (2029)
 - Continue using it for now (required for 3.10 compatibility)
 - We'll update the template before 2029
 
 **NotImplemented Boolean Context:**
+
 - Using `NotImplemented` in boolean contexts now raises `TypeError`
 - Was `DeprecationWarning` since Python 3.9
 

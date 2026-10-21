@@ -9,42 +9,42 @@ tags:
   - home
 ---
 
-Deterministic family transportation assurance: validates iCloud ride commitments before a child is stranded
+Family Logistics checks a family's ride commitments before anyone is stranded.
+It reads iCloud calendars read-only, builds a location timeline for each child,
+and uses deterministic rules to find missing or conflicting rides, including
+rides promised to children from other families. Results feed a Home Assistant
+status card and Apprise notifications.
 
-## Quick Start
+**Status: M0 (discovery).** The domain core is implemented and tested;
+collection, scheduling, notifications and the Home Assistant API arrive in
+milestones M1 to M5. Notifications default to shadow mode.
+
+## Quick start
 
 ```bash
-# Install the package
-pip install family-logistics
-
-# Or install with development dependencies
+git clone https://github.com/ByronWilliamsCPA/family-logistics.git
+cd family-logistics
 uv sync --all-extras
+uv run family-logistics --help
+uv run family-logistics config
 ```
 
-## CLI Usage
+The application ships as a container image, not a Python package:
 
 ```bash
-# Show help
-family_logistics --help
-
-# Example command
-family_logistics hello --name "World"
+docker pull ghcr.io/byronwilliamscpa/family-logistics:<tag>
 ```
-## Features
 
-- Modern Python 3.12+ support
-- Type-safe with BasedPyright strict mode
-- Comprehensive test coverage
-- Structured logging with structlog
-- CLI interface with Click
-- Docker support
-## Documentation
+## Where to go next
 
-- [User Guide](guides/overview.md) - Getting started and usage
-- [API Reference](api-reference.md) - Complete API documentation
-- [Development](development/architecture.md) - Architecture and contributing
-- [Project](project/roadmap.md) - Roadmap and changelog
+- [Overview](guides/overview.md): what the engine checks and why
+- [Configuration](guides/configuration.md): every `FL_` setting
+- [Usage](guides/usage.md): running the CLI and API locally
+- [Runbook](runbook.md): operating, rotating keys and restoring
+- [Architecture decisions](ADRs/README.md): ADRs 0001 to 0007
+- [Privacy and retention](privacy/privacy-and-retention-spec.md): handling of
+  children's and other families' data
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](project/license.md) file for details.
+MIT; see the [license page](project/license.md).

@@ -23,6 +23,7 @@ The MIT License is a permissive license that allows:
 With the following conditions:
 
 - **License and copyright notice**: Include the license in distributions
+
 ## Full License Text
 
 See the [LICENSE](https://github.com/ByronWilliamsCPA/family-logistics/blob/main/LICENSE) file in the repository root.
@@ -33,4 +34,4 @@ This project uses open-source dependencies. See `pyproject.toml` for the full li
 
 ## Contact
 
-For licensing questions, contact: byron@byronwilliams.dev
+For licensing questions, contact: <byron@byronwilliams.dev>

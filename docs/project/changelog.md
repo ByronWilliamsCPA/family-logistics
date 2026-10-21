@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core configuration with Pydantic Settings
 - Structured logging with structlog and rich
 - CLI interface with Click
-- Comprehensive test infrastructure
+- Test infrastructure with an 80% coverage gate
 - Documentation with MkDocs Material
 
 ### Changed

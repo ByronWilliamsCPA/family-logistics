@@ -90,5 +90,5 @@ analysis and could show green.
 ## References
 
 - RFC 4791 (CalDAV), RFC 5545 (iCalendar), RFC 6578 (WebDAV sync)
-- [tools/m0/README.md](../../tools/m0/README.md), check 1
+- [tools/m0/README.md](https://github.com/ByronWilliamsCPA/family-logistics/blob/main/tools/m0/README.md), check 1
 - [ADR-001](0001-deterministic-authority-and-llm-boundary.md)

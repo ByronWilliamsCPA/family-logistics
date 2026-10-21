@@ -24,7 +24,7 @@ Thank you for your interest in contributing to Family Logistics!
 ```bash
 # Clone the repository
 git clone https://github.com/ByronWilliamsCPA/family-logistics
-cd family_logistics
+cd family-logistics
 
 # Install dependencies
 uv sync --all-extras
@@ -32,6 +32,16 @@ uv sync --all-extras
 # Install pre-commit hooks
 uv run pre-commit install
 ```
+
+## Household data stays out of Git
+
+This repository is public. Use only the fictional household in tests, fixtures
+and documentation (parents Morgan and Riley; children Alex, Sam, Jordan and
+Casey; "Passenger E" and "Driver S" from other families). Never commit real
+names, addresses, coordinates, calendar identifiers, phone numbers, e-mail
+addresses or site network details. gitleaks and the private-terms hook check
+every commit; keep your own deny-list at
+`~/.config/family-logistics/private-terms.txt`.
 
 ## Development Workflow
 
@@ -77,6 +87,7 @@ Push your branch and create a PR against `main`.
 ## Code Review
 
 All contributions require:
+
 - Passing CI checks
 - Code review approval
 - Documentation updates (if applicable)
