@@ -16,7 +16,12 @@ TOKEN = SecretStr("t" * 40)
     [
         (f"Bearer {'t' * 40}", TOKEN, True),
         (f"Bearer {'t' * 39}", TOKEN, False),
-        (f"bearer {'t' * 40}", TOKEN, False),
+        (f"bearer {'t' * 40}", TOKEN, True),
+        (f"BEARER {'t' * 40}", TOKEN, True),
+        (f"Bearer  {'t' * 40}", TOKEN, True),
+        (f"Bearer {'T' * 40}", TOKEN, False),
+        (f"Basic {'t' * 40}", TOKEN, False),
+        (f"Bearer{'t' * 40}", TOKEN, False),
         ("t" * 40, TOKEN, False),
         (None, TOKEN, False),
         ("Bearer ", TOKEN, False),
