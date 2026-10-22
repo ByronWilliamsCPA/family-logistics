@@ -42,7 +42,7 @@ shows non-secret values only.
 | `FL_CALDAV_ALLOWED_HOSTS` | `icloud.com` | Comma-separated registrable domains the collector may reach, for the first request and every redirect hop; a host matches the domain or any subdomain (`p42-caldav.icloud.com`), never a lookalike (`evil-icloud.com`). Entries are bare domains: no scheme, path, port or wildcard. `FL_CALDAV_URL` must be inside it |
 | `FL_CALDAV_USERNAME` | unset | Dedicated Apple ID holding View Only calendar shares |
 | `FL_CALDAV_APP_PASSWORD` | unset | **Secret.** App-specific password for that Apple ID |
-| `FL_CALDAV_CALENDARS` | empty | Calendars to collect, by display name or calendar ID (comma-separated); unlisted calendars are never read |
+| `FL_CALDAV_CALENDARS` | empty | Calendars to collect, by display name or calendar ID (comma-separated); unlisted calendars are never read, and a calendar removed from the list stops being collected without raising DATA-011 |
 | `FL_CALDAV_TRANSPORT_CALENDAR` | `Family Transportation` | Display name of the shared ride calendar (registered as the transport calendar) |
 | `FL_COLLECT_DAYS_BACK` | `2` | Local days before today in each collection window |
 | `FL_COLLECT_DAYS_AHEAD` | `14` | Local days after today in each collection window |

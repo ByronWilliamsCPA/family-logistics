@@ -324,7 +324,9 @@ class CalDAVClient:
             The matching objects with their ETags and iCalendar text.
 
         Raises:
-            CalDAVError: When the request fails or an object lacks data.
+            CalDAVError: When the request fails, any entry is not a 200 (an
+                unreadable object or a truncated result set, such as a 507 for
+                the collection), or an object lacks data.
         """
         body = _xml_body(
             '<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">',
@@ -337,7 +339,18 @@ class CalDAVClient:
         for item in self._multistatus("REPORT", calendar_href, body, "1"):
             href = (item.findtext(_tag(DAV, "href")) or "").strip()
             if not _ok(item):
-                continue
+                # #CRITICAL: Data integrity: skipping the entry would turn a
+                # partial read into a complete result, and the stored
+                # occurrences it carried would be marked deleted. Fail closed,
+                # 404 included: a vanished object reappears or disappears
+                # cleanly on the next full query.
+                # #VERIFY: test_caldav_client non-200 cases and the collector's
+                # partial-read test (nothing is deleted).
+                msg = (
+                    "calendar-query returned a non-200 entry "
+                    f"({_status_code(item)}): partial result"
+                )
+                raise CalDAVError(msg)
             data = _text(item, _tag(CALDAV, "calendar-data"))
             if data is None:
                 msg = "calendar-query object returned without calendar-data"
@@ -413,6 +426,18 @@ def _ok(item: Element) -> bool:
     """Report whether a multistatus response carries a 200 propstat."""
     statuses = [s.text or "" for s in item.iter(_tag(DAV, "status"))]
     return not statuses or any(" 200 " in f"{s} " for s in statuses)
+
+
+def _status_code(item: Element) -> str:
+    """Return the first non-200 HTTP status code of a response, for messages.
+
+    Only the three-digit code is returned, never the href or reason text.
+    """
+    for status in item.iter(_tag(DAV, "status")):
+        parts = (status.text or "").split()
+        if len(parts) > 1 and parts[1].isdigit() and parts[1] != "200":
+            return f"HTTP {parts[1]}"
+    return "HTTP status unknown"
 
 
 def _calendar_info(

@@ -37,6 +37,8 @@ dependencies = [
     "httpx>=0.27.0",
     "icalendar>=6.0.0",
     "recurring-ical-events>=3.3.0",
+    # Imported directly by domain.recurrence (X-WR-TIMEZONE normalization).
+    "x-wr-timezone>=0.0.7",
     # CalDAV multistatus responses are untrusted XML: parse with defusedxml.
     "defusedxml>=0.7.1",
     # In-process scheduler (single writer). 4.x is a different API; stay on 3.x.

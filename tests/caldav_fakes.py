@@ -105,6 +105,7 @@ class FakeCalDAVServer:
     calendars: list[FakeCalendar]
     fail_discovery: bool = False
     fail_query: set[str] = field(default_factory=set)
+    truncate_query: set[str] = field(default_factory=set)
     reject_sync: bool = False
     requests: list[tuple[str, str]] = field(default_factory=list)
 
@@ -169,16 +170,21 @@ class FakeCalDAVServer:
             return self._sync(calendar)
         if path in self.fail_query:
             return httpx.Response(500)
-        return _xml(
-            *(
-                response(
-                    f"{path}{href}",
-                    f'<d:getetag>"etag-{href}"</d:getetag>'
-                    f"<c:calendar-data>{escape(ics)}</c:calendar-data>",
-                )
-                for href, ics in calendar.objects.items()
+        entries = [
+            response(
+                f"{path}{href}",
+                f'<d:getetag>"etag-{href}"</d:getetag>'
+                f"<c:calendar-data>{escape(ics)}</c:calendar-data>",
             )
-        )
+            for href, ics in calendar.objects.items()
+        ]
+        if path in self.truncate_query:
+            # RFC 4918 result-set truncation: a 507 for the collection itself.
+            entries.append(
+                f"<d:response><d:href>{path}</d:href>"
+                "<d:status>HTTP/1.1 507 Insufficient Storage</d:status></d:response>"
+            )
+        return _xml(*entries)
 
     def _sync(self, calendar: FakeCalendar) -> httpx.Response:
         """Answer a sync-collection REPORT from the calendar's queued changes."""

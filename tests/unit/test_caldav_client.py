@@ -197,10 +197,48 @@ class TestCalendarRequests:
         assert 'start="20261019T070000Z" end="20261105T080000Z"' in bodies[0]
         assert server.requests == [("REPORT", SAM_PATH)]
 
-    def test_query_window_skips_non_200_entries(self):
-        missing = response("/x/gone.ics", "<d:getetag/>", "HTTP/1.1 404 Not Found")
-        client = client_for(lambda _r: xml(missing))
-        assert client.query_window(f"{PARTITION}{SAM_PATH}", START, END) == ()
+    @pytest.mark.parametrize(
+        ("status", "code"),
+        [
+            ("HTTP/1.1 404 Not Found", "HTTP 404"),
+            ("HTTP/1.1 403 Forbidden", "HTTP 403"),
+            ("HTTP/1.1 500 Internal Server Error", "HTTP 500"),
+        ],
+    )
+    def test_query_window_rejects_non_200_entries(self, status, code):
+        good = response(
+            f"{SAM_PATH}a.ics",
+            '<d:getetag>"1"</d:getetag><c:calendar-data>BEGIN:VCALENDAR'
+            "</c:calendar-data>",
+        )
+        bad = response(f"{SAM_PATH}b.ics", "<d:getetag/>", status)
+        client = client_for(lambda _r: xml(good, bad))
+        with pytest.raises(CalDAVError, match="non-200 entry") as caught:
+            client.query_window(f"{PARTITION}{SAM_PATH}", START, END)
+        assert f"({code})" in str(caught.value)
+        assert SAM_PATH not in str(caught.value)
+
+    def test_query_window_rejects_truncated_result(self):
+        # RFC 4918 servers report a truncated result set with a 507 response
+        # for the collection itself, after the objects they did return.
+        good = response(
+            f"{SAM_PATH}a.ics",
+            '<d:getetag>"1"</d:getetag><c:calendar-data>BEGIN:VCALENDAR'
+            "</c:calendar-data>",
+        )
+        truncated = (
+            f"<d:response><d:href>{SAM_PATH}</d:href>"
+            "<d:status>HTTP/1.1 507 Insufficient Storage</d:status></d:response>"
+        )
+        client = client_for(lambda _r: xml(good, truncated))
+        with pytest.raises(CalDAVError, match=r"\(HTTP 507\): partial result"):
+            client.query_window(f"{PARTITION}{SAM_PATH}", START, END)
+
+    def test_query_window_status_without_code(self):
+        odd = response(f"{SAM_PATH}b.ics", "<d:getetag/>", "garbled")
+        client = client_for(lambda _r: xml(odd))
+        with pytest.raises(CalDAVError, match="HTTP status unknown"):
+            client.query_window(f"{PARTITION}{SAM_PATH}", START, END)
 
     def test_query_window_requires_calendar_data(self):
         client = client_for(

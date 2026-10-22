@@ -6,17 +6,20 @@ One ``Collector.run_once`` call:
 2. keeps only the calendars named in ``FL_CALDAV_CALENDARS`` plus the shared
    transportation calendar, registering new ones as calendar sources (kind and
    owner of an existing source are never changed here; the registry owns them);
-3. for each enabled source, reads its ctag and sync token. When neither changed
-   since a complete collection earlier the same local day (so the window is the
-   same), the stored occurrences are reused. Otherwise the whole window is
+3. for each enabled source that is still selected (a stored source dropped from
+   the setting is skipped, not reported as a lost share), reads its ctag and
+   sync token. When neither changed since a complete collection earlier the
+   same local day (so the window is the same), the stored occurrences are
+   reused. Otherwise the whole window is
    queried and every object is expanded locally (``domain.recurrence``);
 4. stores the result (``db.sources``): complete results may mark missing
    occurrences deleted, incomplete ones never do;
 5. reports DATA-011 for every source that failed, is incomplete, or whose last
    complete collection is older than ``FL_SOURCE_MAX_STALENESS_MINUTES``.
 
-#CRITICAL: Data integrity: a network failure, an unparseable object, a lost
-calendar share or a discovery failure all yield an incomplete
+#CRITICAL: Data integrity: a network failure, a non-200 or truncated
+calendar-query entry, an unparseable object, a lost calendar share, a calendar
+that stopped supporting events or a discovery failure all yield an incomplete
 ``CollectionResult`` and DATA-011, never an empty calendar.
 #CRITICAL: Security: calendar hrefs (which embed the account number) are held in
 memory only; sources are stored under an opaque hash, and error messages carry
@@ -60,6 +63,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 NOT_VISIBLE = "calendar is not visible to the collector account (share removed?)"
+NOT_EVENTS = "calendar no longer supports events (VEVENT)"
 
 
 def collection_window(
@@ -251,6 +255,7 @@ class Collector:
         discovery_error: str | None = None
         runs: list[CalendarRun] = []
         visible: set[str] = set()
+        non_event: set[str] = set()
         try:
             discovered = self.client.discover()
         except CalDAVError as exc:
@@ -258,9 +263,12 @@ class Collector:
             logger.warning("collector.discovery_failed", error=discovery_error)
             discovered = ()
         for info in discovered:
-            if not info.supports_events or not self._wanted(info, only):
-                continue
             calendar_id = calendar_id_for_href(info.href)
+            if not info.supports_events:
+                non_event.add(calendar_id)
+                continue
+            if not self._wanted(info, only):
+                continue
             visible.add(calendar_id)
             kind = (
                 CalendarKind.TRANSPORT
@@ -270,13 +278,8 @@ class Collector:
             source = self.sources.ensure(calendar_id, info.display_name, kind)
             if source.enabled:
                 runs.append(self._collect(source, info.href, run))
-        missing = (
-            NOT_VISIBLE
-            if discovery_error is None
-            else f"discovery failed: {discovery_error}"
-        )
         runs.extend(
-            self._failed(source, missing, run)
+            self._failed(source, self._missing(source, non_event, discovery_error), run)
             for source in self._enabled(only)
             if source.calendar_id not in visible
         )
@@ -285,22 +288,43 @@ class Collector:
         )
         return CollectionRun(start, end, tuple(runs), findings, discovery_error)
 
+    def _selected(self) -> set[str]:
+        """Return the configured display names or IDs plus the transport calendar."""
+        return {*self.config.selected, self.config.transport_calendar}
+
     def _wanted(self, info: CalendarInfo, only: Collection[str] | None) -> bool:
         """Report whether a discovered calendar is selected for collection."""
         names = {info.display_name, calendar_id_for_href(info.href)}
-        selected = {*self.config.selected, self.config.transport_calendar}
-        if not names & selected:
+        if not names & self._selected():
             return False
         return only is None or bool(names & set(only))
 
     def _enabled(self, only: Collection[str] | None) -> list[CalendarSource]:
-        """Return enabled stored sources, optionally restricted."""
+        """Return enabled stored sources that are still selected.
+
+        A stored source dropped from ``FL_CALDAV_CALENDARS`` (or seeded by the
+        registry but never listed) is not collected, so it must not be
+        reported as a lost share on every run either.
+        """
+        selected = self._selected()
         return [
             s
             for s in self.sources.all()
             if s.enabled
+            and {s.display_name, s.calendar_id} & selected
             and (only is None or {s.display_name, s.calendar_id} & set(only))
         ]
+
+    @staticmethod
+    def _missing(
+        source: CalendarSource, non_event: set[str], discovery_error: str | None
+    ) -> str:
+        """Explain why a selected, enabled source was not collected."""
+        if discovery_error is not None:
+            return f"discovery failed: {discovery_error}"
+        if source.calendar_id in non_event:
+            return NOT_EVENTS
+        return NOT_VISIBLE
 
     def _failed(self, source: CalendarSource, error: str, run: _Pass) -> CalendarRun:
         """Record and return an incomplete result for a source."""
