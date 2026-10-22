@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 from click.testing import CliRunner
 from pydantic import ValidationError
@@ -73,3 +76,20 @@ def test_every_field_is_consumed_or_scheduled():
     """A new setting must be read by code or carry a milestone (no dead config)."""
     assert set(FIELD_STATUS) == set(Settings.model_fields)
     assert set(FIELD_STATUS.values()) <= {"consumed", "M1", "M2", "M3", "M4", "M5"}
+
+
+@pytest.mark.unit
+def test_consumed_fields_are_read_in_src():
+    """A field marked consumed must be read (``.<field>``) outside config.py."""
+    src = Path(__file__).resolve().parents[2] / "src" / "family_logistics"
+    code = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in src.rglob("*.py")
+        if path.name != "config.py"
+    )
+    unread = [
+        name
+        for name, status in FIELD_STATUS.items()
+        if status == "consumed" and not re.search(rf"\.{name}\b", code)
+    ]
+    assert unread == []

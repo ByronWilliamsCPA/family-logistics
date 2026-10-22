@@ -1,18 +1,29 @@
 """Minimal Apprise API client.
 
-The application only ever sends to its own dedicated tags (``fl-*`` by
-default, set by the ``FL_APPRISE_TAG_*`` settings). Who receives each tag is
-configured in the notification service, never here. Any other tag is refused
-before a request is made, so a shared severity tag can never be used by
-mistake.
+Apprise API semantics: ``POST /notify/{KEY}`` sends through the persistent
+configuration saved under ``KEY``, and the JSON ``tag`` field selects which of
+that configuration's URLs receive the message (no ``tag`` would mean every
+untagged URL). This client always posts to ``/notify/<FL_APPRISE_CONFIG_KEY>``
+with an explicit ``tag``.
+
+The application only ever sends to its own dedicated tags (``fl-*``, set by
+the ``FL_APPRISE_TAG_*`` settings, which are validated against
+``fl-[a-z0-9-]+`` when settings load). Who receives each tag is configured in
+the notification service, never here. Any tag outside the configured set, or
+not matching that pattern, is refused before a request is made, so a shared
+severity tag or a tag expression can never be used by mistake.
 
 #CRITICAL: Security: callers pass counts, statuses and internal references
 only. Message bodies must never contain secrets, addresses or other household
 data; this client does not inspect content, so the rule is enforced by the
 callers that build messages.
+#VERIFY: code review of every caller that builds a message; the M3
+notification service adds a content test when it lands.
 #ASSUME: External resources: the Apprise API may be down or slow. A failed
 send returns False and is logged; it never raises into the caller and is
 never reported as delivered.
+#VERIFY: tests/unit/test_apprise_client.py covers non-2xx responses and a
+network error, each returning False.
 """
 
 from __future__ import annotations
@@ -21,6 +32,7 @@ from typing import TYPE_CHECKING, Final
 
 import httpx
 
+from family_logistics.core.config import APPRISE_TAG_PATTERN
 from family_logistics.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -59,18 +71,20 @@ def configured_tags(settings: Settings) -> frozenset[str]:
 
 
 class AppriseClient:
-    """Sends notifications to the Apprise API's ``/notify/<tag>`` endpoint.
+    """Sends notifications through one Apprise API persistent configuration.
 
     Args:
         base_url: Apprise API base URL.
+        config_key: Persistent-configuration key (``/notify/<key>``).
         allowed_tags: The only tags this client will send to.
         timeout: Request timeout in seconds.
         transport: Optional transport (tests use ``httpx.MockTransport``).
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - keyword-only transport options
         self,
         base_url: str,
+        config_key: str,
         allowed_tags: frozenset[str],
         *,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
@@ -79,7 +93,32 @@ class AppriseClient:
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"), timeout=timeout, transport=transport
         )
-        self._allowed_tags = allowed_tags
+        self._path = f"/notify/{config_key}"
+        self._allowed_tags = frozenset(
+            tag for tag in allowed_tags if APPRISE_TAG_PATTERN.fullmatch(tag)
+        )
+
+    @classmethod
+    def from_settings(
+        cls, settings: Settings, *, transport: httpx.BaseTransport | None = None
+    ) -> AppriseClient | None:
+        """Build the client from settings.
+
+        Args:
+            settings: Application settings.
+            transport: Optional transport for tests.
+
+        Returns:
+            A client, or None when ``FL_APPRISE_URL`` is not configured.
+        """
+        if settings.apprise_url is None:
+            return None
+        return cls(
+            settings.apprise_url,
+            settings.apprise_config_key,
+            configured_tags(settings),
+            transport=transport,
+        )
 
     def close(self) -> None:
         """Close the underlying HTTP client."""
@@ -103,11 +142,12 @@ class AppriseClient:
             msg = f"refusing to send to tag {tag!r}: not a configured app tag"
             raise NotificationTagError(msg)
         payload = {
+            "tag": tag,
             "title": title[:MAX_TITLE_LENGTH],
             "body": body[:MAX_BODY_LENGTH],
         }
         try:
-            response = self._client.post(f"/notify/{tag}", json=payload)
+            response = self._client.post(self._path, json=payload)
         except httpx.HTTPError as exc:
             logger.warning("notification.failed", tag=tag, error=type(exc).__name__)
             return False

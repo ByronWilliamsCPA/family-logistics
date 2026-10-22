@@ -10,8 +10,11 @@ tags:
 ---
 
 Family Logistics reads its configuration from environment variables with the
-`FL_` prefix (Pydantic Settings, `family_logistics.core.config.Settings`). A
-`.env` file in the working directory is also read; start from
+`FL_` prefix (Pydantic Settings, `family_logistics.core.config.Settings`).
+The application does **not** read a `.env` file. `docker compose` reads `.env`
+only to fill in the variables that `docker-compose.yml` passes through; for
+commands run outside Compose, export the variables first (for example
+`set -a; . ./.env; set +a`). Start from
 [`.env.example`](https://github.com/ByronWilliamsCPA/family-logistics/blob/main/.env.example).
 Secrets are supplied only at runtime and are never printed: `family-logistics config`
 shows non-secret values only.
@@ -51,6 +54,7 @@ shows non-secret values only.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `FL_APPRISE_URL` | unset | Apprise API base URL |
+| `FL_APPRISE_CONFIG_KEY` | `family-logistics` | Apprise API persistent-configuration key (`/notify/<key>`); letters, digits, `-` and `_` only |
 | `FL_APPRISE_TAG_REPORT` | `fl-report` | Weekly and daily report e-mail |
 | `FL_APPRISE_TAG_STATUS` | `fl-status` | Completed-assessment push |
 | `FL_APPRISE_TAG_WARNING` | `fl-warning` | New validation error push |
@@ -62,8 +66,11 @@ shows non-secret values only.
 | `FL_QUIET_HOURS_END` | `06:00` | End of quiet hours (local time) |
 | `FL_IMMINENT_WINDOW_MINUTES` | `180` | Rides starting within this window may bypass quiet hours |
 
-Recipients for each tag are configured in Apprise, never in this application.
-The Apprise client refuses any tag other than these six before making a
+Recipients for each tag are configured in Apprise, never in this application:
+the client posts to `/notify/<FL_APPRISE_CONFIG_KEY>` and names the tag in the
+request's `tag` field. Every `FL_APPRISE_TAG_*` value must match
+`fl-[a-z0-9-]+` (one plain dedicated tag, no tag expression) or settings fail
+to load, and the client refuses any tag other than these six before making a
 request, so shared severity tags can never be used.
 
 ## Routing

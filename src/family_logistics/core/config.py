@@ -14,6 +14,7 @@ store. Nothing here reads a secret from a file in the image or from Git.
 from __future__ import annotations
 
 import ipaddress
+import re
 from datetime import time
 from functools import lru_cache
 from pathlib import Path
@@ -39,6 +40,9 @@ DEFAULT_PROXY_TRUSTED_CIDRS: tuple[str, ...] = ()
 deployment sets ``FL_PROXY_TRUSTED_CIDRS`` to its reverse proxy's address."""
 
 
+APPRISE_TAG_PATTERN = re.compile(r"fl-[a-z0-9][a-z0-9-]*")
+"""Dedicated Apprise tags: the ``fl-`` prefix and one plain tag, no expression."""
+
 CONSUMED = "consumed"
 M1, M2, M3, M4, M5 = "M1", "M2", "M3", "M4", "M5"
 
@@ -56,6 +60,7 @@ FIELD_STATUS: dict[str, str] = {
     "caldav_calendars": M1,
     "ha_token": CONSUMED,
     "apprise_url": CONSUMED,
+    "apprise_config_key": CONSUMED,
     "apprise_tag_report": M3,
     "apprise_tag_status": M3,
     "apprise_tag_warning": M3,
@@ -84,8 +89,12 @@ FIELD_STATUS: dict[str, str] = {
 """Whether each setting is read today or waits for a milestone.
 
 Settings marked with a milestone are defined ahead of the code that reads
-them so the deployment contract is stable; a test fails when a field is added
-without an entry here, so no setting can become silently dead.
+them so the deployment contract is stable. Two tests in
+tests/unit/test_config_security.py keep this table honest: one fails when a
+field is added without an entry here, and one fails when a field marked
+``consumed`` is not read (``.<field>``) anywhere in ``src/`` outside this
+module. Milestone-marked fields are, by definition, not read yet; the table
+records that they are dormant rather than preventing it.
 """
 
 
@@ -111,6 +120,9 @@ class Settings(BaseSettings):
         caldav_calendars: Calendar hrefs or IDs to collect (discovered in M0).
         ha_token: Bearer token Home Assistant presents to the HA-only routes.
         apprise_url: Apprise API base URL.
+        apprise_config_key: Apprise API persistent-configuration key; the
+            client posts to ``/notify/<key>`` and selects recipients with the
+            ``tag`` field.
         apprise_tag_report: Weekly and daily report email.
         apprise_tag_status: Completed-assessment short push.
         apprise_tag_warning: New validation error push.
@@ -170,6 +182,9 @@ class Settings(BaseSettings):
     ha_token: SecretStr | None = None
 
     apprise_url: str | None = None
+    apprise_config_key: str = Field(
+        default="family-logistics", pattern=r"^[A-Za-z0-9_-]{1,128}$"
+    )
     # Dedicated tags; who receives each one is configured in Apprise, not here.
     apprise_tag_report: str = "fl-report"
     apprise_tag_status: str = "fl-status"
@@ -222,6 +237,38 @@ class Settings(BaseSettings):
         """
         if value is not None and len(value.get_secret_value()) < HA_TOKEN_MIN_LENGTH:
             msg = f"FL_HA_TOKEN must be at least {HA_TOKEN_MIN_LENGTH} characters"
+            raise ValueError(msg)
+        return value
+
+    @field_validator(
+        "apprise_tag_report",
+        "apprise_tag_status",
+        "apprise_tag_warning",
+        "apprise_tag_urgent",
+        "apprise_tag_ops",
+        "apprise_tag_shadow",
+    )
+    @classmethod
+    def _apprise_tag_is_dedicated(cls, value: str) -> str:
+        """Require a dedicated ``fl-`` tag that is a single plain tag.
+
+        Args:
+            value: The configured tag.
+
+        Returns:
+            The unchanged value.
+
+        Raises:
+            ValueError: If the tag does not match ``fl-[a-z0-9-]+``.
+        """
+        # #CRITICAL: Security: the app may only notify its own dedicated tags.
+        # A shared tag (for example "critical") or an Apprise tag expression
+        # (spaces mean AND, commas mean OR) would reach people outside this
+        # app's routing, so anything else fails at settings load.
+        # #VERIFY: tests/unit/test_apprise_client.py::TestTagSettings rejects
+        # "critical", "all", "fl-a,fl-b", "fl-a b" and "FL-ops".
+        if not APPRISE_TAG_PATTERN.fullmatch(value):
+            msg = "FL_APPRISE_TAG_* values must match fl-[a-z0-9-]+"
             raise ValueError(msg)
         return value
 
