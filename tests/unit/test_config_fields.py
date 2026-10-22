@@ -81,6 +81,6 @@ class TestFieldStatus:
         assert {"port", "ha_token", "database_path"} <= fields_read_in_src()
 
     def test_the_scan_does_not_credit_unread_fields(self):
-        # apprise_url has no reader yet; it must be labelled with a milestone.
-        assert "apprise_url" not in fields_read_in_src()
-        assert FIELD_STATUS["apprise_url"] in MILESTONES
+        # apprise_config_key has no reader yet; it must be labelled with a milestone.
+        assert "apprise_config_key" not in fields_read_in_src()
+        assert FIELD_STATUS["apprise_config_key"] in MILESTONES
