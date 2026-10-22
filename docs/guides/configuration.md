@@ -55,7 +55,7 @@ shows non-secret values only.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `FL_APPRISE_URL` | unset | Apprise API base URL (`http` or `https`, no embedded credentials) |
+| `FL_APPRISE_URL` | unset | Apprise API base URL (`http` or `https`, no embedded credentials); `serve` refuses to start without it when `FL_NOTIFICATION_MODE=production` |
 | `FL_APPRISE_CONFIG_KEY` | `family-logistics` | Key of the saved Apprise configuration holding the app's services; 1 to 64 letters, digits, `_` or `-` |
 | `FL_APPRISE_TAG_REPORT` | `fl-report` | Weekly and daily report e-mail |
 | `FL_APPRISE_TAG_STATUS` | `fl-status` | Completed-assessment push |
