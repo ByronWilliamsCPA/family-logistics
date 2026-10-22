@@ -76,8 +76,8 @@ dev = [
     # Pre-commit
     "pre-commit>=3.3.0",
     # Documentation
-    "mkdocs>=1.6,<2",  # MkDocs 2.0 is a breaking release
-    "mkdocs-material>=9.5,<10",
+    "mkdocs>=1.6,<2",  # 2.x is a pre-release rewrite that breaks plugins and themes; stay on 1.x
+    "mkdocs-material>=9.5,<10",  # capped below the next major until the docs build is verified on it
     "mkdocstrings[python]>=0.26.0",
     "griffe-pydantic>=1.1.0",
     "mkdocs-gen-files>=0.5.0",
