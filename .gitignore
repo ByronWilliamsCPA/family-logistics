@@ -1,10 +1,12 @@
 # =============================================================================
 # .gitignore for family-logistics (PUBLIC repository)
 # =============================================================================
-# Directory patterns are anchored to the repository root with a leading "/"
-# so that a future source package (for example src/.../reports/) is never
-# silently ignored. File-type globs that protect household data stay
-# unanchored on purpose: they must match at any depth.
+# Build and tool directory patterns are anchored to the repository root with a
+# leading "/" so that a future source package is never silently ignored.
+# Every pattern that protects household data or credentials (registry*,
+# backups/, reports/, assessments/, .aws/, .ssh/, *.db, *.ics, ...) stays
+# UNANCHORED on purpose: it must match at any depth. tests/unit/
+# test_gitignore_household.py pins this with `git check-ignore`.
 
 # -----------------------------------------------------------------------------
 # Python bytecode, builds and packaging
@@ -97,8 +99,8 @@ secrets.json
 **/*-key.json
 /.gcloud/
 /.config/gcloud/
-/.aws/
-/.ssh/
+.aws/
+.ssh/
 
 # -----------------------------------------------------------------------------
 # Editors, IDEs and OS files
@@ -195,17 +197,17 @@ reuse-spdx.json
 *.sqlite-wal
 *.sqlite-shm
 db.sqlite3-journal
-/backups/
+backups/
 
 # Registry seed data and site configuration (people, locations, addresses,
 # calendar IDs, school assignments). Commit only *.example.* templates.
-/config/local/
-/registry*.yaml
-/registry*.yml
-/registry*.json
-!/registry*.example.yaml
-!/registry*.example.yml
-!/registry*.example.json
+**/config/local/
+registry*.yaml
+registry*.yml
+registry*.json
+!registry*.example.yaml
+!registry*.example.yml
+!registry*.example.json
 site*.env
 stack.env
 
@@ -213,8 +215,7 @@ stack.env
 # under tests/fixtures/synthetic/ are the only .ics files that may be tracked.
 *.ics
 !/tests/fixtures/synthetic/**/*.ics
-/fixtures/real/
-/tests/fixtures/real/
+**/fixtures/real/
 
 # M0 discovery output (filled results, inventories, probe logs)
 /tools/m0/results/
@@ -228,6 +229,6 @@ private-terms*.txt
 denylist*.txt
 
 # Reports, assessments and LLM transcripts generated from real schedules
-/reports/
-/assessments/
-/llm-transcripts/
+reports/
+assessments/
+llm-transcripts/
