@@ -212,8 +212,14 @@
     "dockerfile",
     "docker-compose",
     "pre-commit",
+    "pip-compile",
     "custom.regex"
   ],
   "minimumReleaseAge": "3 days",
-  "internalChecksFilter": "strict"
+  "internalChecksFilter": "strict",
+  "pip-compile": {
+    "managerFilePatterns": [
+      "/^\\.github/requirements/.+\\.txt$/"
+    ]
+  }
 }
