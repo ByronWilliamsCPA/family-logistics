@@ -54,10 +54,10 @@ class TestSettings:
 
     def test_short_ha_token_rejected(self):
         with pytest.raises(ValidationError):
-            Settings(ha_token="short")  # type: ignore[arg-type]
+            Settings.model_validate({"ha_token": "short"})
 
     def test_secret_not_in_repr(self):
-        settings = Settings(ha_token=GOOD_TOKEN)  # type: ignore[arg-type]
+        settings = Settings.model_validate({"ha_token": GOOD_TOKEN})
         assert GOOD_TOKEN not in repr(settings)
 
     def test_proxy_and_ui_defaults(self):
@@ -90,7 +90,7 @@ class TestSettings:
 
     def test_invalid_notification_mode(self):
         with pytest.raises(ValidationError):
-            Settings(notification_mode="loud")  # type: ignore[arg-type]
+            Settings.model_validate({"notification_mode": "loud"})
 
 
 @pytest.mark.unit

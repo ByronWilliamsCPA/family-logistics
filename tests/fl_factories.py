@@ -121,8 +121,23 @@ def parse(
     )
 
 
-def trip(text: str, **kwargs: object) -> Trip:
+def trip(
+    text: str,
+    *,
+    uid: str = "evt-1",
+    recurrence_id: str | None = None,
+    start: datetime = FRIDAY_START,
+    end: datetime = FRIDAY_END,
+    occurrence: OccurrenceKind = OccurrenceKind.SINGLE,
+) -> Trip:
     """Parse notes that must be valid and return the trip."""
-    result = parse(text, **kwargs)  # type: ignore[arg-type]
+    result = parse(
+        text,
+        uid=uid,
+        recurrence_id=recurrence_id,
+        start=start,
+        end=end,
+        occurrence=occurrence,
+    )
     assert result.trip is not None, [f.message for f in result.findings]
     return result.trip
