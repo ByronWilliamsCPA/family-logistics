@@ -282,7 +282,10 @@ known-first-party = ["family_logistics"]
     "S106",   # hardcoded_password_funcarg - test fixtures with fake passwords
     "S107",   # hardcoded_password_default - test default values
     "S108",   # hardcoded_tmp_directory - test temp paths are intentional
-    "S603",   # subprocess_without_shell_equals_true - tests run fixed local scripts
+    # Tests run fixed argv lists as subprocesses, never shell=True and never
+    # external input, so S603 and S607 do not apply to them.
+    "S603",   # subprocess_without_shell_equals_true - fixed argv, no shell
+    "S607",   # start_process_with_partial_path - tests resolve tools via PATH
     "S311",   # random - non-crypto random in tests is fine
     "S113",   # request_without_timeout - test HTTP calls may be mocked
 ]
@@ -326,15 +329,6 @@ known-first-party = ["family_logistics"]
 
 # Nox configuration
 "noxfile.py" = ["ANN", "D", "T20", "PLR", "INP", "PLC0415", "ERA001", "SIM105"]
-# Fuzz testing (Atheris harnesses have specific patterns)
-"fuzz/**/*.py" = [
-    "N802",   # TestOneInput required by Atheris
-    "S110",   # try-except-pass is intentional for fuzzing
-    "BLE",    # Blind except is necessary in fuzz targets
-    "INP",    # Fuzz tests are not packages
-    "ANN", "D", "TRY",
-]
-
 # Claude skills and scripts
 ".claude/**/*.py" = [
     "T20",    # Print allowed for CLI output
@@ -546,7 +540,6 @@ exclude_dirs = [
     "scripts",
     "benchmarks",
     "tools",
-    "fuzz",
     "docs",
     ".venv",
     "venv",

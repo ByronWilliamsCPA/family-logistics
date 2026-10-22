@@ -1,7 +1,7 @@
 """Subprocess helper shared by the guard tests.
 
 The tests that exercise git and the private-terms checker as real processes all
-go through :func:`run_process`, so the one ruff S603 suppression lives here.
+go through :func:`run_process`.
 """
 
 from __future__ import annotations
@@ -31,11 +31,10 @@ def run_process(
     Returns:
         The completed process. The exit status is not checked.
     """
-    # S603: every caller passes a literal argv built from test constants and
-    # tmp_path values, never external input. The tests per-file-ignores in
-    # pyproject.toml (owned by unit u4-ci) should absorb S603 and S607; see the
-    # u1-guard cross_unit note in the PR #2 fix report.
-    return subprocess.run(  # noqa: S603
+    # Every caller passes a literal argv built from test constants and tmp_path
+    # values, never external input; S603 and S607 are ignored for tests/ in
+    # pyproject.toml.
+    return subprocess.run(
         argv,
         cwd=cwd,
         env=env,
