@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -81,6 +83,27 @@ class TestEngines:
                 )
         finally:
             engine.dispose()
+        assert recorder.events == []
+
+    def test_wal_switch_waits_for_a_concurrent_writer(self, tmp_path, recorder):
+        # SQLite fails a journal-mode change at once (no busy handler) while
+        # another connection holds the write lock, as when several containers
+        # start on a fresh volume and the first one is migrating.
+        path = tmp_path / "fl.db"
+        holder = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+        holder.execute("CREATE TABLE t (x INTEGER)")
+        holder.execute("BEGIN IMMEDIATE")
+        release = threading.Timer(0.3, holder.execute, args=("ROLLBACK",))
+        release.start()
+        engine = create_sqlite_engine(path)
+        try:
+            with engine.connect() as connection:
+                mode = connection.exec_driver_sql("PRAGMA journal_mode").scalar()
+        finally:
+            engine.dispose()
+            release.join()
+            holder.close()
+        assert mode == "wal"
         assert recorder.events == []
 
     def test_journal_mode_fallback_is_logged(self, recorder):

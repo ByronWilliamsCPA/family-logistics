@@ -9,11 +9,18 @@ a "database is locked" error means a second writer or a too-long transaction.
 #ASSUME: External resources: the filesystem supports WAL; SQLite silently
 keeps another journal mode where it cannot (network or some bind mounts).
 #VERIFY: ``_set_pragmas`` reads the mode back and logs ``journal_mode_not_wal``.
+#EDGE: Timing: SQLite fails a journal-mode change at once, without consulting
+the busy timeout, while another connection holds the write lock (a second
+container starting on a fresh volume while the first migrates).
+#VERIFY: ``_enable_wal`` retries for up to the busy timeout;
+tests/unit/test_database.py holds the lock and asserts the switch waits.
 """
 
 from __future__ import annotations
 
 import os
+import sqlite3
+import time
 from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import create_engine, event, text
@@ -25,6 +32,7 @@ from family_logistics.utils.logging import get_logger
 if TYPE_CHECKING:
     from pathlib import Path
     from sqlite3 import Connection as SQLiteConnection
+    from sqlite3 import Cursor
 
     from sqlalchemy.engine import Engine
     from sqlalchemy.pool import ConnectionPoolEntry
@@ -32,7 +40,40 @@ if TYPE_CHECKING:
 BUSY_TIMEOUT_MS = 5000
 """How long a connection waits for a lock held by another connection."""
 
+WAL_RETRY_SECONDS = 0.05
+_BUSY_CODES = frozenset({sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
+
 logger = get_logger(__name__)
+
+
+def _enable_wal(cursor: Cursor) -> object:
+    """Switch to WAL, retrying while another connection holds the write lock.
+
+    Args:
+        cursor: A cursor on the new connection.
+
+    Returns:
+        The journal mode SQLite reports after the switch.
+
+    Raises:
+        sqlite3.OperationalError: If the lock is still held after the busy
+            timeout, or on any other SQLite error.
+    """
+    deadline = time.monotonic() + BUSY_TIMEOUT_MS / 1000
+    while True:
+        try:
+            row = cast(
+                "tuple[object, ...] | None",
+                cursor.execute("PRAGMA journal_mode=WAL").fetchone(),
+            )
+        except sqlite3.OperationalError as exc:
+            if exc.sqlite_errorcode not in _BUSY_CODES or (
+                time.monotonic() >= deadline
+            ):
+                raise
+            time.sleep(WAL_RETRY_SECONDS)
+        else:
+            return None if row is None else row[0]
 
 
 def _set_pragmas(
@@ -46,14 +87,10 @@ def _set_pragmas(
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
-        row = cast(
-            "tuple[object, ...] | None",
-            cursor.execute("PRAGMA journal_mode=WAL").fetchone(),
-        )
+        mode = _enable_wal(cursor)
         cursor.execute("PRAGMA foreign_keys=ON")
     finally:
         cursor.close()
-    mode = None if row is None else row[0]
     if mode != "wal":
         logger.warning("journal_mode_not_wal", journal_mode=str(mode))
 
