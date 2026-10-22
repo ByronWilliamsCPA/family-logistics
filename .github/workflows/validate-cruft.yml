@@ -35,8 +35,14 @@ jobs:
         with:
           python-version: '3.12'
 
+      # cruft and its whole dependency tree are pinned with hashes
+      # (.github/requirements/cruft.txt, compiled from cruft.in with
+      # `uv pip compile --universal --generate-hashes`), so a tampered or
+      # newly published transitive release cannot be installed unnoticed.
       - name: Install cruft
-        run: python -m pip install --disable-pip-version-check 'cruft==2.16.0'
+        run: >-
+          python -m pip install --disable-pip-version-check --require-hashes
+          -r .github/requirements/cruft.txt
 
       - name: Check for manual .cruft.json edits
         if: github.event_name == 'push' || github.event_name == 'pull_request'
@@ -60,9 +66,10 @@ jobs:
             fi
           fi
 
+      # Fails on every event, scheduled runs included: a failed weekly run is
+      # the notification that the project has drifted from the template.
       - name: Verify cruft status
-        env:
-          EVENT_NAME: ${{ github.event_name }}
+        id: verify-cruft
         run: |
           echo "Checking if project is in sync with template..."
           if cruft check; then
@@ -74,23 +81,18 @@ jobs:
             echo "  cruft diff   # Preview changes"
             echo "  cruft update # Apply changes"
             echo ""
-            # Don't fail on scheduled runs or manual triggers (just warn)
-            if [ "$EVENT_NAME" = "schedule" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-              echo "Creating an issue to track this..."
-              exit 0
-            else
-              echo "Failing CI to prevent merging out-of-date code"
-              exit 1
-            fi
+            echo "Failing so that out-of-date code is not merged and drift is noticed"
+            exit 1
           fi
 
       - name: Show template diff (if out of sync)
-        if: failure()
+        if: failure() && steps.verify-cruft.outcome == 'failure'
         run: |
           echo "Template changes that need to be applied:"
           cruft diff || true
 
       - name: Check for orphaned conditional files
+        id: orphaned-files
         run: |
           echo "Checking for orphaned conditional files..."
           echo ""
@@ -101,7 +103,7 @@ jobs:
         continue-on-error: false
 
       - name: Orphaned files fix instructions
-        if: failure()
+        if: failure() && steps.orphaned-files.outcome == 'failure'
         run: |
           echo ""
           echo "=========================================="
