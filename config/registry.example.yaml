@@ -1,0 +1,109 @@
+# Registry seed example: a FICTIONAL household.
+#
+# Copy this file OUTSIDE the repository (for example to
+# ~/.config/family-logistics/registry.yaml), replace the fictional entries with
+# the real household, and point FL_REGISTRY_SEED at it. The loader refuses a
+# seed inside a git working tree unless --allow-repo-path is given, and the
+# real file must never be committed to this public repository.
+#
+#   family-logistics registry load --dry-run    # show what would change
+#   family-logistics registry load              # apply atomically, audited
+#
+# IDs are lowercase slugs that never change. Addresses and coordinates are
+# encrypted on load with FL_DATA_KEY and never printed.
+
+version: 1
+
+vehicles:
+  - id: family-suv
+    name: family SUV
+    # seats: 7   # seats including the driver; omit until verified
+
+locations:
+  - id: home
+    name: Home
+    address: "100 Example Lane"
+    verified: true
+    ha_zone: zone.home
+  - id: school-central
+    name: Central School
+    aliases: [Central]
+  - id: music-studio
+    name: Music Studio
+    aliases: [Studio]
+  - id: loc-e-home
+    name: Passenger E home
+    address: "200 Sample Road"
+
+households:
+  - id: household-e
+    label: Household E
+
+people:
+  - id: morgan
+    name: Morgan
+    role: parent
+    can_drive: true
+    vehicle: family-suv
+    home: home
+  - id: riley
+    name: Riley
+    role: parent
+    can_drive: true
+    vehicle: family-suv
+    home: home
+  - id: alex
+    name: Alex
+    role: child
+    home: home
+  - id: sam
+    name: Sam
+    role: child
+    home: home
+  - id: jordan
+    name: Jordan
+    role: child
+    home: home
+  - id: casey
+    name: Casey
+    role: child
+    home: home
+    monitoring:
+      enabled: false   # away at university; enable manually with dates
+  - id: ext-driver-s
+    name: Driver S
+    role: contact
+    can_drive: true
+
+external_passengers:
+  - id: ext-e
+    first_name: Passenger E
+    household: household-e
+    contact: ext-driver-s
+    dropoff: loc-e-home
+
+calendars:
+  # IDs come from calendar discovery (`family-logistics collect` lists them).
+  - id: cal-family-transportation
+    name: Family Transportation
+    kind: transport
+  - id: cal-sam
+    name: Sam
+    kind: person
+    person: sam
+
+transport_defaults:
+  - person: alex
+    weekdays: [mon, tue, wed, thu, fri]
+    direction: to_school
+    mode: bike
+    origin: home
+    destination: school-central
+  - person: jordan
+    weekdays: [mon, tue, wed, thu, fri]
+    direction: to_school
+    mode: parent
+    driver: riley
+    origin: home
+    destination: school-central
+    effective_from: 2026-09-01

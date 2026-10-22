@@ -35,6 +35,8 @@ uv run family-logistics config        # non-secret settings only
 | `verify-db PATH` | Read-only integrity and schema-revision check of a database file |
 | `healthcheck` | Probe the local `/healthz`; exit 0 when healthy |
 | `config` | Print non-secret configuration values |
+| `registry load [PATH] [--dry-run]` | Validate the private registry seed and apply it in one audited transaction |
+| `registry show` | List people, passengers, places, vehicles and calendars (never addresses) |
 
 ## Run the API locally
 
@@ -55,6 +57,50 @@ kill %1
 
 `/healthz` returns `{"status": "ok", "database": true, "version": "..."}`, or
 HTTP 503 when the database is unreachable.
+
+## Load the household registry
+
+People, external passengers, places, vehicles, calendars and school
+transport defaults come from one private YAML seed kept **outside** this
+repository. Start from the fictional example and keep the real copy
+somewhere private:
+
+```bash
+mkdir -p ~/.config/family-logistics
+cp config/registry.example.yaml ~/.config/family-logistics/registry.yaml
+# edit it, then:
+export FL_REGISTRY_SEED=~/.config/family-logistics/registry.yaml
+```
+
+`FL_DATA_KEY` encrypts the stored addresses and coordinates. Generate it
+**once**, the first time only, and store it with your other secrets:
+
+```bash
+# First time only: print a new key and save it in your secret store.
+uv run python -c 'from family_logistics.core.crypto import generate_key; print(generate_key())'
+```
+
+Every later run reuses that same stored value. A different or lost key
+cannot read addresses that are already stored, and they cannot be
+recovered; never regenerate the key for an existing database.
+
+```bash
+export FL_DATA_KEY="<the key from your secret store>"
+uv run family-logistics registry load --dry-run
+uv run family-logistics registry load
+uv run family-logistics registry show
+```
+
+Rules the loader enforces:
+
+- Loading the same seed twice changes nothing; each change writes one audit
+  row holding hashes only.
+- People, passengers and calendars removed from the seed are deactivated,
+  never deleted. Places, vehicles and households are kept.
+- Addresses and coordinates are stored encrypted with `FL_DATA_KEY`; a seed
+  or registry holding them cannot be loaded without the key.
+- A seed inside a git working tree is refused (`--allow-repo-path` is for the
+  fictional example only).
 
 ## Library use
 

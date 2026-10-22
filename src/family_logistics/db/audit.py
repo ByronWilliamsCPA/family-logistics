@@ -42,7 +42,7 @@ from sqlalchemy import insert, select
 from family_logistics.db.schema import audit_log
 
 if TYPE_CHECKING:
-    from sqlalchemy.engine import Engine
+    from sqlalchemy.engine import Connection, Engine
 
 MAX_REF_LENGTH = 128
 
@@ -85,6 +85,67 @@ class AuditEntry:
     correlation_id: str | None
 
 
+def record_on(  # noqa: PLR0913 - keyword-only audit fields
+    connection: Connection,
+    *,
+    actor: str,
+    object_ref: str,
+    action: str,
+    prior_state: object | None = None,
+    new_state: object | None = None,
+    correlation_id: str | None = None,
+) -> AuditEntry:
+    """Append one audit row on an open connection (the caller's transaction).
+
+    Use this when the audited change and its audit row must commit or roll
+    back together.
+
+    Args:
+        connection: Connection inside the caller's transaction.
+        actor: Who made the change.
+        object_ref: Internal reference; must not contain personal data.
+        action: What happened.
+        prior_state: State before the change (hashed, not stored).
+        new_state: State after the change (hashed, not stored).
+        correlation_id: Request or run correlation ID.
+
+    Returns:
+        The recorded entry.
+
+    Raises:
+        ValueError: If a reference field is empty or too long.
+    """
+    for name, value in (
+        ("actor", actor),
+        ("object_ref", object_ref),
+        ("action", action),
+    ):
+        if not value or len(value) > MAX_REF_LENGTH:
+            msg = f"audit {name} must be 1-{MAX_REF_LENGTH} characters"
+            raise ValueError(msg)
+    entry = AuditEntry(
+        recorded_at=datetime.now(UTC),
+        actor=actor,
+        object_ref=object_ref,
+        action=action,
+        prior_hash=state_hash(prior_state),
+        new_hash=state_hash(new_state),
+        correlation_id=correlation_id,
+    )
+    connection.execute(
+        insert(audit_log).values(
+            recorded_at=entry.recorded_at,
+            actor=entry.actor,
+            object_ref=entry.object_ref,
+            action=entry.action,
+            prior_hash=entry.prior_hash,
+            new_hash=entry.new_hash,
+            correlation_id=entry.correlation_id,
+        )
+    )
+    return entry
+
+
 class AuditRepository:
     """Writes and reads the append-only audit log.
 
@@ -107,6 +168,9 @@ class AuditRepository:
     ) -> AuditEntry:
         """Append one audit row with hashes of the prior and new state.
 
+        Runs ``record_on`` in its own transaction; an empty or too long
+        reference field raises ``ValueError`` from there.
+
         Args:
             actor: Who made the change.
             object_ref: Internal reference; must not contain personal data.
@@ -117,40 +181,17 @@ class AuditRepository:
 
         Returns:
             The recorded entry.
-
-        Raises:
-            ValueError: If a reference field is empty or too long.
         """
-        for name, value in (
-            ("actor", actor),
-            ("object_ref", object_ref),
-            ("action", action),
-        ):
-            if not value or len(value) > MAX_REF_LENGTH:
-                msg = f"audit {name} must be 1-{MAX_REF_LENGTH} characters"
-                raise ValueError(msg)
-        entry = AuditEntry(
-            recorded_at=datetime.now(UTC),
-            actor=actor,
-            object_ref=object_ref,
-            action=action,
-            prior_hash=state_hash(prior_state),
-            new_hash=state_hash(new_state),
-            correlation_id=correlation_id,
-        )
         with self._engine.begin() as connection:
-            connection.execute(
-                insert(audit_log).values(
-                    recorded_at=entry.recorded_at,
-                    actor=entry.actor,
-                    object_ref=entry.object_ref,
-                    action=entry.action,
-                    prior_hash=entry.prior_hash,
-                    new_hash=entry.new_hash,
-                    correlation_id=entry.correlation_id,
-                )
+            return record_on(
+                connection,
+                actor=actor,
+                object_ref=object_ref,
+                action=action,
+                prior_state=prior_state,
+                new_state=new_state,
+                correlation_id=correlation_id,
             )
-        return entry
 
     def entries_for(self, object_ref: str) -> list[AuditEntry]:
         """Return the audit trail of one object, oldest first.

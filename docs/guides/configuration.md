@@ -30,6 +30,7 @@ shows non-secret values only.
 | `FL_PORT` | `8080` | Listen port |
 | `FL_TIMEZONE` | `America/Los_Angeles` | IANA zone for human-facing times; storage is UTC |
 | `FL_DATABASE_PATH` | `/data/family_logistics.db` | SQLite database (WAL mode, single writer) |
+| `FL_REGISTRY_SEED` | unset | Private registry seed YAML, kept outside the repository; `registry load` reads it when no path is given |
 
 ## Calendars (read-only)
 

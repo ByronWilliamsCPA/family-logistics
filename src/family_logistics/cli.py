@@ -10,21 +10,27 @@ Subcommands:
 - ``migrate``: upgrade (or downgrade) the database schema.
 - ``verify-db``: integrity and schema-revision check of a database file, for
   example a restored backup.
+- ``registry load``: validate the private registry seed and apply it
+  atomically (``--dry-run`` shows the plan only).
+- ``registry show``: list the registry without addresses or coordinates.
 """
 
 from __future__ import annotations
 
 import logging
 import sys
+from datetime import datetime
 from http.client import HTTPConnection
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
+from zoneinfo import ZoneInfo
 
 import click
 from alembic.util import CommandError
 
 from family_logistics import __version__
 from family_logistics.core.config import get_settings
+from family_logistics.core.crypto import AddressCipher, ProtectedDataError
 from family_logistics.core.database import (
     check_database,
     create_readonly_engine,
@@ -34,9 +40,17 @@ from family_logistics.core.database import (
 )
 from family_logistics.core.exceptions import ConfigurationError
 from family_logistics.db import migrations_api
+from family_logistics.db.registry import RegistryError, RegistryStore
+from family_logistics.services.registry_seed import (
+    SeedError,
+    apply_seed,
+    load_seed_file,
+)
 from family_logistics.utils.logging import setup_logging
 
 if TYPE_CHECKING:
+    from sqlalchemy.engine import Engine
+
     from family_logistics.core.config import Settings
 
 HEALTHCHECK_TIMEOUT_SECONDS = 3
@@ -279,6 +293,149 @@ def verify_db(path: Path) -> None:
     click.echo(f"Integrity: {'ok' if intact else 'FAILED'}")
     click.echo(f"Schema revision: {current or 'none'} (head: {head})")
     sys.exit(0 if intact and current == head else 1)
+
+
+def _engine_at_head(settings: Settings) -> Engine:
+    """Open the application database, exiting unless it is at the schema head."""
+    problems = directory_problems(settings.database_path)
+    if problems:
+        _fail("; ".join(problems))
+    engine = create_sqlite_engine(settings.database_path)
+    if not migrations_api.is_at_head(engine):
+        engine.dispose()
+        _fail(SCHEMA_BEHIND_MESSAGE)
+    return engine
+
+
+def _cipher(settings: Settings) -> AddressCipher | None:
+    """Return the address cipher when ``FL_DATA_KEY`` is configured."""
+    return None if settings.data_key is None else AddressCipher(settings.data_key)
+
+
+@cli.group()
+def registry() -> None:
+    """Manage the household registry (people, places, vehicles, calendars)."""
+
+
+@registry.command("load")
+@click.argument("path", required=False, type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--dry-run", is_flag=True, help="Show the plan; write nothing.")
+@click.option(
+    "--allow-repo-path",
+    is_flag=True,
+    help="Permit a seed inside a git working tree (fictional examples only).",
+)
+@click.option(
+    "--actor", default="registry-seed", show_default=True, help="Audit actor."
+)
+def registry_load(
+    path: Path | None, dry_run: bool, allow_repo_path: bool, actor: str
+) -> None:
+    """Validate the registry seed and apply it in one transaction.
+
+    PATH defaults to FL_REGISTRY_SEED. Keep the real seed outside the
+    repository; it holds names and (encrypted on load) addresses.
+    """
+    settings = _settings()
+    seed_path = path or settings.registry_seed
+    if seed_path is None:
+        _fail("no registry seed: pass PATH or set FL_REGISTRY_SEED")
+    engine = _engine_at_head(settings)
+    try:
+        seed = load_seed_file(seed_path, allow_repo_path=allow_repo_path)
+        plan = apply_seed(
+            engine,
+            seed,
+            cipher=_cipher(settings),
+            actor=actor,
+            dry_run=dry_run,
+            today=datetime.now(ZoneInfo(settings.timezone)).date(),
+        )
+    except (SeedError, RegistryError, ConfigurationError, ProtectedDataError) as exc:
+        _fail(str(exc))
+    finally:
+        engine.dispose()
+    summary = ", ".join(f"{name} {count}" for name, count in plan.counts().items())
+    click.echo(("Dry run: " if dry_run else "Applied: ") + summary)
+    for change in plan.changes:
+        click.echo(f"  {change.action:<10} {change.object_ref}")
+
+
+def _row(*columns: str) -> None:
+    """Print one indented listing row."""
+    click.echo("  " + " ".join(columns))
+
+
+def _yes(flag: bool) -> str:
+    """Render a flag as yes or no."""
+    return "yes" if flag else "no"
+
+
+@registry.command("show")
+def registry_show() -> None:
+    """List the registry. Addresses and coordinates are never printed."""
+    settings = _settings()
+    engine = _engine_at_head(settings)
+    try:
+        with engine.connect() as connection:
+            store = RegistryStore(connection)
+            people = store.people()
+            passengers = store.external_passengers()
+            locations = store.locations()
+            presence = store.protected_presence()
+            vehicles = store.vehicles()
+            calendars = store.calendar_sources()
+            defaults = store.transport_defaults()
+    finally:
+        engine.dispose()
+    click.echo(f"People ({len(people)}):")
+    for p in people:
+        _row(
+            f"{p.person_id:<16}",
+            f"{p.display_name:<16}",
+            f"{p.role.value:<8}",
+            f"active={_yes(p.active)}",
+            f"driver={_yes(p.can_drive)}",
+            f"monitored={_yes(p.monitoring_enabled)}",
+        )
+    click.echo(f"External passengers ({len(passengers)}):")
+    for e in passengers:
+        _row(
+            f"{e.passenger_id:<16}",
+            f"{e.display_first_name:<16}",
+            f"household={e.household_id}",
+            f"active={_yes(e.active)}",
+        )
+    click.echo(f"Locations ({len(locations)}):")
+    for x in locations:
+        has_address, has_coordinates = presence.get(x.location_id, (False, False))
+        _row(
+            f"{x.location_id:<16}",
+            f"{x.name:<24}",
+            f"verified={_yes(x.verified)}",
+            f"address={'stored' if has_address else 'none'}",
+            f"coordinates={'stored' if has_coordinates else 'none'}",
+        )
+    click.echo(f"Vehicles ({len(vehicles)}):")
+    for v in vehicles:
+        seats = "unverified" if v.seat_capacity is None else str(v.seat_capacity)
+        _row(f"{v.vehicle_id:<16}", f"{v.display_name:<24}", f"seats={seats}")
+    click.echo(f"Calendars ({len(calendars)}):")
+    for c in calendars:
+        last = c.last_success.isoformat() if c.last_success else "never"
+        _row(
+            f"{c.calendar_id:<16}",
+            f"{c.kind.value:<10}",
+            f"owner={c.person_id or '-'}",
+            f"enabled={_yes(c.enabled)}",
+            f"last_success={last}",
+        )
+    per_person: dict[str, int] = {}
+    for t in defaults:
+        per_person[t.person_id] = per_person.get(t.person_id, 0) + 1
+    click.echo(f"Transport defaults ({len(defaults)}):")
+    for pid, count in sorted(per_person.items()):
+        click.echo(f"  {pid:<16} {count}")
 
 
 if __name__ == "__main__":
