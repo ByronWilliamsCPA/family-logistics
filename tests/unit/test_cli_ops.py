@@ -7,12 +7,17 @@ import sqlite3
 import pytest
 from click.testing import CliRunner
 from cryptography.fernet import Fernet
+from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 
 from family_logistics import cli as cli_module
 from family_logistics.cli import SCHEMA_BEHIND_MESSAGE, cli, startup_problems
 from family_logistics.core import config as config_module
 from family_logistics.core.config import Settings
-from family_logistics.core.database import create_sqlite_engine
+from family_logistics.core.database import (
+    create_readonly_engine,
+    create_sqlite_engine,
+)
 from family_logistics.db import migrations_api
 
 GOOD_TOKEN = "x" * 32
@@ -82,6 +87,66 @@ class TestStartupProblems:
             settings, upgrade_db=True
         )
 
+    def test_refusal_does_not_create_database(self, tmp_path):
+        settings = Settings(database_path=tmp_path / "fl.db")
+        startup_problems(settings, upgrade_db=True)
+        assert list(tmp_path.iterdir()) == []
+
+    def test_refusal_does_not_upgrade_existing_database(self, tmp_path):
+        database = tmp_path / "fl.db"
+        sqlite3.connect(database).close()
+        settings = Settings(database_path=database)
+        startup_problems(settings, upgrade_db=True)
+        engine = create_readonly_engine(database)
+        assert migrations_api.current_revision(engine) is None
+        engine.dispose()
+
+    def test_schema_behind_refusal_does_not_create_file(self, tmp_path):
+        problems = startup_problems(settings_for(tmp_path), upgrade_db=False)
+        assert problems == [SCHEMA_BEHIND_MESSAGE]
+        assert list(tmp_path.iterdir()) == []
+
+
+def _stamp_unknown_revision(database) -> None:
+    engine = create_sqlite_engine(database)
+    migrations_api.upgrade(engine)
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE alembic_version SET version_num='9999_newer'"))
+    engine.dispose()
+
+
+@pytest.mark.unit
+class TestNewerSchema:
+    def test_startup_refuses_unknown_revision(self, tmp_path):
+        _stamp_unknown_revision(tmp_path / "fl.db")
+        problems = startup_problems(settings_for(tmp_path), upgrade_db=True)
+        assert len(problems) == 1
+        assert "'9999_newer' is not known to this version" in problems[0]
+
+    def test_schema_state_unknown(self, tmp_path):
+        _stamp_unknown_revision(tmp_path / "fl.db")
+        engine = create_sqlite_engine(tmp_path / "fl.db")
+        state = migrations_api.schema_state(engine)
+        engine.dispose()
+        assert state is migrations_api.SchemaState.UNKNOWN
+
+    def test_upgrade_refuses_unknown_revision(self, tmp_path):
+        _stamp_unknown_revision(tmp_path / "fl.db")
+        engine = create_sqlite_engine(tmp_path / "fl.db")
+        with pytest.raises(migrations_api.MigrationRefusedError, match="newer build"):
+            migrations_api.upgrade(engine)
+        engine.dispose()
+
+    def test_migrate_command_reports_cleanly(
+        self, monkeypatch, tmp_path, fresh_settings
+    ):
+        _stamp_unknown_revision(tmp_path / "fl.db")
+        monkeypatch.setenv("FL_DATABASE_PATH", str(tmp_path / "fl.db"))
+        result = CliRunner().invoke(cli, ["migrate"])
+        assert result.exit_code == 2
+        assert "Migration refused" in result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+
 
 @pytest.mark.unit
 class TestServe:
@@ -137,6 +202,26 @@ class TestMigrateAndVerify:
         assert down.exit_code == 0
         assert "Schema revision: base" in down.output
 
+    def test_migrate_lower_revision_needs_downgrade_flag(
+        self, monkeypatch, tmp_path, fresh_settings
+    ):
+        monkeypatch.setenv("FL_DATABASE_PATH", str(tmp_path / "fl.db"))
+        assert CliRunner().invoke(cli, ["migrate"]).exit_code == 0
+        result = CliRunner().invoke(cli, ["migrate", "--revision", "base"])
+        assert result.exit_code == 2
+        assert "--downgrade" in result.output
+        engine = create_sqlite_engine(tmp_path / "fl.db")
+        assert migrations_api.is_at_head(engine)
+        engine.dispose()
+
+    def test_migrate_bad_revision_is_clean_error(
+        self, monkeypatch, tmp_path, fresh_settings
+    ):
+        monkeypatch.setenv("FL_DATABASE_PATH", str(tmp_path / "fl.db"))
+        result = CliRunner().invoke(cli, ["migrate", "--revision", "nope"])
+        assert result.exit_code == 2
+        assert "Migration refused" in result.output
+
     def test_migrate_missing_directory(self, monkeypatch, tmp_path, fresh_settings):
         monkeypatch.setenv("FL_DATABASE_PATH", str(tmp_path / "nope" / "fl.db"))
         result = CliRunner().invoke(cli, ["migrate"])
@@ -152,6 +237,31 @@ class TestMigrateAndVerify:
         assert result.exit_code == 0, result.output
         assert "Integrity: ok" in result.output
         assert database.read_bytes() == before
+
+    def test_verify_db_never_opens_writable(self, monkeypatch, tmp_path):
+        database = tmp_path / "fl.db"
+        engine = create_sqlite_engine(database)
+        migrations_api.upgrade(engine)
+        engine.dispose()
+
+        def refuse(*_args, **_kwargs):
+            raise AssertionError("verify-db opened a writable engine")
+
+        monkeypatch.setattr(cli_module, "create_sqlite_engine", refuse)
+        result = CliRunner().invoke(cli, ["verify-db", str(database)])
+        assert result.exit_code == 0, result.output
+
+    def test_readonly_engine_rejects_writes(self, tmp_path):
+        database = tmp_path / "fl.db"
+        sqlite3.connect(database).close()
+        engine = create_readonly_engine(database)
+        statement = text("CREATE TABLE t (id INTEGER)")
+        with (
+            engine.connect() as connection,
+            pytest.raises(OperationalError, match="readonly"),
+        ):
+            connection.execute(statement)
+        engine.dispose()
 
     def test_verify_db_behind_head(self, tmp_path):
         database = tmp_path / "old.db"

@@ -31,7 +31,7 @@ uv run family-logistics config        # non-secret settings only
 | Command | Purpose |
 |---------|---------|
 | `serve [--upgrade-db]` | Run the API (single process, single SQLite writer); refuses an out-of-date schema unless `--upgrade-db` is given |
-| `migrate [--revision R] [--downgrade]` | Upgrade the schema to head, or explicitly downgrade to revision `R` |
+| `migrate [--revision R] [--downgrade]` | Upgrade the schema to head (or `R`) in one transaction; a target below the current revision is refused unless `--downgrade` is given |
 | `verify-db PATH` | Read-only integrity and schema-revision check of a database file |
 | `healthcheck` | Probe the local `/healthz`; exit 0 when healthy |
 | `config` | Print non-secret configuration values |

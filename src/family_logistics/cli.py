@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
 import click
+from alembic.util import CommandError
 
 from family_logistics import __version__
 from family_logistics.core.config import get_settings
@@ -64,6 +65,10 @@ def _settings() -> Settings:
 def startup_problems(settings: Settings, *, upgrade_db: bool) -> list[str]:
     """Check everything ``serve`` needs before it accepts requests.
 
+    The database is only written when every other check passed and an
+    upgrade was requested: a refusal never creates, upgrades or otherwise
+    changes the database file. Inspection uses a read-only connection.
+
     Args:
         settings: Application settings.
         upgrade_db: Whether a database behind the schema head may be upgraded.
@@ -77,21 +82,55 @@ def startup_problems(settings: Settings, *, upgrade_db: bool) -> list[str]:
         problems.append("FL_HA_TOKEN is required to serve")
     if settings.notification_mode == "production" and settings.data_key is None:
         problems.append("FL_DATA_KEY is required when FL_NOTIFICATION_MODE=production")
-    directory = directory_problems(settings.database_path)
-    if directory:
-        return problems + directory
-    engine = create_sqlite_engine(settings.database_path)
+    problems += directory_problems(settings.database_path)
+    if problems:
+        return problems
+    path = settings.database_path
+    verdict = _existing_database_verdict(path)
+    if verdict is not None:
+        return verdict
+    if not upgrade_db:
+        return [SCHEMA_BEHIND_MESSAGE]
+    engine = create_sqlite_engine(path)
     try:
-        if not check_database(engine):
-            problems.append(f"database {settings.database_path} cannot be opened")
-        elif not migrations_api.is_at_head(engine):
-            if upgrade_db:
-                migrations_api.upgrade(engine)
-            else:
-                problems.append(SCHEMA_BEHIND_MESSAGE)
+        migrations_api.upgrade(engine)
+    except migrations_api.MigrationRefusedError as exc:
+        return [str(exc)]
     finally:
         engine.dispose()
-    return problems
+    return []
+
+
+def _existing_database_verdict(path: Path) -> list[str] | None:
+    """Inspect an existing database read-only.
+
+    Returns:
+        ``[]`` when it is at head, the blocking problems when it cannot be
+        used, or None when it is missing or behind head (an upgrade decides).
+    """
+    if not path.exists():
+        return None
+    engine = create_readonly_engine(path)
+    try:
+        if not check_database(engine):
+            return [f"database {path} cannot be opened"]
+        state = migrations_api.schema_state(engine)
+    finally:
+        engine.dispose()
+    if state is migrations_api.SchemaState.AT_HEAD:
+        return []
+    if state is migrations_api.SchemaState.UNKNOWN:
+        return [_unknown_schema_message(path)]
+    return None
+
+
+def _unknown_schema_message(path: Path) -> str:
+    """Build the refusal message for a schema this build does not know."""
+    engine = create_readonly_engine(path)
+    try:
+        return migrations_api.unknown_revision_message(engine)
+    finally:
+        engine.dispose()
 
 
 def _configure_logging(settings: Settings) -> None:
@@ -176,7 +215,10 @@ def config() -> None:
     "--revision",
     default="head",
     show_default=True,
-    help="Target revision; a revision below the current one downgrades.",
+    help=(
+        "Target revision. Moving below the current revision requires "
+        "--downgrade; without it the command refuses."
+    ),
 )
 @click.option(
     "--downgrade",
@@ -196,6 +238,8 @@ def migrate(revision: str, downgrade: bool) -> None:
         else:
             migrations_api.upgrade(engine, revision)
         current = migrations_api.current_revision(engine)
+    except (migrations_api.MigrationRefusedError, CommandError) as exc:
+        _fail(f"Migration refused: {exc}")
     finally:
         engine.dispose()
     click.echo(f"Schema revision: {current or 'base'}")

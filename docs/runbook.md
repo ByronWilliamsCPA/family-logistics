@@ -22,8 +22,12 @@ The container runs one process with one SQLite writer.
   before serving. Outside a container, run `family-logistics migrate` and then
   `family-logistics serve`. The process refuses to start when `FL_HA_TOKEN` is
   missing or shorter than 32 characters, when `FL_DATA_KEY` is missing in
-  production mode, when the schema is behind head (without `--upgrade-db`), or
-  when a setting fails validation; read the startup error and fix it.
+  production mode, when the schema is behind head (without `--upgrade-db`),
+  when the database records a schema revision this image does not know (it
+  was written by a newer image: run that image or restore a matching
+  backup), or when a setting fails validation; read the startup error and
+  fix it. A refused start never creates or changes the database file, and a
+  migration that fails is rolled back as a whole.
 - **Stop:** stop the container. Wait for it to exit before touching the
   database file, so the WAL is checkpointed.
 - Never run two instances against the same database file.
@@ -102,7 +106,8 @@ deployment. To restore:
 
    It must report `Integrity: ok` and print the schema revision next to the
    head revision of the image you will start. A revision behind head is
-   upgraded by `serve --upgrade-db` at start.
+   upgraded by `serve --upgrade-db` at start; a revision the image does not
+   know is refused.
 4. Start the container and confirm `/healthz` returns `200`.
 5. Run an on-demand assessment and confirm the status card is not stale.
 
