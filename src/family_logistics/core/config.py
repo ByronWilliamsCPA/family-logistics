@@ -588,6 +588,10 @@ def load_settings() -> Settings:
 def get_settings() -> Settings:
     """Return the process-wide settings instance.
 
+    Invalid settings surface as the ``ConfigurationError`` that
+    ``load_settings`` raises. A failure is not cached, so the next call builds
+    settings again.
+
     Returns:
         Cached Settings built from the environment.
     """
