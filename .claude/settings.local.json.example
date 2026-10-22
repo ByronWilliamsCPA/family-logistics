@@ -21,7 +21,8 @@
     ],
     "deny": [
       "Read(./.env)",
-      "Read(~/.config/family-logistics/**)"
+      "Read(~/.config/family-logistics/**)",
+      "Bash(git diff --no-index:*)"
     ],
     "ask": [
       "Bash(rm:*)",
