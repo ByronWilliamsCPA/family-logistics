@@ -12,18 +12,23 @@ Do not open a public GitHub issue for security vulnerabilities, and never
 include real household data (names, addresses, schedules, calendar
 identifiers, credentials) in any report.
 
-- [Report a vulnerability privately](https://github.com/ByronWilliamsCPA/family-logistics/security/advisories/new)
-  through GitHub Security Advisories, or
-- email [security@byronwilliams.dev](mailto:security@byronwilliams.dev).
+[Report a vulnerability privately](https://github.com/ByronWilliamsCPA/family-logistics/security/advisories/new)
+through GitHub private vulnerability reporting. This is the only channel for
+this repository; reports stay confidential until a fix is published.
 
 ## Response Timeline
 
-We commit to an initial response to all vulnerability reports within 14 days
-of submission. In practice:
+These are targets, not guarantees, and they match the
+[organization security policy](https://github.com/ByronWilliamsCPA/.github/blob/main/SECURITY.md).
+All windows run from acknowledgement of the report.
 
-- Acknowledgement: within 48 hours
-- Initial assessment: within 5 business days
-- Resolution target: 30 days for critical, 90 days for others
+| Stage | Target |
+|-------|--------|
+| Acknowledgement of report | 5 business days |
+| Triage and severity (non-critical) | 10 business days |
+| Triage and severity (critical) | 2 business days |
+| Fix or mitigation for critical reports | 14 calendar days from acknowledgement |
+| Fix released for other severities | 30 calendar days from acknowledgement |
 
 Fixes for an assigned CVE reference the identifier in the commit message
 (for example `fix(security): resolve CVE-YYYY-NNNNN`), so the generated
@@ -33,18 +38,19 @@ changelog records it.
 
 Family Logistics handles credentials for a family's calendars and personal
 data about children, including children from other families. The main attack
-surface and its mitigations:
+surface follows. The status column says what is true at this commit: the
+project is at milestone M0 and the application serves only `/healthz`.
 
-| Surface | Risk | Mitigation |
-|---------|------|------------|
-| iCloud CalDAV credentials | An app-specific password unlocks the whole Apple ID it belongs to | A dedicated Apple ID that holds only View Only calendar shares; the password is a runtime secret, never in Git or logs |
-| CalDAV access | Accidental writes to the authoritative calendars | The HTTP transport allows only read methods (`GET`, `HEAD`, `OPTIONS`, `PROPFIND`, `REPORT`) and rejects any other method before network I/O; tested |
-| Home Assistant API | Unauthenticated triggers or data injection | Home Assistant initiates every exchange with a bearer token of at least 32 characters, compared in constant time; the app holds no Home Assistant credential |
-| Registry web UI | Unauthorized edits to people and locations | Single sign-on at the reverse proxy; identity headers are trusted only from configured proxy addresses (none by default) and only for allow-listed users |
-| Children's personal data | Exposure of names, addresses and routines | Data minimization per the [privacy and retention spec](docs/privacy/privacy-and-retention-spec.md); protected addresses encrypted at rest; addresses never sent in push notifications or to the LLM |
-| Local LLM | Model output altering results | The deterministic engine is the only authority; LLM output can explain findings but never create, dismiss or downgrade them |
-| This public repository | Household data or site details committed by mistake | Fictional household in all tests and docs; gitleaks rules for private IPs, personal e-mail, phone numbers and street addresses; an out-of-tree private-terms deny-list checked locally and in CI |
-| Supply chain | Compromised dependencies or images | Locked dependencies (`uv.lock`), digest-pinned base images, SHA-pinned actions, dependency and container scanning, SBOM generation |
+| Surface | Risk | Control | Status |
+|---------|------|---------|--------|
+| iCloud CalDAV credentials | An app-specific password unlocks the whole Apple ID it belongs to | Operating requirement: a dedicated Apple ID that holds only View Only calendar shares; the password is a runtime secret, never in Git or logs | Operating requirement. Settings hold secrets as `SecretStr`; no collector uses the credential yet (M1) |
+| CalDAV access | Accidental writes to the authoritative calendars | The HTTP transport allows only read methods (`GET`, `HEAD`, `OPTIONS`, `PROPFIND`, `REPORT`) and HTTPS, and rejects anything else before network I/O | Implemented and tested; not yet wired into a collector (M1) |
+| Home Assistant API | Unauthenticated triggers or data injection | Home Assistant initiates every exchange with a bearer token of at least 32 characters, compared in constant time; the app holds no Home Assistant credential | Token check implemented but not wired: no Home Assistant route is registered yet (planned M2 to M4) |
+| Registry web UI | Unauthorized edits to people and locations | Single sign-on at the reverse proxy; identity headers trusted only from configured proxy addresses (none by default) and only for allow-listed users | Planned (M4): the settings exist but nothing consumes them and no UI exists |
+| Children's personal data | Exposure of names, addresses and routines | Data minimization per the [privacy and retention spec](docs/privacy/privacy-and-retention-spec.md); protected addresses encrypted at rest; addresses never sent in push notifications or to the LLM | Address encryption (Fernet) implemented but not yet used by any storage; notification and LLM exclusions are design rules for M3 and M5 and are not yet enforced in code |
+| Local LLM | Model output altering results | The deterministic engine is the only authority; LLM output can explain findings but never create, dismiss or downgrade them | Design rule ([ADR 0001](docs/ADRs/0001-deterministic-authority-and-llm-boundary.md)); the LLM adapter is not implemented (planned M5) |
+| This public repository | Household data or site details committed by mistake | Fictional household in all tests and docs; gitleaks rules for private IPs, personal e-mail, phone numbers and street addresses; an out-of-tree private-terms deny-list | Implemented: pre-commit hooks locally and the Private Data Guard workflow in CI |
+| Supply chain | Compromised dependencies or images | Locked dependencies (`uv.lock`), digest-pinned base images, SHA-pinned actions, dependency and container scanning, SBOM generation | Implemented in the CI workflows |
 
 ## Organization Policy
 
