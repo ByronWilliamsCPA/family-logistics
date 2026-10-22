@@ -18,9 +18,11 @@ feed a Home Assistant status card and Apprise notifications. A local LLM may
 later explain findings, but it never decides them.
 
 **Status: M0 (discovery).** The domain core (notes parser, confirmation codes,
-passenger-level change impact, run status) is implemented and tested.
-Collection, scheduling, notifications and the Home Assistant API arrive in
-milestones M1 to M5. Production notifications stay off
+passenger-level change impact, run status) is implemented and tested, as is the
+platform around it: Alembic schema migrations, a hash-only audit log, a minimal
+Apprise API client, and `serve` startup checks that refuse to start on missing
+secrets or an out-of-date schema. Collection, scheduling, notifications and the
+Home Assistant API arrive in milestones M1 to M5. Production notifications stay off
 (`FL_NOTIFICATION_MODE=shadow`) until the household approves the defaults and a
 two-week shadow period completes.
 
@@ -105,6 +107,7 @@ src/family_logistics/
 ├── adapters/      # caldav (read-only transport), routing, apprise, home_assistant, llama_cpp
 ├── api/           # FastAPI app, /healthz, Home Assistant routes (M3)
 ├── core/          # settings, crypto (address encryption), database, exceptions
+├── db/            # table definitions, Alembic migrations, audit log repository
 ├── domain/        # models, notes parser, confirmation, change impact, rules, run status
 ├── middleware/    # correlation IDs, security headers
 ├── services/      # collector, scheduler, assessments, notifications (M1 to M3)
