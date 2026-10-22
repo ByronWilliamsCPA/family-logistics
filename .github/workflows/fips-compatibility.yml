@@ -80,6 +80,7 @@ jobs:
 
       - name: Run FIPS compatibility check
         id: fips-check
+        shell: bash
         env:
           STRICT_MODE: ${{ inputs.strict_mode }}
         run: |
@@ -96,7 +97,9 @@ jobs:
             --include-tests \
             $STRICT_FLAG \
             2>&1 | tee fips-report.txt
-          EXIT_CODE=$?
+          # The checker's status, not tee's: $? after a pipeline is the last
+          # command's exit code, which would make this gate unable to fail.
+          EXIT_CODE=${PIPESTATUS[0]}
           set -e
 
           # Also generate JSON report
@@ -159,7 +162,7 @@ jobs:
 
             **Status:** ${status}
 
-            ${errors > 0 ? '⚠️ This PR introduces FIPS-incompatible code or dependencies. Please review the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.' : ''}
+            ${errors > 0 ? `⚠️ This PR introduces FIPS-incompatible code or dependencies. Please review the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.` : ''}
             ${warnings > 0 && errors === 0 ? 'ℹ️ Some packages may need verification for FIPS compliance. See the workflow artifacts for details.' : ''}
 
             <details>

@@ -6,6 +6,14 @@
 #   pull_request   build only (never pushes; fork PRs are always build-only)
 #   push to main   push ghcr.io/byronwilliamscpa/family-logistics:sha-<7>
 #   workflow_call  called by release.yml after a release, adding the semver tag
+#   workflow_dispatch  pushes only when dispatched on main; any other branch
+#                  is build-only, so an unreviewed branch can never publish or
+#                  attest an image
+#
+# Trivy gates the build: a HIGH or CRITICAL vulnerability with a released fix
+# fails the job (and so blocks the attestation), matching
+# container-security.yml. Unfixed base-image CVEs are retired by refreshing
+# the digest-pinned DHI base.
 #
 # Every pushed image gets BuildKit SLSA provenance and an SBOM in the registry
 # (from the reusable workflow) plus a GitHub build-provenance attestation on
@@ -61,7 +69,7 @@ jobs:
       image-name: 'byronwilliamscpa/family-logistics'
       # The deployment target is amd64; the DHI base digests are pinned for amd64.
       platforms: 'linux/amd64'
-      push: ${{ github.event_name != 'pull_request' }}
+      push: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
       push-on-fork: false
       tag-sha: true
       tag-pr: false
@@ -69,6 +77,8 @@ jobs:
       tag-semver: false
       additional-tags: ${{ inputs.version && format('type=raw,value={0}', inputs.version) || '' }}
       enable-trivy-scan: true
+      trivy-severity: 'CRITICAL,HIGH'
+      trivy-fail-on-vuln: true
       trivy-ignore-unfixed: true
       enable-sbom: true
       enable-provenance: true
@@ -79,7 +89,7 @@ jobs:
   attest:
     name: Attest Image Provenance
     needs: [image]
-    if: github.event_name != 'pull_request' && needs.image.outputs.image-digest != ''
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.image.outputs.image-digest != ''
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

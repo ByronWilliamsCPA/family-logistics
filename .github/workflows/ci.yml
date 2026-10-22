@@ -1,6 +1,6 @@
 # CI/CD Pipeline
-# Runs tests, linting, type checking, security tests and an advisory dead-code
-# scan through the organization's reusable CI workflow.
+# Runs tests, linting, type checking and an advisory dead-code scan through
+# the organization's reusable CI workflow, plus the full pre-commit hook set.
 #
 # SonarCloud and Codecov run in their own workflows (sonarcloud.yml and
 # codecov.yml); python-ci.yml takes no SonarCloud/Codecov inputs or secrets,
@@ -34,17 +34,60 @@ jobs:
       coverage-threshold: 80
       source-directory: 'src'
       test-directory: 'tests'
-      run-integration-tests: true
-      run-security-tests: true
+      # No tests carry the integration or security markers yet, and the
+      # reusable workflow treats "no tests collected" as success, so enabling
+      # these would report steps that cannot fail. Turn them on together with
+      # the first marked tests.
+      run-integration-tests: false
+      run-security-tests: false
       fail-on-llm-tags: false
       # Advisory only: vulture findings are reported, never fail the build.
       enable-dead-code-check: true
       fail-on-dead-code: false
 
+  # The local uv hooks (ruff, basedpyright, bandit, yamllint, interrogate,
+  # pydoclint, validate-front-matter) are skipped on pre-commit.ci because they
+  # need the uv environment; this job is where CI runs them. The private-terms
+  # hook skips here (no list): Private Data Guard enforces it with the secret.
+  # Pre-push hooks run with the second invocation.
+  pre-commit:
+    name: Pre-commit Hooks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras --frozen
+
+      - name: Run pre-commit hooks (pre-commit stage)
+        run: uv run --no-sync pre-commit run --all-files --show-diff-on-failure
+
+      - name: Run pre-commit hooks (pre-push stage)
+        run: uv run --no-sync pre-commit run --all-files --hook-stage pre-push --show-diff-on-failure
+
   ci-gate:
     name: CI Gate
     runs-on: ubuntu-latest
-    needs: [ci]
+    needs: [ci, pre-commit]
     if: always()
     timeout-minutes: 5
     permissions:
@@ -58,9 +101,10 @@ jobs:
       - name: Check CI results
         env:
           CI_RESULT: ${{ needs.ci.result }}
+          PRE_COMMIT_RESULT: ${{ needs.pre-commit.result }}
         run: |
-          if [ "$CI_RESULT" != "success" ]; then
-            echo "CI Gate failed: $CI_RESULT"
+          if [ "$CI_RESULT" != "success" ] || [ "$PRE_COMMIT_RESULT" != "success" ]; then
+            echo "CI Gate failed: ci=$CI_RESULT pre-commit=$PRE_COMMIT_RESULT"
             exit 1
           fi
           echo "CI Gate passed"

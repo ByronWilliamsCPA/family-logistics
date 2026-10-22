@@ -37,6 +37,11 @@ jobs:
       enable-automerge: false
 
   # Name is a required status check in the organization ruleset; keep it.
+  # Scope: this check now gates ONLY the supplemental checks above (PR title
+  # Conventional Commits lint; the link check is advisory). Tests, coverage,
+  # lint and types are gated by "CI Gate" (ci.yml), and household data by
+  # Private Data Guard. Those are separate status checks: the ruleset must
+  # require them by name for them to block a merge.
   validate-dependencies:
     name: Dependency & Standards Validation
     runs-on: ubuntu-latest

@@ -61,8 +61,6 @@ jobs:
           fi
 
       - name: Verify cruft status
-        env:
-          EVENT_NAME: ${{ github.event_name }}
         run: |
           echo "Checking if project is in sync with template..."
           if cruft check; then
@@ -74,14 +72,11 @@ jobs:
             echo "  cruft diff   # Preview changes"
             echo "  cruft update # Apply changes"
             echo ""
-            # Don't fail on scheduled runs or manual triggers (just warn)
-            if [ "$EVENT_NAME" = "schedule" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-              echo "Creating an issue to track this..."
-              exit 0
-            else
-              echo "Failing CI to prevent merging out-of-date code"
-              exit 1
-            fi
+            # Fail on every trigger. A failed scheduled or manual run is the
+            # drift notification (GitHub e-mails the workflow owner); no issue
+            # is created automatically.
+            echo "::error::Project has drifted from the cookiecutter template."
+            exit 1
           fi
 
       - name: Show template diff (if out of sync)

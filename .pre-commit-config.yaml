@@ -19,7 +19,9 @@ default_install_hook_types: [pre-commit, commit-msg, pre-push]
 ci:
   autoupdate_schedule: monthly
   autofix_prs: true
-  # Local hooks need the uv environment or out-of-tree inputs; CI runs them directly.
+  # Local hooks need the uv environment or out-of-tree inputs. They run in the
+  # "Pre-commit Hooks" job of .github/workflows/ci.yml (pre-commit and
+  # pre-push stages); private-terms runs in private-data-guard.yml.
   skip:
     - validate-front-matter
     - private-terms
