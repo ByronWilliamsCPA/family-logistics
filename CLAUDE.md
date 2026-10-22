@@ -2,9 +2,15 @@
 
 > This file holds **project-specific** guidance. The universal development
 > standards (security-first rules, code quality, FIPS, OpenSSF, pre-commit
-> checklist) live in [.standards/CLAUDE.baseline.md](.standards/CLAUDE.baseline.md)
-> and the global `~/.claude/CLAUDE.md`, and apply automatically. Do not copy
-> them here; merge baseline updates with `/merge-standards` after `cruft update`.
+> checklist) live in `.standards/CLAUDE.baseline.md`, which is imported on the
+> last line of this block so every session loads it; the global
+> `~/.claude/CLAUDE.md` applies on top for contributors who have one. Where
+> the baseline and this file differ, this file wins. Do not copy the baseline
+> here. Because it is imported, CLAUDE.md needs no `/merge-standards` run after
+> `cruft update`; that command is only for the other baselines (REUSE.toml and
+> the like).
+
+@.standards/CLAUDE.baseline.md
 
 ## Public Repository: No Household Data (CRITICAL)
 
@@ -32,8 +38,10 @@ This project was generated from
 [cookiecutter-python-template](https://github.com/ByronWilliamsCPA/cookiecutter-python-template)
 with cruft. When you find an issue the template should have handled, add it to
 `docs/template_feedback.md` with **Issue**, **Context**, **Suggested Fix** and
-**Priority** (Critical / High / Medium / Low). The file is gitignored: it is a
-local working buffer, passed to the template team out-of-band.
+**Priority** (Critical / High / Medium / Low). The file is gitignored, so a
+fresh clone does not have it: create it locally on the first item (format in
+`.standards/template_feedback.baseline.md`). It is a local working buffer,
+passed to the template team out-of-band.
 
 ## Project Overview
 
@@ -42,8 +50,10 @@ local working buffer, passed to the template team out-of-band.
 iCloud ride commitments before a child is stranded.
 **Author**: Byron Williams
 **Repository**: <https://github.com/ByronWilliamsCPA/family-logistics>
-**Status**: M0 (discovery). Domain core implemented; collection, scheduling,
-notifications and the Home Assistant API arrive in M1 to M5.
+**Status**: M0 (discovery). Implemented: the domain core, the SQLite schema
+with Alembic migrations and an append-only audit log, the Apprise client,
+structured logging and startup checks. Collection, scheduling, notification
+wiring and the Home Assistant API arrive in M1 to M5.
 **Distribution**: container image `ghcr.io/byronwilliamscpa/family-logistics`
 only. Not published to PyPI.
 
@@ -91,9 +101,10 @@ recurrence expansion, quiet hours, imminent-ride windows).
 ## Branch Workflow
 
 Never commit directly to `main`. Branch first: `feat/`, `fix/`, `docs/`,
-`refactor/`, `test/`, `chore/`, `ci/`, followed by a descriptive slug. Commits
-use Conventional Commits; python-semantic-release derives versions and the
-changelog from them.
+`refactor/`, `perf/`, `test/`, `build/`, `ci/`, `chore/`, followed by a
+descriptive slug. Commits use Conventional Commits (types: feat, fix, docs,
+style, refactor, perf, test, build, ci, chore, revert); python-semantic-release
+derives versions and the changelog from them.
 
 ## Quick Start Commands
 
@@ -120,6 +131,7 @@ src/family_logistics/
 ├── adapters/      # caldav (read-only transport), routing, apprise, home_assistant, llama_cpp
 ├── api/           # FastAPI app, /healthz, Home Assistant routes (M3)
 ├── core/          # config, crypto, database, exceptions
+├── db/            # schema, audit log, migrations_api, Alembic migrations/
 ├── domain/        # models, parser, confirmation, change_impact, capacity,
 │                  # stop_order, registry, rules, run_status
 ├── middleware/    # correlation IDs, security headers
@@ -128,6 +140,7 @@ src/family_logistics/
 └── cli.py
 tests/
 ├── unit/          # one module per domain area
+├── integration/   # database and migration tests
 ├── scenarios/     # acceptance matrix and the Friday regression
 ├── fixtures/synthetic/   # the only tracked .ics fixtures
 └── fl_factories.py       # shared builders for the fictional household
@@ -169,7 +182,7 @@ attests the GHCR image.
 ```bash
 cruft check
 cruft update --skip CLAUDE.md --skip REUSE.toml --skip docs/template_feedback.md
-git diff .standards/        # then /merge-standards if baselines changed
+git diff .standards/        # CLAUDE.baseline.md is imported; /merge-standards covers the rest
 ```
 
 Always skip `CLAUDE.md`, `REUSE.toml`, `docs/template_feedback.md`,
