@@ -18,9 +18,9 @@ on:
         required: false
         default: '80'
         type: string
-# Cancel in-progress runs for same PR/branch
+# Cancel in-progress runs for the same ref
 concurrency:
-  group: mutation-${{ github.event.pull_request.number || github.ref }}
+  group: mutation-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -29,7 +29,8 @@ permissions:
 jobs:
   mutation:
     name: Mutation Testing
-    # Skip on forks (no PR comment permissions)
+    # The reusable job declares pull-requests: write, so the caller must grant it
+    # even though post-pr-comment is false and no PR run exists.
     permissions:
       contents: read
       pull-requests: write
