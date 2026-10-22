@@ -20,21 +20,21 @@ below records the expected posture and the open work.
 
 | Check | Expected state | Notes |
 |-------|----------------|-------|
-| Branch-Protection | Met | Organization ruleset on `main`: pull requests, required checks, signed commits, linear history, no force pushes |
+| Branch-Protection | Met | Organization ruleset `ByronWilliamsCPA-default-branch-baseline` on `main`: pull requests, three required status checks, signed commits, linear history, no force pushes, no deletion; zero approving reviews required |
 | Code-Review | Capped | Solo-maintainer project; reviews are not required by count |
 | CI-Tests | Met | Unit and scenario tests run on every pull request |
-| Dangerous-Workflow | Met | No `pull_request_target`; no untrusted input interpolated into scripts |
+| Dangerous-Workflow | Met | No `pull_request_target`; `qlty.yml` uses `workflow_run` but only consumes coverage artifacts from same-repository runs and never checks out pull request code |
 | Dependency-Update-Tool | Met | Renovate manages Python, GitHub Actions, Docker and pre-commit pins |
-| Fuzzing | In progress | Hypothesis property tests over the notes parser and validation functions |
+| Fuzzing | In progress | Hypothesis property tests over the notes parser and validation functions; no dedicated fuzzing harness |
 | License | Met | MIT, REUSE-compliant |
 | Maintained | Pending | Scorecard scores repositories younger than 90 days as 0 |
 | Packaging | Pending | The release workflow publishes a container image to GHCR |
 | Pinned-Dependencies | Met | Actions and reusable workflows pinned to commit SHAs; base images pinned by digest; `uv.lock` committed |
-| SAST | Met | Bandit and Semgrep in the security workflow |
-| Security-Policy | Met | [SECURITY.md](https://github.com/ByronWilliamsCPA/family-logistics/blob/main/SECURITY.md) with private reporting, a 14-day response commitment and a security-surface summary |
+| SAST | Partial | Bandit in the security workflow and SonarCloud in `sonarcloud.yml`; Semgrep is not run (`.semgrep.yml` is unused), and the Scorecard check scores only the analyzers it recognizes |
+| Security-Policy | Met | [SECURITY.md](https://github.com/ByronWilliamsCPA/family-logistics/blob/main/SECURITY.md) with private reporting, response-time targets and a security-surface summary |
 | Signed-Releases | Pending | Container images are attested with build provenance at release |
 | Token-Permissions | Met | Read-only defaults; write scopes granted per job |
-| Vulnerabilities | Met | pip-audit and OSV-Scanner on locked dependencies; container scanning |
+| Vulnerabilities | Met | OSV-Scanner and dependency review on locked dependencies; Trivy container scanning; `pip-audit` is a manual developer check, not a CI step |
 
 ## Best Practices Badge
 
@@ -44,15 +44,17 @@ The badge project must be filed by a maintainer at
 passing criteria:
 
 - **Basics**: README, [CONTRIBUTING.md](https://github.com/ByronWilliamsCPA/family-logistics/blob/main/CONTRIBUTING.md),
-  MIT license, public issue tracker, documentation site.
+  MIT license, public issue tracker, documentation in `docs/`. The MkDocs site is built in CI but not yet
+  published: GitHub Pages is not enabled and `docs.yml` sets `deploy-to-pages: false`.
 - **Change control**: Git on GitHub, semantic versioning, generated changelog.
-- **Reporting**: private vulnerability reporting and a 14-day response
-  commitment in SECURITY.md.
+- **Reporting**: private vulnerability reporting and response-time targets in
+  SECURITY.md.
 - **Quality**: automated tests with an 80% coverage gate, Ruff, BasedPyright
   strict mode, pre-commit hooks.
 - **Security**: dependency, secret (gitleaks) and static analysis scanning;
   read-only calendar access by design; secrets supplied only at runtime.
-- **Analysis**: Bandit, Semgrep, pip-audit and OSV-Scanner in CI.
+- **Analysis**: Bandit and OSV-Scanner in the security workflow, SonarCloud analysis, and Trivy container
+  scanning in CI.
 
 ## Repository settings to verify
 
