@@ -62,6 +62,15 @@ The `context/` directory contains **project-specific** reference documents:
 
 These files extend the universal standards with project-specific examples and patterns. Edit these freely to match your project's needs.
 
+### Local Settings (`settings.local.json`)
+
+`settings.local.json` holds personal permission and environment overrides and is not committed. After cloning, copy
+the example and edit it to suit your machine:
+
+```bash
+cp .claude/settings.local.json.example .claude/settings.local.json
+```
+
 ## Updating Standard Configuration
 
 To pull the latest standards from the upstream repository:
