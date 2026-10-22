@@ -15,6 +15,7 @@ path = [
     "src/**",
     "tests/**",
     "tools/**",
+    "typings/**",
     "scripts/**/*.py",
     ".claude/**/*.py",
     "*.py",
