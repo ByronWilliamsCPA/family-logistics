@@ -1,8 +1,10 @@
 # REUSE configuration (https://reuse.software, specification 3.3).
 #
-# Files that cannot carry an SPDX header are annotated here by glob. Code is
-# MIT, prose documentation is CC-BY-4.0, and configuration, lock files and
-# generated or placeholder files are CC0-1.0. Only these three license texts
+# Files are annotated here by glob rather than by per-file SPDX headers (this
+# covers source and tests too). Code is MIT, prose documentation is CC-BY-4.0,
+# and configuration, lock files and generated or placeholder files are CC0-1.0.
+# Later annotations win, so the narrower MIT entry for .claude Python scripts
+# sits after the broad CC0 .claude/** glob. Only these three license texts
 # live in LICENSES/; `reuse lint` fails on unused license texts.
 version = 1
 SPDX-PackageName = "family-logistics"
@@ -16,7 +18,6 @@ path = [
     "tests/**",
     "tools/**",
     "scripts/**/*.py",
-    ".claude/**/*.py",
     "*.py",
     "Dockerfile",
 ]
@@ -69,6 +70,13 @@ path = [
     "scripts/.gitkeep",
 ]
 SPDX-License-Identifier = "CC0-1.0"
+SPDX-FileCopyrightText = "2026 Byron Williams"
+
+# Python scripts under .claude are code, not configuration - MIT. Placed after
+# the CC0 .claude/** glob above so it is not overridden.
+[[annotations]]
+path = [".claude/**/*.py"]
+SPDX-License-Identifier = "MIT"
 SPDX-FileCopyrightText = "2026 Byron Williams"
 
 # Build output and caches, if they are ever present in a working tree.
