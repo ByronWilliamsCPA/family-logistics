@@ -73,9 +73,13 @@ def setup_credentials() -> None:
         cred_json = base64.b64decode(cred_b64).decode("utf-8")
         json.loads(cred_json)  # Validate JSON
 
-        # Write to temporary file
-        temp_cred_file = Path(tempfile.gettempdir()) / "gcp-credentials.json"
-        temp_cred_file.write_text(cred_json)
+        # #CRITICAL: security: the file holds a service-account key.
+        # #VERIFY: mkstemp creates it with mode 0600 and an unpredictable name
+        # (O_EXCL), so other local users cannot read it or pre-plant a symlink.
+        fd, temp_name = tempfile.mkstemp(prefix="gcp-credentials-", suffix=".json")
+        temp_cred_file = Path(temp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as cred_file:
+            cred_file.write(cred_json)
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(temp_cred_file)
 
         print(f"✅ Using base64-encoded credentials (temp file: {temp_cred_file})")
