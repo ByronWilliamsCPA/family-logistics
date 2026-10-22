@@ -1,10 +1,21 @@
 # =============================================================================
 # .gitignore for family-logistics (PUBLIC repository)
 # =============================================================================
-# Directory patterns are anchored to the repository root with a leading "/"
-# so that a future source package (for example src/.../reports/) is never
-# silently ignored. File-type globs that protect household data stay
-# unanchored on purpose: they must match at any depth.
+# Two deliberate styles, and tests/unit/test_gitignore_guards.py enforces the
+# second one with real git:
+#
+# 1. Build, packaging and generic output directories (/build/, /dist/, /lib/,
+#    /var/, /logs/, /tmp/, ...) are anchored to the repository root with a
+#    leading "/", so a future source package of the same name below src/ is
+#    never silently ignored. Tool caches and editor directories (__pycache__/,
+#    .pytest_cache/, .vscode/, ...) stay unanchored because they appear in any
+#    subdirectory and never hold source.
+# 2. Everything that protects household data or credentials (registry seeds,
+#    backups, reports, assessments, transcripts, databases, calendar exports,
+#    .aws/, .ssh/, .gcloud/) is unanchored on purpose: it must match at any
+#    depth, because the file that leaks is usually not at the repository root.
+#    If a source package ever needs one of those names, add an explicit
+#    negation for that package path rather than anchoring the guard.
 
 # -----------------------------------------------------------------------------
 # Python bytecode, builds and packaging
@@ -95,10 +106,10 @@ secrets.json
 **/service-account*.json
 **/gcp-credentials*.json
 **/*-key.json
-/.gcloud/
+.gcloud/
 /.config/gcloud/
-/.aws/
-/.ssh/
+.aws/
+.ssh/
 
 # -----------------------------------------------------------------------------
 # Editors, IDEs and OS files
@@ -179,13 +190,17 @@ reuse-spdx.json
 /output/
 /notebooks/.ipynb_checkpoints/
 
-# Local-only template feedback buffer (see CLAUDE.md)
+# Template feedback buffer: kept untracked here, so entries are shared with the
+# template team out of band (see CLAUDE.md)
 /docs/template_feedback.md
 
 # =============================================================================
 # Family Logistics: real household data stays local (this repository is public)
 # =============================================================================
-# Runtime database, WAL/SHM side files and backups (any depth)
+# Runtime database and WAL/SHM side files. The *.db and *.sqlite globs match at
+# any depth; /data/ is root-anchored on purpose (the tracked data/.gitkeep
+# placeholder lives there and a package data directory below src/ must stay
+# trackable). Backups match at any depth.
 /data/
 *.db
 *.db-wal
@@ -195,17 +210,20 @@ reuse-spdx.json
 *.sqlite-wal
 *.sqlite-shm
 db.sqlite3-journal
-/backups/
+backups/
 
 # Registry seed data and site configuration (people, locations, addresses,
-# calendar IDs, school assignments). Commit only *.example.* templates.
+# calendar IDs, school assignments). Commit only *.example.* templates. The
+# globs and their example exceptions have no slash, so both apply at any depth.
+# config/local/ contains a slash, so git already roots it at the repository
+# root; the leading slash only makes that explicit.
 /config/local/
-/registry*.yaml
-/registry*.yml
-/registry*.json
-!/registry*.example.yaml
-!/registry*.example.yml
-!/registry*.example.json
+registry*.yaml
+registry*.yml
+registry*.json
+!registry*.example.yaml
+!registry*.example.yml
+!registry*.example.json
 site*.env
 stack.env
 
@@ -221,13 +239,14 @@ stack.env
 /tools/m0/*-results.md
 /tools/m0/RESULTS.md
 
-# Pseudonym mappings and the private-terms deny-list (any depth, never in Git)
+# Pseudonym mappings and the private-terms deny-list (any depth; ignore rules do
+# not untrack a file that was already added, so also keep them out of the tree)
 pseudonyms*.yaml
 pseudonyms*.json
 private-terms*.txt
 denylist*.txt
 
 # Reports, assessments and LLM transcripts generated from real schedules
-/reports/
-/assessments/
-/llm-transcripts/
+reports/
+assessments/
+llm-transcripts/
