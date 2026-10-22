@@ -9,11 +9,8 @@
       "Bash(uv run pip-audit:*)",
       "Bash(uv run pre-commit run:*)",
       "Bash(uv run mkdocs build:*)",
-      "Bash(uv run family-logistics:*)",
       "Bash(uv sync:*)",
-      "Bash(git status:*)",
-      "Bash(git diff:*)",
-      "Bash(git log:*)"
+      "Bash(git status:*)"
     ],
     "deny": [
       "Read(./.env)",
@@ -24,6 +21,9 @@
       "Read(./config/local/**)"
     ],
     "ask": [
+      "Bash(uv run family-logistics:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
       "Bash(git push:*)",
       "Bash(gh pr create:*)",
       "Bash(rm:*)"
