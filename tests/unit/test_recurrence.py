@@ -113,6 +113,35 @@ class TestLessonSeries:
 
 
 @pytest.mark.unit
+class TestOrphanOverrides:
+    """Overrides without a master in the object (single-instance invitations)."""
+
+    def test_each_override_keeps_its_own_recurrence_id(self):
+        events = expand("orphan_overrides.ics", *WIDE)
+        assert [(e.uid, e.recurrence_id) for e in events] == [
+            ("synthetic-practice-alex", "2026-10-27T22:00:00Z"),
+            ("synthetic-practice-alex", "2026-11-03T23:00:00Z"),
+        ]
+        assert len({e.to_key() for e in events}) == 2
+
+    def test_orphan_overrides_are_classified_as_overrides(self):
+        moved = expand("orphan_overrides.ics", *WIDE)[1]
+        assert moved.summary == "Alex practice (moved)"
+        assert moved.start == utc(2026, 11, 4, 0, 0)
+        assert moved.is_override
+        assert not moved.series_uid_has_rrule
+        assert occurrence_kind(moved) is OccurrenceKind.OVERRIDE
+
+    def test_single_event_key_ignores_start_time(self):
+        (event,) = expand("ride_transport.ics", *WIDE)
+        moved = fixture_text("ride_transport.ics").replace("T153000", "T143000")
+        (rescheduled,) = expand(moved, *WIDE, raw=True)
+        assert event.recurrence_id == ""
+        assert rescheduled.recurrence_id == ""
+        assert event.start - rescheduled.start == timedelta(hours=1)
+
+
+@pytest.mark.unit
 class TestSingleEvents:
     def test_all_day_event_spans_local_midnights(self):
         (event,) = expand("all_day.ics", *WIDE)

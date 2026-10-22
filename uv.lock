@@ -670,6 +670,7 @@ dependencies = [
     { name = "starlette" },
     { name = "structlog" },
     { name = "uvicorn" },
+    { name = "x-wr-timezone" },
 ]
 
 [package.optional-dependencies]
@@ -772,6 +773,7 @@ requires-dist = [
     { name = "types-defusedxml", marker = "extra == 'dev'", specifier = ">=0.7.0" },
     { name = "uvicorn", specifier = ">=0.30.0" },
     { name = "vulture", marker = "extra == 'dev'", specifier = ">=2.11" },
+    { name = "x-wr-timezone", specifier = ">=0.0.7" },
     { name = "yamllint", marker = "extra == 'dev'", specifier = ">=1.35.0" },
 ]
 provides-extras = ["dev", "supply-chain"]

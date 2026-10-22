@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -31,6 +32,7 @@ from family_logistics.domain.events import (
     CollectionResult,
 )
 from family_logistics.services.collector import (
+    NOT_EVENTS,
     NOT_VISIBLE,
     Collector,
     CollectorConfig,
@@ -121,6 +123,22 @@ class TestFirstCollection:
             sam.result.window_start, sam.result.window_end
         )
         assert len(stored) == 4
+
+    def test_orphan_overrides_of_one_uid_are_stored_separately(self, engine):
+        server = default_server()
+        server.calendar(SAM_PATH).objects = {
+            "alex.ics": fixture_text("orphan_overrides.ics")
+        }
+        run = make(engine, server).run_once(only=["Sam"])
+        assert run.complete
+        assert run.calendars[0].applied.inserted == 2
+        stored = SourceEventRepository(engine).active(
+            run.window_start, run.window_end, [SAM_ID]
+        )
+        assert sorted(e.recurrence_id for e in stored) == [
+            "2026-10-27T22:00:00Z",
+            "2026-11-03T23:00:00Z",
+        ]
 
     def test_only_restricts_the_run(self, engine):
         server = default_server()
@@ -269,6 +287,41 @@ class TestFailures:
         assert sam.applied.deleted == 0
         assert len(run.findings) == 1
 
+    def test_truncated_query_is_incomplete_and_deletes_nothing(self, engine):
+        server = default_server()
+        clock = Clock(NOW)
+        collector = make(engine, server, clock)
+        collector.run_once()
+        calendar = server.calendar(SAM_PATH)
+        # The server drops the lesson series and flags the result as truncated.
+        calendar.objects = {"practice.ics": fixture_text("floating_time.ics")}
+        calendar.ctag = "ctag-2"
+        server.truncate_query = {SAM_PATH}
+        clock.now = NOW + timedelta(hours=1)
+        run = collector.run_once()
+        assert not run.complete
+        sam = next(c for c in run.calendars if c.result.source.calendar_id == SAM_ID)
+        assert not sam.result.complete
+        assert sam.result.error == (
+            "calendar-query returned a non-200 entry (HTTP 507): partial result"
+        )
+        assert sam.applied.deleted == 0
+        assert [f.rule_id for f in run.findings] == ["DATA-011"]
+        repo = SourceEventRepository(engine)
+        assert repo.deleted(run.window_start, run.window_end, [SAM_ID]) == ()
+        stored = repo.active(run.window_start, run.window_end, [SAM_ID])
+        assert len(stored) == 3
+
+    def test_selected_calendar_without_events_gets_a_specific_error(self, engine):
+        server = default_server()
+        collector = make(engine, server)
+        collector.run_once()
+        server.calendar(SAM_PATH).components = ("VTODO",)
+        run = collector.run_once()
+        sam = next(c for c in run.calendars if c.result.source.calendar_id == SAM_ID)
+        assert sam.result.error == NOT_EVENTS
+        assert [f.rule_id for f in run.findings] == ["DATA-011"]
+
     def test_disabled_source_is_skipped(self, engine):
         server = default_server()
         collector = make(engine, server)
@@ -279,6 +332,42 @@ class TestFailures:
         run = collector.run_once()
         assert run.calendars == ()
         assert reports(server) == []
+
+
+@pytest.mark.unit
+class TestSelection:
+    def test_deselected_calendar_is_not_reported_as_lost(self, engine):
+        server = default_server()
+        collector = make(engine, server)
+        collector.run_once()
+        collector.config = replace(CONFIG, selected=())
+        server.requests.clear()
+        run = collector.run_once()
+        assert run.complete
+        assert run.findings == ()
+        assert [c.result.source.calendar_id for c in run.calendars] == [TRANSPORT_ID]
+        assert SAM_PATH not in reports(server)
+        source = CalendarSourceRepository(engine).get(SAM_ID)
+        assert source is not None
+        assert source.last_error is None
+
+    def test_unlisted_stored_source_is_not_reported(self, engine):
+        CalendarSourceRepository(engine).ensure(
+            "cal-unlisted", "Jordan", CalendarKind.PERSON
+        )
+        run = make(engine, default_server()).run_once()
+        assert run.complete
+        assert "cal-unlisted" not in {
+            c.result.source.calendar_id for c in run.calendars
+        }
+
+    def test_selected_by_calendar_id_is_still_collected(self, engine):
+        server = default_server()
+        collector = make(engine, server)
+        collector.config = replace(CONFIG, selected=(SAM_ID,))
+        run = collector.run_once()
+        assert run.complete
+        assert SAM_ID in {c.result.source.calendar_id for c in run.calendars}
 
 
 @pytest.mark.unit

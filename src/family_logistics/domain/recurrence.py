@@ -8,6 +8,9 @@ overlaps the collection window:
 - An override VEVENT (edited, moved or cancelled occurrence) replaces the
   generated occurrence and keeps the series identity through its original
   RECURRENCE-ID, so a moved lesson is the same occurrence, not a new one.
+- An object holding only overrides (no RRULE/RDATE master, as when the account
+  was invited to single instances) keys each one by its RECURRENCE-ID too.
+  Only a plain single event gets the empty ``recurrence_id``.
 - STATUS:CANCELLED occurrences are kept with ``status="cancelled"``: the engine
   needs to see that a commitment was cancelled, not just that it is missing.
 - Times carrying a TZID are converted to UTC through that zone (DST-safe);
@@ -234,8 +237,14 @@ def _occurrence(  # noqa: PLR0913 - keyword-only expansion context
     end = max(_boundary(_end(component, start_value), zone), start)
     in_series = uid in series
     recurrence_id = ""
+    # recurring-ical-events stamps a RECURRENCE-ID (its DTSTART) on every
+    # occurrence, plain single events included, so the value only becomes the
+    # key when the UID is a series or the object carries its own override
+    # VEVENTs. A single event therefore keeps "" (stable when rescheduled), and
+    # orphan overrides of one UID keep distinct keys.
+    keyed = in_series or any(o_uid == uid for o_uid, _ in overrides)
     recurrence = _temporal(component, "RECURRENCE-ID")
-    if in_series and recurrence is not None:
+    if keyed and recurrence is not None:
         recurrence_id = recurrence_id_text(recurrence, zone)
     status = STATUSES.get(
         (_text(component, "STATUS") or "CONFIRMED").upper(), "confirmed"
