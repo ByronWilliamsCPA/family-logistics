@@ -34,6 +34,12 @@ jobs:
       coverage-threshold: 80
       source-directory: 'src'
       test-directory: 'tests'
+      # Both buckets must stay non-empty: the reusable workflow treats pytest
+      # exit code 5 (no tests collected) as success, and the unit step
+      # deselects integration/security markers, so an empty bucket would pass
+      # silently. tests/integration holds at least one test per marker.
+      # #ASSUME: testing: each marker keeps at least one collected test.
+      # #VERIFY: `uv run pytest -m integration` and `-m security` both collect.
       run-integration-tests: true
       run-security-tests: true
       fail-on-llm-tags: false
