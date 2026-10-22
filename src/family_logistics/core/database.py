@@ -3,6 +3,8 @@
 #CRITICAL: Timing: SQLite is safe here only because one container is the only
 writer. Never mount the database file into a second writer container, and
 keep it on the host's local disk (never NFS), where SQLite locking is reliable.
+#VERIFY: `serve` runs uvicorn with workers=1, docker-compose.yml runs one
+container, and docs/runbook.md says never to run two instances on one file.
 #ASSUME: Timing: a 5 s busy timeout covers the longest write transaction
 (one assessment run's batch). #VERIFY with run-duration metrics in shadow mode;
 a "database is locked" error means a second writer or a too-long transaction.

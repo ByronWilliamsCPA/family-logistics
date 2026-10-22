@@ -161,6 +161,14 @@ def cli() -> None:
 )
 def serve(upgrade_db: bool) -> None:
     """Run the API server (single process, single writer)."""
+    # #ASSUME: Timing: with --upgrade-db (the image's default command) every
+    # container start may migrate the schema. That is safe only while one
+    # container at a time owns the database file. BEGIN IMMEDIATE serialises
+    # two concurrent migrations and Alembic re-reads the revision inside the
+    # transaction, but both containers would then write the same file, which
+    # the single-writer design forbids.
+    # #VERIFY: the deployment stops the old container before starting the new
+    # one (runbook "Start and stop"); see the PR #2 proposal on --upgrade-db.
     settings = _settings()
     _configure_logging(settings)
     problems = startup_problems(settings, upgrade_db=upgrade_db)
@@ -227,6 +235,11 @@ def config() -> None:
 )
 def migrate(revision: str, downgrade: bool) -> None:
     """Upgrade (or explicitly downgrade) the database schema."""
+    # #CRITICAL: Data integrity: --downgrade below 0001 drops the append-only
+    # audit log and its history. It requires the explicit flag; a lower
+    # --revision without it is refused.
+    # #VERIFY: tests/unit/test_cli_ops.py::TestMigrateAndVerify::
+    # test_migrate_lower_revision_needs_downgrade_flag.
     settings = _settings()
     problems = directory_problems(settings.database_path)
     if problems:

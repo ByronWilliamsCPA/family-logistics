@@ -9,6 +9,9 @@ validation failure into a ``ConfigurationError`` that names fields only.
 #CRITICAL: Security: secrets (CalDAV app password, HA token, routing and LLM
 keys) arrive only through the environment, injected by the deployment's secret
 store. Nothing here reads a secret from a file in the image or from Git.
+#VERIFY: model_config sets no env_file or secrets_dir (grep this module), and
+the Dockerfile copies no secret; docs/guides/configuration.md says .env is
+not read by the app.
 """
 
 from __future__ import annotations
@@ -162,6 +165,7 @@ class Settings(BaseSettings):
         extra="ignore",
         # #CRITICAL: Security: a rejected secret (short HA token, malformed
         # data key) must never be echoed in an error or traceback.
+        # #VERIFY: tests/unit/test_config_security.py::TestNoSecretEcho.
         hide_input_in_errors=True,
     )
 
@@ -216,6 +220,8 @@ class Settings(BaseSettings):
 
     # #CRITICAL: Shadow mode is the default. Production notifications to both
     # parents require joint approval after the two-week shadow period.
+    # #VERIFY: tests/unit/test_app_cli_config.py::TestSettings::
+    # test_defaults_are_safe asserts the shadow default.
     notification_mode: Literal["shadow", "production"] = "shadow"
     quiet_hours_start: time = time(22, 0)
     quiet_hours_end: time = time(6, 0)
@@ -288,6 +294,7 @@ class Settings(BaseSettings):
         """
         # #CRITICAL: Security: Basic credentials (the app-specific password)
         # travel with every CalDAV request; plain HTTP would expose them.
+        # #VERIFY: tests/unit/test_config_security.py::TestCaldavUrl.
         if not value.lower().startswith("https://"):
             msg = "FL_CALDAV_URL must use https://"
             raise ValueError(msg)

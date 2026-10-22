@@ -73,6 +73,7 @@ SPAN_ID_HEADER = "X-Span-ID"
 # #CRITICAL: Security: inbound IDs are attacker-controlled. They are logged and
 # echoed back, so only short, plain tokens are accepted; anything else
 # (oversized, control characters, spaces) is replaced or dropped.
+# #VERIFY: tests/unit/test_correlation_sanitize.py.
 _SAFE_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 

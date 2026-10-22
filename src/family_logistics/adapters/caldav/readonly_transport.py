@@ -9,11 +9,15 @@ through the same check.
 
 #CRITICAL: Security: the collector must never write to iCloud (PUT, DELETE,
 MOVE, COPY, POST, PATCH, PROPPATCH, MKCALENDAR, MKCOL, LOCK, UNLOCK, ACL).
-Tests prove each is blocked with no I/O.
+#VERIFY: tests/unit/test_readonly_transport.py::test_write_methods_blocked_without_io
+covers each of the twelve methods, plus lowercase methods and redirects.
 #ASSUME: External resources: a dedicated Apple ID that holds only View-Only
 shares makes this server-enforced as well. #VERIFY in M0 check 1.
 #CRITICAL: Security: every request (including redirects) must use HTTPS,
 because Basic credentials accompany it. Plain HTTP is refused before I/O.
+#VERIFY: tests/unit/test_readonly_transport.py::TestHttpsOnly
+(test_client_refuses_http_base_url, test_redirect_to_http_refused_before_io).
+Only build_readonly_client builds a CalDAV client; the M1 collector must use it.
 
 GET stays allowed: collectors fetch individual calendar objects by href with
 GET (RFC 4791 section 7.8 and 5.3.4), and RFC 6764 service discovery may
@@ -139,6 +143,8 @@ def build_readonly_client(  # noqa: PLR0913 - keyword-only options
     # #ASSUME: External resources: iCloud answers within 30 s; a timeout is a
     # source failure (DATA-011, run incomplete), never an empty calendar.
     # Retries with backoff belong to the collector (M1), not this transport.
+    # #VERIFY: the M1 collector tests map httpx.TimeoutException to a failed
+    # source attempt.
     return httpx.Client(
         base_url=base_url,
         auth=auth,
