@@ -282,6 +282,7 @@ known-first-party = ["family_logistics"]
     "S106",   # hardcoded_password_funcarg - test fixtures with fake passwords
     "S107",   # hardcoded_password_default - test default values
     "S108",   # hardcoded_tmp_directory - test temp paths are intentional
+    "S603",   # subprocess_without_shell_equals_true - tests run fixed local scripts
     "S311",   # random - non-crypto random in tests is fine
     "S113",   # request_without_timeout - test HTTP calls may be mocked
 ]
@@ -461,6 +462,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
+    "security: marks tests of security controls (CI gates, permission rules)",
     "benchmark: marks tests as benchmark tests",
     "py310: marks tests specific to Python 3.10",
     "py311plus: marks tests requiring Python 3.11+",
