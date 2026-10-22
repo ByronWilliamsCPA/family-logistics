@@ -2,14 +2,31 @@
 
 Every registry change and confirmation-state change is recorded as one row:
 when, who (an actor identifier such as an Authentik username or ``system``),
-which object (an internal reference such as ``trip:<id>``, never a name),
-what action, and SHA-256 hashes of the state before and after. The state
-itself is never stored here, so the audit log holds no personal data
-(privacy spec: audit rows carry hashes only).
+which object (an internal reference such as ``trip:<id>``), what action, and
+SHA-256 hashes of the state before and after. The state itself is never
+stored by this repository.
+
+Scope of the privacy claim: the row holds no state content, but it is not
+anonymous. ``actor`` is a username (pseudonymous personal data), and
+``object_ref`` is caller-supplied text that callers must keep to internal
+IDs; nothing in the schema stops a caller from passing a name. The hashes are
+unsalted, so the hash of a low-entropy state (one address, one name) can be
+confirmed by anyone who guesses the state. Treat the table as Confidential
+audit evidence (privacy spec section 2), not as anonymised data.
 
 #CRITICAL: Data integrity: the table is append-only. The repository exposes
-no update or delete, and database triggers (migration 0001) abort any UPDATE
-or DELETE that bypasses it.
+no update or delete, and database triggers (migration 0001) abort any UPDATE,
+any DELETE, and any INSERT that reuses an existing id (which is how
+``INSERT OR REPLACE`` would otherwise delete a row without firing the DELETE
+trigger).
+#VERIFY: tests/unit/test_audit.py::TestAudit::test_rows_cannot_change runs
+UPDATE, DELETE, INSERT OR REPLACE, REPLACE INTO and an UPSERT against a
+migrated database and expects each to be refused with "append-only".
+#ASSUME: Retention: the privacy spec's 365-day purge of audit hashes is not
+implemented, and the triggers would refuse it. Reconciling the two is an open
+owner decision; no purge job may be added that drops or bypasses a trigger.
+#VERIFY: grep for "DELETE FROM audit_log" in src/ finds no purge path until
+that decision is recorded in an ADR.
 """
 
 from __future__ import annotations

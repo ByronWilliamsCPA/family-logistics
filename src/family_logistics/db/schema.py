@@ -24,4 +24,5 @@ audit_log = Table(
     Column("correlation_id", String(64), nullable=True),
 )
 """Append-only audit trail. Rows carry SHA-256 hashes of the prior and new
-state, never the state itself, so the log holds no personal data."""
+state, never the state itself; the actor is a username, so rows are
+pseudonymous, not anonymous (see family_logistics.db.audit)."""

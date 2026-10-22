@@ -39,10 +39,25 @@ def upgrade() -> None:
                 )
             )
         )
+    # INSERT OR REPLACE (and REPLACE INTO) deletes the conflicting row without
+    # firing DELETE triggers (recursive_triggers is off by default), so an
+    # insert that reuses an existing id is refused before it can replace.
+    op.execute(
+        " ".join(
+            (
+                "CREATE TRIGGER audit_log_no_replace",
+                "BEFORE INSERT ON audit_log",
+                "WHEN NEW.id IS NOT NULL",
+                "AND EXISTS (SELECT 1 FROM audit_log WHERE id = NEW.id)",
+                "BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END",
+            )
+        )
+    )
 
 
 def downgrade() -> None:
     """Drop the audit log (destroys audit history; operator action only)."""
+    op.execute("DROP TRIGGER IF EXISTS audit_log_no_replace")
     op.execute("DROP TRIGGER IF EXISTS audit_log_no_delete")
     op.execute("DROP TRIGGER IF EXISTS audit_log_no_update")
     op.drop_table("audit_log")
