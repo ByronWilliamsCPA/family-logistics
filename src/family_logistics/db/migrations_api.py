@@ -97,13 +97,13 @@ def head_revision() -> str:
         The head revision identifier.
 
     Raises:
-        RuntimeError: If the packaged migrations have no head. Several heads
+        MigrationError: If the packaged migrations have no head. Several heads
             raise alembic's ``CommandError`` instead.
     """
     head = _script().get_current_head()
     if head is None:
         msg = "packaged migrations have no single head revision"
-        raise RuntimeError(msg)
+        raise MigrationError(msg, operation="migrate")
     return head
 
 

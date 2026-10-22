@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, cast
 
 from alembic import context
 
+from family_logistics.db.migrations_api import MigrationError
 from family_logistics.db.schema import metadata
 
 if TYPE_CHECKING:
@@ -29,7 +30,7 @@ if supplied is None:
         "run migrations through family_logistics.db.migrations_api "
         "(`family-logistics migrate`), not the alembic command line"
     )
-    raise RuntimeError(msg)
+    raise MigrationError(msg, operation="migrate")
 connection = cast("Connection", supplied)
 context.configure(
     connection=connection,

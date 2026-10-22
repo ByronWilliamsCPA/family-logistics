@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import insert, select
 
+from family_logistics.core.exceptions import DatabaseError, ValidationError
 from family_logistics.db.schema import audit_log
 
 if TYPE_CHECKING:
@@ -74,25 +75,32 @@ def state_hash(state: object | None) -> str | None:
 
     Keys are sorted, separators are compact, non-ASCII is escaped, and dates,
     times and datetimes are encoded as ISO 8601. Anything else is refused, so
-    the same state always has the same hash: ``json`` raises TypeError for a
-    value with no canonical encoding or for dictionary keys of mixed types, and
-    ValueError for NaN or infinity.
+    the same state always has the same hash.
 
     Args:
         state: State to hash, or None when there is no state (create/delete).
 
     Returns:
         Hex SHA-256 of the canonical JSON, or None for no state.
+
+    Raises:
+        ValidationError: For a value with no canonical encoding, dictionary
+            keys of mixed types, or NaN or infinity. The message names types,
+            never values.
     """
     if state is None:
         return None
-    canonical = json.dumps(
-        state,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-        default=_canonical,
-    )
+    try:
+        canonical = json.dumps(
+            state,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+            default=_canonical,
+        )
+    except (TypeError, ValueError) as exc:
+        msg = f"state cannot be hashed canonically: {exc}"
+        raise ValidationError(msg, field="state") from exc
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -122,18 +130,18 @@ class AuditEntry:
         """Reject a naive timestamp or a hash that is not 64 lowercase hex.
 
         Raises:
-            ValueError: If an invariant does not hold.
+            ValidationError: If an invariant does not hold.
         """
         if self.recorded_at.utcoffset() is None:
             msg = "audit recorded_at must be timezone-aware"
-            raise ValueError(msg)
+            raise ValidationError(msg, field="recorded_at")
         for name, value in (
             ("prior_hash", self.prior_hash),
             ("new_hash", self.new_hash),
         ):
             if value is not None and not _HASH.fullmatch(value):
                 msg = f"audit {name} must be 64 lowercase hex characters"
-                raise ValueError(msg)
+                raise ValidationError(msg, field=name)
 
 
 def _check_fields(
@@ -148,7 +156,7 @@ def _check_fields(
         correlation_id: Request or run correlation ID, if any.
 
     Raises:
-        ValueError: If a field is empty or longer than its column.
+        ValidationError: If a field is empty or longer than its column.
     """
     fields = (
         ("actor", actor, MAX_ACTOR_LENGTH),
@@ -161,7 +169,7 @@ def _check_fields(
             continue
         if not value or len(value) > limit:
             msg = f"audit {name} must be 1-{limit} characters"
-            raise ValueError(msg)
+            raise ValidationError(msg, field=name)
 
 
 class AuditRepository:
@@ -200,8 +208,8 @@ class AuditRepository:
         Note:
             The row commits in its own transaction, separately from the change
             it describes. A reference field that is empty or longer than its
-            column raises ValueError; a state ``state_hash`` cannot encode
-            raises TypeError or ValueError. Nothing is written in either case.
+            column, or a state ``state_hash`` cannot encode, raises
+            ValidationError. Nothing is written in either case.
         """
         _check_fields(actor, object_ref, action, correlation_id)
         entry = AuditEntry(
@@ -266,7 +274,7 @@ def _entry_from_row(row: dict[str, object]) -> AuditEntry:
     recorded_at = row["recorded_at"]
     if not isinstance(recorded_at, datetime):
         msg = "audit_log.recorded_at is not a timestamp"
-        raise TypeError(msg)
+        raise DatabaseError(msg, operation="read", table="audit_log")
     # SQLite keeps no offset; rows are written in UTC (see ``record``).
     if recorded_at.tzinfo is None:
         recorded_at = recorded_at.replace(tzinfo=UTC)

@@ -199,7 +199,14 @@ class TestHeadSchema:
         declared = {column.name: column.nullable for column in schema.audit_log.columns}
         assert migrated == declared
 
+    def test_missing_head_is_a_migration_error(self, monkeypatch):
+        monkeypatch.setattr(
+            migrations_api.ScriptDirectory, "get_current_head", lambda _self: None
+        )
+        with pytest.raises(migrations_api.MigrationError, match="no single head"):
+            migrations_api.head_revision()
+
     def test_alembic_without_a_connection_fails_clearly(self):
         config = migrations_api._config()
-        with pytest.raises(RuntimeError, match="migrations_api"):
+        with pytest.raises(migrations_api.MigrationError, match="migrations_api"):
             command.upgrade(config, "head")

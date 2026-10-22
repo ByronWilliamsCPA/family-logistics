@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DatabaseError, IntegrityError
 
+from family_logistics.core import exceptions
 from family_logistics.core.database import create_sqlite_engine
 from family_logistics.db import audit, migrations_api
 from family_logistics.db.audit import AuditEntry, AuditRepository, state_hash
@@ -124,11 +125,13 @@ class TestRecord:
         assert getattr(repository.record(**values), field) == "x" * limit
         for bad in ("", "x" * (limit + 1)):
             values[field] = bad
-            with pytest.raises(ValueError, match=f"{field} must be 1-{limit}"):
+            with pytest.raises(
+                exceptions.ValidationError, match=f"{field} must be 1-{limit}"
+            ):
                 repository.record(**values)
 
     def test_unreadable_timestamp_is_rejected(self):
-        with pytest.raises(TypeError, match="recorded_at"):
+        with pytest.raises(exceptions.DatabaseError, match="recorded_at"):
             audit._entry_from_row(
                 {
                     "recorded_at": "yesterday",
@@ -145,7 +148,7 @@ class TestRecord:
 @pytest.mark.unit
 class TestAuditEntryInvariants:
     def test_rejects_non_hash_values(self):
-        with pytest.raises(ValueError, match="prior_hash"):
+        with pytest.raises(exceptions.ValidationError, match="prior_hash"):
             AuditEntry(
                 recorded_at=datetime.now(UTC),
                 actor="a",
@@ -157,7 +160,7 @@ class TestAuditEntryInvariants:
             )
 
     def test_rejects_naive_timestamp(self):
-        with pytest.raises(ValueError, match="timezone"):
+        with pytest.raises(exceptions.ValidationError, match="timezone"):
             AuditEntry(
                 recorded_at=datetime.now(UTC).replace(tzinfo=None),
                 actor="a",
@@ -209,12 +212,12 @@ class TestStateHash:
         ids=["set", "object", "sensitive", "nan"],
     )
     def test_non_canonical_values_are_refused(self, value):
-        with pytest.raises((TypeError, ValueError)):
+        with pytest.raises(exceptions.ValidationError, match="canonically"):
             state_hash({"v": value})
 
     def test_protected_values_never_hash_as_their_mask(self):
         # A masked value would make two different addresses hash alike.
-        with pytest.raises(TypeError, match="SensitiveStr"):
+        with pytest.raises(exceptions.ValidationError, match="SensitiveStr"):
             state_hash({"address": SensitiveStr("12 Elm St")})
 
 
