@@ -16,7 +16,12 @@
 #           PRs never receive secrets, so for them the job fails with a notice:
 #           a maintainer must re-run the check from a same-repository branch
 #           before merging. The checker prints locations and term numbers,
-#           never the terms.
+#           never the terms (a file path that contains a term is shown as
+#           "<file argument #N>"). Files or history it cannot decode, and
+#           binary changes, fail the job (fail closed).
+#
+# Concurrency: superseded PR runs are cancelled; runs for pushes to main are
+# never cancelled, so every main commit gets a complete scan.
 name: Private Data Guard
 
 "on":
@@ -30,7 +35,7 @@ permissions:
 
 concurrency:
   group: private-data-guard-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   GITLEAKS_VERSION: "8.30.1"

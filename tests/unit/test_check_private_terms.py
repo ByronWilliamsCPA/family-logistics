@@ -96,6 +96,77 @@ def test_scans_file_paths(tmp_path: Path, base_env: dict[str, str]) -> None:
     assert "(path)" in result.stdout
 
 
+def test_path_label_never_prints_term(tmp_path: Path, base_env: dict[str, str]) -> None:
+    """A file whose path holds a term is reported by argument number, not name."""
+    clean = tmp_path / "clean.md"
+    clean.write_text("nothing\n", encoding="utf-8")
+    target = tmp_path / f"{TERM.lower()}_notes.md"
+    target.write_text(f"see {TERM}\n", encoding="utf-8")
+    env = {**base_env, "FL_PRIVATE_TERMS": TERM}
+    result = run([clean.name, target.name], cwd=tmp_path, env=env)
+    output = (result.stdout + result.stderr).lower()
+    assert result.returncode == 1
+    assert "<file argument #2> (path): private term #1" in result.stdout
+    assert "<file argument #2>:1: private term #1" in result.stdout
+    assert TERM.lower() not in output
+
+
+@pytest.mark.parametrize(
+    ("terms", "text"),
+    [
+        (TERM, f"alex_{TERM.lower()}_route"),
+        (TERM, f"{TERM}2 pickup"),
+        ("Zebulonicà", f"{TERM} pickup"),
+        (TERM, "ZEBULONICÁ pickup"),
+        ("Quillon Vasterby", "quillon_vasterby"),
+        ("Quillon Vasterby", "Quillon-Vasterby"),
+        ("Quillon Vasterby", "Quillon   Vasterby"),
+        (f"\ufeff  {TERM}\u200b  ", f"{TERM} pickup"),
+        ("Unit #5 Quillon", "unit #5 quillon"),
+    ],
+)
+def test_matcher_and_parser_have_no_false_negatives(
+    tmp_path: Path, base_env: dict[str, str], terms: str, text: str
+) -> None:
+    """snake_case, digits, accents, separators, BOM and invisible characters."""
+    target = tmp_path / "notes.md"
+    target.write_text(f"{text}\n", encoding="utf-8")
+    env = {**base_env, "FL_PRIVATE_TERMS": terms}
+    result = run([target.name], cwd=tmp_path, env=env)
+    assert result.returncode == 1
+
+
+def test_list_file_with_bom(tmp_path: Path, base_env: dict[str, str]) -> None:
+    """A list file saved with a UTF-8 BOM keeps its first term active."""
+    terms = tmp_path / "terms.txt"
+    terms.write_bytes(f"\ufeff{TERM}\n".encode())
+    target = tmp_path / "notes.md"
+    target.write_text(f"{TERM}\n", encoding="utf-8")
+    env = {**base_env, "FL_PRIVATE_TERMS_FILE": str(terms)}
+    assert run([target.name], cwd=tmp_path, env=env).returncode == 1
+
+
+def test_unreadable_list_file(tmp_path: Path, base_env: dict[str, str]) -> None:
+    """A list that is not UTF-8 is a configuration error, not a clean run."""
+    terms = tmp_path / "terms.txt"
+    terms.write_bytes(b"\xff\xfe\x00bad")
+    env = {**base_env, "FL_PRIVATE_TERMS_FILE": str(terms)}
+    assert run([], cwd=tmp_path, env=env).returncode == 2
+
+
+def test_undecodable_file_fails_closed(
+    tmp_path: Path, base_env: dict[str, str]
+) -> None:
+    """A file that is not UTF-8 is counted as unscannable and fails the run."""
+    target = tmp_path / "legacy.txt"
+    target.write_bytes(f"{TERM} caf\xe9".encode("latin-1"))
+    env = {**base_env, "FL_PRIVATE_TERMS": TERM}
+    result = run([target.name], cwd=tmp_path, env=env)
+    assert result.returncode == 4
+    assert "legacy.txt: unscannable" in result.stdout
+    assert TERM.lower() not in result.stdout.lower()
+
+
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(  # noqa: S603 - fixed git argv
         ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],  # noqa: S607
@@ -126,6 +197,43 @@ def test_git_range_catches_removed_term(
     assert history.returncode == 1
     assert history.stdout.count("commit ") >= 2
     assert TERM.lower() not in history.stdout.lower()
+
+
+def _repo_with_base(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "a.md").write_text("clean\n", encoding="utf-8")
+    _git(repo, "add", "a.md")
+    _git(repo, "commit", "-q", "-m", "base")
+    return repo
+
+
+def test_git_range_binary_change_fails_closed(
+    tmp_path: Path, base_env: dict[str, str]
+) -> None:
+    """A binary blob in the range cannot be scanned, so the run fails."""
+    repo = _repo_with_base(tmp_path)
+    (repo / "blob.bin").write_bytes(b"\x00\x01" + TERM.encode() + b"\x00")
+    _git(repo, "add", "blob.bin")
+    _git(repo, "commit", "-q", "-m", "binary")
+    env = {**base_env, "FL_PRIVATE_TERMS": TERM}
+    result = run(["--git-range", "HEAD~1..HEAD"], cwd=repo, env=env)
+    assert result.returncode == 4
+    assert "binary change(s) unscannable" in result.stdout
+
+
+def test_git_range_non_utf8_diff_fails_closed(
+    tmp_path: Path, base_env: dict[str, str]
+) -> None:
+    """Non-UTF-8 text in history is reported as unscannable."""
+    repo = _repo_with_base(tmp_path)
+    (repo / "a.md").write_bytes("caf\xe9 note\n".encode("latin-1"))
+    _git(repo, "commit", "-q", "-am", "latin-1")
+    env = {**base_env, "FL_PRIVATE_TERMS": TERM}
+    result = run(["--git-range", "HEAD~1..HEAD"], cwd=repo, env=env)
+    assert result.returncode == 4
+    assert "not valid UTF-8" in result.stdout
 
 
 def test_git_range_bad_revision(tmp_path: Path, base_env: dict[str, str]) -> None:
