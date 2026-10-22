@@ -62,7 +62,9 @@
       ],
       "automerge": true,
       "automergeType": "pr",
-      "automergeStrategy": "squash"
+      "automergeStrategy": "squash",
+      "minimumReleaseAge": "3 days",
+      "internalChecksFilter": "strict"
     },
     {
       "description": "Group GitHub Actions updates",
@@ -208,6 +210,8 @@
   "enabledManagers": [
     "pep621",
     "github-actions",
+    "dockerfile",
+    "docker-compose",
     "custom.regex"
   ]
 }

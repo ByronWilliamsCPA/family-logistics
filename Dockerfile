@@ -1,7 +1,7 @@
 # =============================================================================
 # family-logistics: transportation assurance API and scheduler
 # =============================================================================
-# Distroless runtime with digest-only DHI base-image pins, and a uv export with
+# Distroless runtime with tag-plus-digest DHI base-image pins, and a uv export with
 # hashes from uv.lock. Published by CI as
 # ghcr.io/byronwilliamscpa/family-logistics:sha-<7>.
 #
@@ -16,11 +16,12 @@
 # -----------------------------------------------------------------------------
 # Stage 1: builder. The -dev variant has a shell and package tooling.
 # Source: dhi.io/python 3.12 debian13 -dev, mirrored at
-# ghcr.io/byronwilliamscpa/dhi-python. Digest-only pin: the tag floats.
+# ghcr.io/byronwilliamscpa/dhi-python. The digest is authoritative; the tag
+# only lets Renovate's dockerfile manager propose digest refreshes.
 # Digests refreshed 2026-10-21 (3.12-debian13-dev / 3.12-debian13) for fixed
 # HIGH CVEs in sqlite, openssl and util-linux.
 # -----------------------------------------------------------------------------
-FROM ghcr.io/byronwilliamscpa/dhi-python@sha256:a023ddf6381a557057fc1a003ebd3bc95463cedee8955bd2744db1add26a7f0c AS builder
+FROM ghcr.io/byronwilliamscpa/dhi-python:3.12-debian13-dev@sha256:a023ddf6381a557057fc1a003ebd3bc95463cedee8955bd2744db1add26a7f0c AS builder
 
 WORKDIR /build
 COPY --from=ghcr.io/astral-sh/uv:0.8.17@sha256:e4644cb5bd56fdc2c5ea3ee0525d9d21eed1603bccd6a21f887a938be7e85be1 /uv /usr/local/bin/uv
@@ -38,9 +39,9 @@ RUN uv export --frozen --no-dev --no-emit-project --output-file /tmp/requirement
 # -----------------------------------------------------------------------------
 # Stage 2: runtime. Distroless, no shell, nonroot.
 # Source: dhi.io/python 3.12 debian13, mirrored at
-# ghcr.io/byronwilliamscpa/dhi-python. Digest-only pin.
+# ghcr.io/byronwilliamscpa/dhi-python. Tag plus authoritative digest.
 # -----------------------------------------------------------------------------
-FROM ghcr.io/byronwilliamscpa/dhi-python@sha256:5484dba6d3ba3feebcecd30804b3c795446d63643b6062bc7e8e2d54836f8aef
+FROM ghcr.io/byronwilliamscpa/dhi-python:3.12-debian13@sha256:5484dba6d3ba3feebcecd30804b3c795446d63643b6062bc7e8e2d54836f8aef
 
 LABEL org.opencontainers.image.title="family-logistics"
 LABEL org.opencontainers.image.description="Deterministic family transportation assurance"
