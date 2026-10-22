@@ -2,9 +2,11 @@
 
 > This file holds **project-specific** guidance. The universal development
 > standards (security-first rules, code quality, FIPS, OpenSSF, pre-commit
-> checklist) live in [.standards/CLAUDE.baseline.md](.standards/CLAUDE.baseline.md)
-> and the global `~/.claude/CLAUDE.md`, and apply automatically. Do not copy
-> them here; merge baseline updates with `/merge-standards` after `cruft update`.
+> checklist) live in [.standards/CLAUDE.baseline.md](.standards/CLAUDE.baseline.md),
+> imported below, and in the global `~/.claude/CLAUDE.md`. Do not copy them
+> here; merge baseline updates with `/merge-standards` after `cruft update`.
+
+@.standards/CLAUDE.baseline.md
 
 ## Public Repository: No Household Data (CRITICAL)
 

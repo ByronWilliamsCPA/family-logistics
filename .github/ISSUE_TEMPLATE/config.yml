@@ -1,8 +1,10 @@
+---
 blank_issues_enabled: false
+# Only links that resolve today. The documentation site is not published yet
+# (GitHub Pages is off) and Discussions are disabled, so the docs link points
+# at the Markdown sources. Switch it to the Pages URL in mkdocs.yml (site_url)
+# once the docs workflow deploys.
 contact_links:
   - name: Documentation
-    url: https://family-logistics.readthedocs.io
-    about: Check our documentation for usage guides and API reference
-  - name: Discussions
-    url: https://github.com/ByronWilliamsCPA/family-logistics/discussions
-    about: Ask questions and share ideas in GitHub Discussions
+    url: https://github.com/ByronWilliamsCPA/family-logistics/tree/main/docs
+    about: Usage guides, configuration reference and runbook (Markdown sources)

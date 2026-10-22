@@ -30,7 +30,7 @@ below records the expected posture and the open work.
 | Maintained | Pending | Scorecard scores repositories younger than 90 days as 0 |
 | Packaging | Pending | The release workflow publishes a container image to GHCR |
 | Pinned-Dependencies | Met | Actions and reusable workflows pinned to commit SHAs; base images pinned by digest; `uv.lock` committed |
-| SAST | Met | Bandit and Semgrep in the security workflow |
+| SAST | Met | SonarCloud analysis (`sonarcloud.yml`) and Bandit (`security-analysis.yml` and CI). Semgrep and CodeQL do not run |
 | Security-Policy | Met | [SECURITY.md](https://github.com/ByronWilliamsCPA/family-logistics/blob/main/SECURITY.md) with private reporting, a 14-day response commitment and a security-surface summary |
 | Signed-Releases | Pending | Container images are attested with build provenance at release |
 | Token-Permissions | Met | Read-only defaults; write scopes granted per job |
@@ -52,7 +52,7 @@ passing criteria:
   strict mode, pre-commit hooks.
 - **Security**: dependency, secret (gitleaks) and static analysis scanning;
   read-only calendar access by design; secrets supplied only at runtime.
-- **Analysis**: Bandit, Semgrep, pip-audit and OSV-Scanner in CI.
+- **Analysis**: Bandit, SonarCloud, pip-audit and OSV-Scanner in CI.
 
 ## Repository settings to verify
 
@@ -61,7 +61,9 @@ These need a repository administrator:
 - Secret scanning and push protection enabled.
 - Private vulnerability reporting enabled (required for the advisory link in
   SECURITY.md to work).
-- Dependabot alerts enabled (version updates come from Renovate).
+- Dependency graph and Dependabot alerts enabled (version updates come from
+  Renovate; Dependency Review and Renovate's vulnerability alerts need both).
+- The Renovate GitHub App installed on the repository.
 - Workflow runs from forks require approval for outside contributors.
 - The `FL_PRIVATE_TERMS` secret is set so the private-terms check runs.
 

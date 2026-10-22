@@ -39,8 +39,9 @@ jobs:
       python-version: '3.12'
       fail-on-high: true
       fail-on-medium: false
-      run-codeql: true
-      run-dependency-review: true
+      # run-codeql and run-dependency-review are deprecated no-ops in the
+      # pinned reusable workflow (CodeQL needs billed Advanced Security);
+      # dependency review runs in dependency-review.yml.
       run-bandit: true
       run-osv: true
 
