@@ -63,7 +63,9 @@ These need a repository administrator:
 - Secret scanning and push protection enabled.
 - Private vulnerability reporting enabled (required for the advisory link in
   SECURITY.md to work).
-- Dependabot alerts enabled (version updates come from Renovate).
+- Dependabot alerts: currently **disabled** (the `vulnerability-alerts` API returned 404 on 2026-10-22). Enable them
+  under Settings, Advanced Security, Dependabot alerts. Version updates come from Renovate; the alerts only add
+  advisory notifications on top of OSV-Scanner.
 - Workflow runs from forks require approval for outside contributors.
 - The `FL_PRIVATE_TERMS` secret is set so the private-terms check runs.
 
