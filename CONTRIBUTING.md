@@ -38,12 +38,9 @@ uv sync --all-extras
 # Setup pre-commit hooks (REQUIRED)
 uv run pre-commit install
 
-# Install Qlty CLI for unified code quality checks (REQUIRED)
-curl https://qlty.sh | bash
-
 # Verify installation
 uv run pytest -v
-qlty check
+uv run pre-commit run --all-files
 ```
 
 ### Project Structure
@@ -66,7 +63,7 @@ hook check every commit; keep your deny-list at
 
 ```bash
 # Create and checkout a new branch
-git checkout -b feature/your-feature-name
+git checkout -b feat/your-feature-name
 
 # For bug fixes
 git checkout -b fix/issue-description
@@ -77,11 +74,14 @@ git checkout -b docs/documentation-update
 
 ### Branch Naming Convention
 
-- `feature/` - New features or enhancements
+- `feat/` - New features or enhancements
 - `fix/` - Bug fixes
 - `docs/` - Documentation updates
 - `refactor/` - Code refactoring
+- `perf/` - Performance improvements
 - `test/` - Test additions or improvements
+- `build/` - Build system and dependency changes
+- `ci/` - CI/CD changes
 - `chore/` - Maintenance tasks
 
 ### 2. Make Your Changes
@@ -97,22 +97,19 @@ git checkout -b docs/documentation-update
 Before committing, ensure all quality checks pass:
 
 ```bash
-# Run all quality checks with Qlty (recommended)
-qlty check
-
-# Or run checks on only changed files (fastest)
-qlty check --filter=diff
+# Run all pre-commit hooks (required: Ruff, BasedPyright, Bandit, gitleaks, markdownlint, ...)
+uv run pre-commit run --all-files
 
 # Auto-format code
-qlty fmt
-# Or run all pre-commit hooks manually
-uv run pre-commit run --all-files
+uv run ruff format .
 
 # Run tests with coverage
 uv run pytest --cov=family_logistics --cov-report=term-missing
 ```
 
-**Note**: Qlty consolidates all quality tools (Ruff, BasedPyright, Bandit, Markdownlint, etc.) into a single fast CLI. See [`.qlty/qlty.toml`](.qlty/qlty.toml) for configuration.
+**Note**: pre-commit is the required gate. Qlty is optional: it is configured with only the Ruff and Bandit
+plugins (see [`.qlty/qlty.toml`](.qlty/qlty.toml)), and CI uses it for coverage upload. BasedPyright and
+markdownlint run through pre-commit, not Qlty.
 
 ## Code Quality Standards
 
@@ -318,7 +315,9 @@ We follow [Conventional Commits](https://www.conventionalcommits.org/) specifica
 - `test`: Adding or updating tests
 - `chore`: Maintenance tasks
 - `perf`: Performance improvements
+- `build`: Build system and dependency changes
 - `ci`: CI/CD changes
+- `revert`: Revert a previous commit
 
 ### Examples
 
@@ -362,7 +361,7 @@ See migration guide in docs/migration/v1.0.0.md
 1. **Push your branch**:
 
    ```bash
-   git push origin feature/your-feature-name
+   git push origin feat/your-feature-name
    ```
 
 2. **Create Pull Request** on GitHub with:
@@ -422,7 +421,7 @@ Use the feature request template and include:
 
 - **General Questions**: Open a [GitHub Discussion](https://github.com/ByronWilliamsCPA/family-logistics/discussions)
 - **Bug Reports**: Open a [GitHub Issue](https://github.com/ByronWilliamsCPA/family-logistics/issues)
-- **Security Issues**: See [ByronWilliamsCPA Security Policy](https://github.com/ByronWilliamsCPA/.github/blob/main/SECURITY.md)
+- **Security Issues**: Follow [SECURITY.md](SECURITY.md) and report privately; never open a public issue
 - **Email**: <byron@byronwilliams.dev>
 
 ## Recognition
