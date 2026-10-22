@@ -151,8 +151,11 @@ def _atomic_connection(engine: Engine) -> Generator[Connection]:
         engine: The application engine.
 
     Yields:
-        A connection inside ``BEGIN IMMEDIATE``; committed on success and
-        rolled back on any exception.
+        Connection: A connection inside ``BEGIN IMMEDIATE``; committed on
+        success and rolled back on any exception.
+
+    Raises:
+        BaseException: Whatever the body raised, re-raised after rollback.
     """
     with engine.connect() as connection:
         if engine.dialect.name != "sqlite":  # pragma: no cover - SQLite only

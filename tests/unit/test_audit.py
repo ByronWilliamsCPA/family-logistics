@@ -115,5 +115,5 @@ class TestAudit:
     def test_hash_is_pinned(self):
         # SHA-256 of the canonical JSON '{"a":1,"b":"Alex"}', computed
         # independently of state_hash so a change of canonical form fails here.
-        expected = "cedaa73517674e9aeb8830412088ce0b22552789c3bb369a74bf119c109274ce"
+        expected = "cedaa73517674e9aeb8830412088ce0b22552789c3bb369a74bf119c109274ce"  # pragma: allowlist secret
         assert state_hash({"b": "Alex", "a": 1}) == expected

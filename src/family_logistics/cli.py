@@ -104,6 +104,9 @@ def startup_problems(settings: Settings, *, upgrade_db: bool) -> list[str]:
 def _existing_database_verdict(path: Path) -> list[str] | None:
     """Inspect an existing database read-only.
 
+    Args:
+        path: Database file path.
+
     Returns:
         ``[]`` when it is at head, the blocking problems when it cannot be
         used, or None when it is missing or behind head (an upgrade decides).
