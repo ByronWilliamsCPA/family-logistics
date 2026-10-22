@@ -25,4 +25,8 @@ transportation does not wait on later phases such as meal planning.
 Done so far (M0): domain models, the Template v1 notes parser,
 occurrence-bound confirmation codes, passenger-level change impact, run
 status, capacity, constrained stop ordering, address encryption at rest and
-the read-only CalDAV transport.
+the read-only CalDAV transport. Also in the tree as groundwork for later
+milestones: the SQLite schema with Alembic migrations, an append-only audit log,
+the Apprise client and `ops_alert()` helper (not yet called by any scheduler;
+channel wiring and scheduling remain M3), structured logging, and startup
+checks (`verify-db`, `healthcheck`).

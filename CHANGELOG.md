@@ -32,14 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - uv dependency management with a committed lock file
 - pytest test framework with coverage reporting
 - GitHub issue tracking and templates
-- Automated dependency security scanning (Safety, Bandit)
+- Automated dependency security scanning (OSV-Scanner, Bandit)
 - Code quality enforcement (Ruff, BasedPyright)
 - CI/CD pipeline with multiple quality gates
 
 ### Security
 - Bandit security linting
-- Safety dependency vulnerability scanning
+- OSV-Scanner dependency vulnerability scanning
 - Pre-commit hooks for security validation
 
-[Unreleased]: https://github.com/ByronWilliamsCPA/family_logistics/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/ByronWilliamsCPA/family_logistics/releases/tag/v0.1.0
+[Unreleased]: https://github.com/ByronWilliamsCPA/family-logistics/commits/main
+[0.1.0]: https://github.com/ByronWilliamsCPA/family-logistics/releases
