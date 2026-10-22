@@ -221,5 +221,8 @@
     "managerFilePatterns": [
       "/^\\.github/requirements/.+\\.txt$/"
     ]
+  },
+  "pre-commit": {
+    "enabled": true
   }
 }
