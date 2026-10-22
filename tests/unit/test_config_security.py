@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import re
 from pathlib import Path
 
@@ -80,16 +81,31 @@ def test_every_field_is_consumed_or_scheduled():
 
 @pytest.mark.unit
 def test_consumed_fields_are_read_in_src():
-    """A field marked consumed must be read (``.<field>``) outside config.py."""
+    """A field marked consumed must be read (``.<field>``) outside config.py.
+
+    A read through a ``Settings`` property counts when that property is
+    itself read outside config.py (``calendar_list`` reads
+    ``caldav_calendars``).
+    """
     src = Path(__file__).resolve().parents[2] / "src" / "family_logistics"
     code = "\n".join(
         path.read_text(encoding="utf-8")
         for path in src.rglob("*.py")
         if path.name != "config.py"
     )
+    via_property = {
+        field
+        for prop_name, prop in vars(Settings).items()
+        if isinstance(prop, property)
+        and prop.fget is not None
+        and re.search(rf"\.{prop_name}\b", code)
+        for field in re.findall(r"self\.(\w+)", inspect.getsource(prop.fget))
+    }
     unread = [
         name
         for name, status in FIELD_STATUS.items()
-        if status == "consumed" and not re.search(rf"\.{name}\b", code)
+        if status == "consumed"
+        and name not in via_property
+        and not re.search(rf"\.{name}\b", code)
     ]
     assert unread == []
