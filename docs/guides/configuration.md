@@ -11,7 +11,12 @@ tags:
 
 Family Logistics reads its configuration from environment variables with the
 `FL_` prefix (Pydantic Settings, `family_logistics.core.config.Settings`). A
-`.env` file in the working directory is also read; start from
+`.env` file in the working directory is also read, after the process
+environment, which always wins; it is meant for local development, and
+production values come from the deployment's secret store. A blank value
+(`FL_X=`) counts as unset, so a template line or a compose default leaves the
+setting at its default (or, for a required secret, fails closed with a clear
+message). Start from
 [`.env.example`](https://github.com/ByronWilliamsCPA/family-logistics/blob/main/.env.example).
 Secrets are supplied only at runtime and are never printed: `family-logistics config`
 shows non-secret values only.
@@ -50,7 +55,8 @@ shows non-secret values only.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `FL_APPRISE_URL` | unset | Apprise API base URL |
+| `FL_APPRISE_URL` | unset | Apprise API base URL (`http` or `https`, no embedded credentials) |
+| `FL_APPRISE_CONFIG_KEY` | `family-logistics` | Key of the saved Apprise configuration holding the app's services; 1 to 64 letters, digits, `_` or `-` |
 | `FL_APPRISE_TAG_REPORT` | `fl-report` | Weekly and daily report e-mail |
 | `FL_APPRISE_TAG_STATUS` | `fl-status` | Completed-assessment push |
 | `FL_APPRISE_TAG_WARNING` | `fl-warning` | New validation error push |
@@ -61,6 +67,11 @@ shows non-secret values only.
 | `FL_QUIET_HOURS_START` | `22:00` | Start of quiet hours (local time) |
 | `FL_QUIET_HOURS_END` | `06:00` | End of quiet hours (local time) |
 | `FL_IMMINENT_WINDOW_MINUTES` | `180` | Rides starting within this window may bypass quiet hours |
+
+The client sends through one saved Apprise configuration: `POST
+/notify/{FL_APPRISE_CONFIG_KEY}` with a JSON body of `title`, `body` and the
+`fl-*` tag. The key selects the configuration; the tag selects the services
+inside it. The key is not a tag.
 
 Recipients for each tag are configured in Apprise, never in this application.
 The Apprise client refuses any tag other than these six before making a
