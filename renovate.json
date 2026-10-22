@@ -124,7 +124,7 @@
       ]
     },
     {
-      "description": "Container base image digests: never automerge. The Dockerfile pins are digest-only (no tag), so review each proposed digest and confirm it is still the intended DHI python variant before merging",
+      "description": "Container base image digests: never automerge. The Dockerfile pins are tag plus digest, so review each proposed tag or digest and confirm it is still the intended DHI python variant before merging",
       "matchManagers": [
         "dockerfile",
         "docker-compose"
