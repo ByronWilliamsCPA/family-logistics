@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
+from http.client import BadStatusLine
+from ipaddress import IPv4Address
 
 import pytest
 from click.testing import CliRunner
@@ -21,6 +24,33 @@ from family_logistics.core.database import (
 from family_logistics.db import migrations_api
 
 GOOD_TOKEN = "x" * 32
+APPRISE_URL = "http://apprise.test:8000"
+FUTURE_REVISION = "9999_future"
+
+
+def _set_revision(path, revision: str) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        with connection:
+            connection.execute(
+                "UPDATE alembic_version SET version_num = ?", (revision,)
+            )
+    finally:
+        connection.close()
+
+
+def _database_at(path, revision: str | None = None):
+    engine = create_sqlite_engine(path)
+    migrations_api.upgrade(engine)
+    engine.dispose()
+    if revision is not None:
+        _set_revision(path, revision)
+    return path
+
+
+def _must_not_serve(*_args, **_kwargs):
+    msg = "serve must refuse before starting uvicorn"
+    raise AssertionError(msg)
 
 
 @pytest.fixture
@@ -31,9 +61,11 @@ def fresh_settings():
 
 
 def settings_for(tmp_path, **overrides) -> Settings:
-    return Settings(  # type: ignore[arg-type]
-        ha_token=GOOD_TOKEN, database_path=tmp_path / "fl.db", **overrides
-    )
+    values: dict[str, object] = {
+        "ha_token": GOOD_TOKEN,
+        "database_path": tmp_path / "fl.db",
+    }
+    return Settings.model_validate(values | overrides)
 
 
 @pytest.mark.unit
@@ -42,6 +74,74 @@ class TestStartupProblems:
         assert startup_problems(settings_for(tmp_path), upgrade_db=False) == [
             SCHEMA_BEHIND_MESSAGE
         ]
+        assert not (tmp_path / "fl.db").exists()
+
+    def test_refusal_never_touches_the_database(self, tmp_path):
+        settings = Settings.model_validate({"database_path": tmp_path / "fl.db"})
+        assert startup_problems(settings, upgrade_db=True) == [
+            "FL_HA_TOKEN is required to serve"
+        ]
+        assert list(tmp_path.iterdir()) == []
+
+    def test_refusal_does_not_upgrade_existing_database(self, tmp_path):
+        database = tmp_path / "fl.db"
+        sqlite3.connect(database).close()
+        settings = Settings.model_validate({"database_path": database})
+        startup_problems(settings, upgrade_db=True)
+        engine = create_readonly_engine(database)
+        assert migrations_api.current_revision(engine) is None
+        engine.dispose()
+
+    def test_inspection_never_opens_a_writable_engine(self, tmp_path, monkeypatch):
+        at_head = _database_at(tmp_path / "head.db")
+        ahead = _database_at(tmp_path / "ahead.db", FUTURE_REVISION)
+        behind = tmp_path / "behind.db"
+        sqlite3.connect(behind).close()
+        monkeypatch.setattr(cli_module, "create_sqlite_engine", _must_not_serve)
+        for path, upgrade_db, expected in (
+            (at_head, False, []),
+            (at_head, True, []),
+            (behind, False, [SCHEMA_BEHIND_MESSAGE]),
+        ):
+            settings = settings_for(tmp_path, database_path=path)
+            assert startup_problems(settings, upgrade_db=upgrade_db) == expected
+        settings = settings_for(tmp_path, database_path=ahead)
+        [problem] = startup_problems(settings, upgrade_db=True)
+        assert "newer than this release" in problem
+
+    def test_problems_accumulate(self, tmp_path):
+        settings = Settings.model_validate(
+            {
+                "database_path": tmp_path / "nope" / "fl.db",
+                "notification_mode": "production",
+            }
+        )
+        problems = startup_problems(settings, upgrade_db=True)
+        assert problems[:3] == [
+            "FL_HA_TOKEN is required to serve",
+            "FL_DATA_KEY is required when FL_NOTIFICATION_MODE=production",
+            "FL_APPRISE_URL is required when FL_NOTIFICATION_MODE=production",
+        ]
+        assert "does not exist" in problems[3]
+
+    def test_schema_newer_than_head_is_refused(self, tmp_path):
+        _database_at(tmp_path / "fl.db", FUTURE_REVISION)
+        for upgrade_db in (False, True):
+            problems = startup_problems(settings_for(tmp_path), upgrade_db=upgrade_db)
+            assert len(problems) == 1
+            assert (
+                f"revision {FUTURE_REVISION} is newer than this release"
+                in (problems[0])
+            )
+
+    def test_failed_upgrade_is_a_problem_not_a_crash(self, tmp_path, monkeypatch):
+        def locked(_engine):
+            msg = "database is locked by another process; schema unchanged"
+            raise migrations_api.MigrationLockError(msg)
+
+        monkeypatch.setattr(migrations_api, "upgrade", locked)
+        problems = startup_problems(settings_for(tmp_path), upgrade_db=True)
+        assert problems == ["database is locked by another process; schema unchanged"]
 
     def test_upgrade_db_brings_schema_to_head(self, tmp_path):
         settings = settings_for(tmp_path)
@@ -49,9 +149,7 @@ class TestStartupProblems:
         assert startup_problems(settings, upgrade_db=False) == []
 
     def test_missing_directory(self, tmp_path):
-        settings = Settings(  # type: ignore[arg-type]
-            ha_token=GOOD_TOKEN, database_path=tmp_path / "nope" / "fl.db"
-        )
+        settings = settings_for(tmp_path, database_path=tmp_path / "nope" / "fl.db")
         problems = startup_problems(settings, upgrade_db=True)
         assert len(problems) == 1
         assert "does not exist" in problems[0]
@@ -69,7 +167,9 @@ class TestStartupProblems:
         assert problems == [f"database {tmp_path / 'fl.db'} cannot be opened"]
 
     def test_production_requires_data_key(self, tmp_path):
-        settings = settings_for(tmp_path, notification_mode="production")
+        settings = settings_for(
+            tmp_path, notification_mode="production", apprise_url=APPRISE_URL
+        )
         problems = startup_problems(settings, upgrade_db=True)
         assert problems == [
             "FL_DATA_KEY is required when FL_NOTIFICATION_MODE=production"
@@ -77,75 +177,26 @@ class TestStartupProblems:
         keyed = settings_for(
             tmp_path,
             notification_mode="production",
+            apprise_url=APPRISE_URL,
             data_key=Fernet.generate_key().decode(),
         )
         assert startup_problems(keyed, upgrade_db=True) == []
 
+    def test_production_requires_apprise(self, tmp_path):
+        settings = settings_for(
+            tmp_path,
+            notification_mode="production",
+            data_key=Fernet.generate_key().decode(),
+        )
+        assert startup_problems(settings, upgrade_db=True) == [
+            "FL_APPRISE_URL is required when FL_NOTIFICATION_MODE=production"
+        ]
+
     def test_missing_token(self, tmp_path):
-        settings = Settings(database_path=tmp_path / "fl.db")
+        settings = Settings.model_validate({"database_path": tmp_path / "fl.db"})
         assert "FL_HA_TOKEN is required to serve" in startup_problems(
             settings, upgrade_db=True
         )
-
-    def test_refusal_does_not_create_database(self, tmp_path):
-        settings = Settings(database_path=tmp_path / "fl.db")
-        startup_problems(settings, upgrade_db=True)
-        assert list(tmp_path.iterdir()) == []
-
-    def test_refusal_does_not_upgrade_existing_database(self, tmp_path):
-        database = tmp_path / "fl.db"
-        sqlite3.connect(database).close()
-        settings = Settings(database_path=database)
-        startup_problems(settings, upgrade_db=True)
-        engine = create_readonly_engine(database)
-        assert migrations_api.current_revision(engine) is None
-        engine.dispose()
-
-    def test_schema_behind_refusal_does_not_create_file(self, tmp_path):
-        problems = startup_problems(settings_for(tmp_path), upgrade_db=False)
-        assert problems == [SCHEMA_BEHIND_MESSAGE]
-        assert list(tmp_path.iterdir()) == []
-
-
-def _stamp_unknown_revision(database) -> None:
-    engine = create_sqlite_engine(database)
-    migrations_api.upgrade(engine)
-    with engine.begin() as connection:
-        connection.execute(text("UPDATE alembic_version SET version_num='9999_newer'"))
-    engine.dispose()
-
-
-@pytest.mark.unit
-class TestNewerSchema:
-    def test_startup_refuses_unknown_revision(self, tmp_path):
-        _stamp_unknown_revision(tmp_path / "fl.db")
-        problems = startup_problems(settings_for(tmp_path), upgrade_db=True)
-        assert len(problems) == 1
-        assert "'9999_newer' is not known to this version" in problems[0]
-
-    def test_schema_state_unknown(self, tmp_path):
-        _stamp_unknown_revision(tmp_path / "fl.db")
-        engine = create_sqlite_engine(tmp_path / "fl.db")
-        state = migrations_api.schema_state(engine)
-        engine.dispose()
-        assert state is migrations_api.SchemaState.UNKNOWN
-
-    def test_upgrade_refuses_unknown_revision(self, tmp_path):
-        _stamp_unknown_revision(tmp_path / "fl.db")
-        engine = create_sqlite_engine(tmp_path / "fl.db")
-        with pytest.raises(migrations_api.MigrationRefusedError, match="newer build"):
-            migrations_api.upgrade(engine)
-        engine.dispose()
-
-    def test_migrate_command_reports_cleanly(
-        self, monkeypatch, tmp_path, fresh_settings
-    ):
-        _stamp_unknown_revision(tmp_path / "fl.db")
-        monkeypatch.setenv("FL_DATABASE_PATH", str(tmp_path / "fl.db"))
-        result = CliRunner().invoke(cli, ["migrate"])
-        assert result.exit_code == 2
-        assert "Migration refused" in result.output
-        assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
 @pytest.mark.unit
@@ -176,9 +227,40 @@ class TestServe:
         monkeypatch.setenv("FL_HA_TOKEN", GOOD_TOKEN)
         monkeypatch.setenv("FL_DATABASE_PATH", str(tmp_path / "fl.db"))
         monkeypatch.setattr(cli_module, "setup_logging", lambda **_kwargs: None)
+        import uvicorn
+
+        monkeypatch.setattr(uvicorn, "run", _must_not_serve)
         result = CliRunner().invoke(cli, ["serve"])
         assert result.exit_code == 2
         assert "migrate" in result.output
+
+    @pytest.mark.parametrize("args", [["serve"], ["serve", "--upgrade-db"]])
+    def test_serve_refuses_newer_schema_cleanly(
+        self, args, monkeypatch, tmp_path, fresh_settings
+    ):
+        _database_at(tmp_path / "fl.db", FUTURE_REVISION)
+        monkeypatch.setenv("FL_HA_TOKEN", GOOD_TOKEN)
+        monkeypatch.setenv("FL_DATABASE_PATH", str(tmp_path / "fl.db"))
+        monkeypatch.setattr(cli_module, "setup_logging", lambda **_kwargs: None)
+        import uvicorn
+
+        monkeypatch.setattr(uvicorn, "run", _must_not_serve)
+        result = CliRunner().invoke(cli, args)
+        assert result.exit_code == 2
+        assert isinstance(result.exception, SystemExit)
+        assert "newer than this release" in result.output
+        assert "Traceback" not in result.output
+
+    def test_uvicorn_loggers_route_through_structlog(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(cli_module, "setup_logging", lambda **_kwargs: None)
+        loggers = [logging.getLogger(name) for name in cli_module.UVICORN_LOGGERS]
+        for logger in loggers:
+            monkeypatch.setattr(logger, "handlers", [logging.NullHandler()])
+            monkeypatch.setattr(logger, "propagate", False)
+        cli_module._configure_logging(settings_for(tmp_path))
+        assert [(logger.handlers, logger.propagate) for logger in loggers] == [
+            ([], True)
+        ] * len(loggers)
 
 
 @pytest.mark.unit
@@ -198,21 +280,54 @@ class TestMigrateAndVerify:
         result = CliRunner().invoke(cli, ["migrate"])
         assert result.exit_code == 0, result.output
         assert migrations_api.head_revision() in result.output
-        down = CliRunner().invoke(cli, ["migrate", "--downgrade", "--revision", "base"])
+        down = CliRunner().invoke(
+            cli, ["migrate", "--downgrade", "--revision", "base", "--yes"]
+        )
         assert down.exit_code == 0
         assert "Schema revision: base" in down.output
 
-    def test_migrate_lower_revision_needs_downgrade_flag(
+    def test_lower_revision_without_downgrade_is_refused(
         self, monkeypatch, tmp_path, fresh_settings
     ):
-        monkeypatch.setenv("FL_DATABASE_PATH", str(tmp_path / "fl.db"))
-        assert CliRunner().invoke(cli, ["migrate"]).exit_code == 0
+        database = _database_at(tmp_path / "fl.db")
+        monkeypatch.setenv("FL_DATABASE_PATH", str(database))
         result = CliRunner().invoke(cli, ["migrate", "--revision", "base"])
         assert result.exit_code == 2
-        assert "--downgrade" in result.output
-        engine = create_sqlite_engine(tmp_path / "fl.db")
+        assert "use an explicit downgrade" in result.output
+        assert "Traceback" not in result.output
+        engine = create_sqlite_engine(database)
         assert migrations_api.is_at_head(engine)
         engine.dispose()
+
+    def test_downgrade_needs_a_revision(self, monkeypatch, tmp_path, fresh_settings):
+        monkeypatch.setenv("FL_DATABASE_PATH", str(_database_at(tmp_path / "fl.db")))
+        result = CliRunner().invoke(cli, ["migrate", "--downgrade"])
+        assert result.exit_code == 2
+        assert "--revision" in result.output
+
+    def test_downgrade_asks_for_confirmation(
+        self, monkeypatch, tmp_path, fresh_settings
+    ):
+        database = _database_at(tmp_path / "fl.db")
+        monkeypatch.setenv("FL_DATABASE_PATH", str(database))
+        args = ["migrate", "--downgrade", "--revision", "base"]
+        declined = CliRunner().invoke(cli, args, input="n\n")
+        assert declined.exit_code == 1
+        assert "audit history" in declined.output
+        engine = create_sqlite_engine(database)
+        assert migrations_api.is_at_head(engine)
+        engine.dispose()
+        accepted = CliRunner().invoke(cli, args, input="y\n")
+        assert accepted.exit_code == 0, accepted.output
+        assert "Schema revision: base" in accepted.output
+
+    def test_migrate_refuses_newer_schema(self, monkeypatch, tmp_path, fresh_settings):
+        database = _database_at(tmp_path / "fl.db", FUTURE_REVISION)
+        monkeypatch.setenv("FL_DATABASE_PATH", str(database))
+        result = CliRunner().invoke(cli, ["migrate"])
+        assert result.exit_code == 2
+        assert "newer than this release" in result.output
+        assert "Traceback" not in result.output
 
     def test_migrate_bad_revision_is_clean_error(
         self, monkeypatch, tmp_path, fresh_settings
@@ -220,36 +335,32 @@ class TestMigrateAndVerify:
         monkeypatch.setenv("FL_DATABASE_PATH", str(tmp_path / "fl.db"))
         result = CliRunner().invoke(cli, ["migrate", "--revision", "nope"])
         assert result.exit_code == 2
-        assert "Migration refused" in result.output
+        assert "unknown revision 'nope'" in result.output
+        assert "Traceback" not in result.output
 
     def test_migrate_missing_directory(self, monkeypatch, tmp_path, fresh_settings):
         monkeypatch.setenv("FL_DATABASE_PATH", str(tmp_path / "nope" / "fl.db"))
         result = CliRunner().invoke(cli, ["migrate"])
         assert result.exit_code == 2
 
-    def test_verify_db_ok_and_read_only(self, tmp_path):
-        database = tmp_path / "fl.db"
-        engine = create_sqlite_engine(database)
-        migrations_api.upgrade(engine)
-        engine.dispose()
+    def test_verify_db_ok_and_read_only(self, tmp_path, monkeypatch):
+        database = _database_at(tmp_path / "fl.db")
+        opened = []
+        readonly = cli_module.create_readonly_engine
+
+        def spy(path):
+            opened.append(path)
+            return readonly(path)
+
+        monkeypatch.setattr(cli_module, "create_readonly_engine", spy)
+        monkeypatch.setattr(cli_module, "create_sqlite_engine", _must_not_serve)
         before = database.read_bytes()
         result = CliRunner().invoke(cli, ["verify-db", str(database)])
         assert result.exit_code == 0, result.output
         assert "Integrity: ok" in result.output
+        assert "Schema state: at head" in result.output
+        assert opened == [database]
         assert database.read_bytes() == before
-
-    def test_verify_db_never_opens_writable(self, monkeypatch, tmp_path):
-        database = tmp_path / "fl.db"
-        engine = create_sqlite_engine(database)
-        migrations_api.upgrade(engine)
-        engine.dispose()
-
-        def refuse(*_args, **_kwargs):
-            raise AssertionError("verify-db opened a writable engine")
-
-        monkeypatch.setattr(cli_module, "create_sqlite_engine", refuse)
-        result = CliRunner().invoke(cli, ["verify-db", str(database)])
-        assert result.exit_code == 0, result.output
 
     def test_readonly_engine_rejects_writes(self, tmp_path):
         database = tmp_path / "fl.db"
@@ -263,11 +374,20 @@ class TestMigrateAndVerify:
             connection.execute(statement)
         engine.dispose()
 
+    def test_verify_db_newer_schema(self, tmp_path):
+        database = _database_at(tmp_path / "fl.db", FUTURE_REVISION)
+        result = CliRunner().invoke(cli, ["verify-db", str(database)])
+        assert result.exit_code == 1
+        assert "Schema state: unknown revision, newer than this release" in (
+            result.output
+        )
+
     def test_verify_db_behind_head(self, tmp_path):
         database = tmp_path / "old.db"
         sqlite3.connect(database).close()
         result = CliRunner().invoke(cli, ["verify-db", str(database)])
         assert result.exit_code == 1
+        assert "Schema state: behind head" in result.output
         assert "Schema revision: none" in result.output
 
     def test_verify_db_corrupt(self, tmp_path):
@@ -276,3 +396,29 @@ class TestMigrateAndVerify:
         result = CliRunner().invoke(cli, ["verify-db", str(database)])
         assert result.exit_code == 1
         assert "Integrity: FAILED" in result.output
+
+
+@pytest.mark.unit
+class TestHealthcheck:
+    @pytest.mark.parametrize(
+        ("bind_host", "probed"),
+        [
+            (str(IPv4Address(0)), "127.0.0.1"),  # the IPv4 wildcard
+            ("::", "::1"),
+            ("127.0.0.1", "127.0.0.1"),
+            ("192.0.2.10", "192.0.2.10"),
+            ("localhost", "localhost"),
+        ],
+    )
+    def test_probe_host(self, bind_host, probed):
+        assert cli_module._probe_host(bind_host) == probed
+
+    def test_malformed_response_is_unhealthy(self, monkeypatch, fresh_settings):
+        def bad_status(_self):
+            raise BadStatusLine("garbage")
+
+        monkeypatch.setattr(cli_module.HTTPConnection, "request", lambda *_a: None)
+        monkeypatch.setattr(cli_module.HTTPConnection, "getresponse", bad_status)
+        result = CliRunner().invoke(cli, ["healthcheck"])
+        assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit)

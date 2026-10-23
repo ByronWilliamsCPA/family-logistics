@@ -4,7 +4,9 @@
 # Git stack pulling ghcr.io/byronwilliamscpa/family-logistics:sha-<7>). This
 # file builds from source with the same hardening so local runs behave like
 # production. No real credentials: copy .env.example to .env and fill in only
-# throwaway or test values.
+# throwaway or test values. Compose reads .env only to fill the ${...} values
+# under environment: below; any other FL_ setting in .env does not reach the
+# container unless it is added there.
 
 services:
   family-logistics:

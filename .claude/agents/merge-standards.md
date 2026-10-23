@@ -14,7 +14,7 @@ This agent helps merge updated baseline standards from `.standards/` into the pr
 
 | Baseline (auto-updated) | Target (project-customized) | Merge Type |
 |------------------------|----------------------------|------------|
-| `.standards/CLAUDE.baseline.md` | `CLAUDE.md` | Section-based |
+| `.standards/CLAUDE.baseline.md` | `CLAUDE.md` | Import-based (no merge; see below) |
 | `.standards/REUSE.baseline.toml` | `REUSE.toml` | Annotation-based |
 | `.standards/README.baseline.md` | `README.md` | Badge + section copy |
 | `.standards/template_feedback.baseline.md` | `docs/template_feedback.md` | Format only |
@@ -26,13 +26,14 @@ This agent helps merge updated baseline standards from `.standards/` into the pr
 
 ### For CLAUDE.md
 
-1. **Identify baseline sections** in root CLAUDE.md (marked with HTML comments)
-2. **Compare** with `.standards/CLAUDE.baseline.md`
-3. **Update baseline sections** while preserving:
-   - Project Overview section
-   - Project-specific requirements
-   - Custom integrations and configurations
-   - Any sections below "Project-Specific Configuration"
+`CLAUDE.md` is import-based: it loads the baseline through an `@.standards/CLAUDE.baseline.md` line, so a
+`cruft update` that refreshes the baseline needs no merge. **Do not** copy or section-merge baseline content into
+`CLAUDE.md`.
+
+1. **Verify** the `@.standards/CLAUDE.baseline.md` import line is still present in `CLAUDE.md`.
+2. **Only if the import is missing**, restore that one line; leave every other section untouched.
+3. **Preserve** the project-specific sections (public-repository rules, project overview and requirements, custom
+   integrations).
 
 ### For REUSE.toml
 

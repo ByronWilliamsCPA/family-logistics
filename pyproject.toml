@@ -76,8 +76,8 @@ dev = [
     # Pre-commit
     "pre-commit>=3.3.0",
     # Documentation
-    "mkdocs>=1.6,<2",  # MkDocs 2.0 is a breaking release
-    "mkdocs-material>=9.5,<10",
+    "mkdocs>=1.6,<2",  # 2.x is a pre-release rewrite that breaks plugins and themes; stay on 1.x
+    "mkdocs-material>=9.5,<10",  # capped below the next major until the docs build is verified on it
     "mkdocstrings[python]>=0.26.0",
     "griffe-pydantic>=1.1.0",
     "mkdocs-gen-files>=0.5.0",
@@ -282,6 +282,10 @@ known-first-party = ["family_logistics"]
     "S106",   # hardcoded_password_funcarg - test fixtures with fake passwords
     "S107",   # hardcoded_password_default - test default values
     "S108",   # hardcoded_tmp_directory - test temp paths are intentional
+    # Tests run fixed argv lists as subprocesses, never shell=True and never
+    # external input, so S603 and S607 do not apply to them.
+    "S603",   # subprocess_without_shell_equals_true - fixed argv, no shell
+    "S607",   # start_process_with_partial_path - tests resolve tools via PATH
     "S311",   # random - non-crypto random in tests is fine
     "S113",   # request_without_timeout - test HTTP calls may be mocked
 ]
@@ -325,15 +329,6 @@ known-first-party = ["family_logistics"]
 
 # Nox configuration
 "noxfile.py" = ["ANN", "D", "T20", "PLR", "INP", "PLC0415", "ERA001", "SIM105"]
-# Fuzz testing (Atheris harnesses have specific patterns)
-"fuzz/**/*.py" = [
-    "N802",   # TestOneInput required by Atheris
-    "S110",   # try-except-pass is intentional for fuzzing
-    "BLE",    # Blind except is necessary in fuzz targets
-    "INP",    # Fuzz tests are not packages
-    "ANN", "D", "TRY",
-]
-
 # Claude skills and scripts
 ".claude/**/*.py" = [
     "T20",    # Print allowed for CLI output
@@ -461,6 +456,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
+    "security: marks tests of security controls (CI gates, permission rules)",
     "benchmark: marks tests as benchmark tests",
     "py310: marks tests specific to Python 3.10",
     "py311plus: marks tests requiring Python 3.11+",
@@ -544,7 +540,6 @@ exclude_dirs = [
     "scripts",
     "benchmarks",
     "tools",
-    "fuzz",
     "docs",
     ".venv",
     "venv",

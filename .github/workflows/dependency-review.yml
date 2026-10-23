@@ -44,6 +44,8 @@ jobs:
           # Deny copyleft and restrictive licenses (deny-list approach)
           deny-licenses: >-
             AGPL-3.0, AGPL-3.0-only, AGPL-3.0-or-later,
-            GPL-2.0-only, GPL-2.0-or-later, GPL-3.0-only, GPL-3.0-or-later,
-            LGPL-2.0-only, LGPL-2.1-only, LGPL-3.0-only, LGPL-3.0-or-later
+            GPL-2.0, GPL-2.0-only, GPL-2.0-or-later,
+            GPL-3.0, GPL-3.0-only, GPL-3.0-or-later,
+            LGPL-2.0-only, LGPL-2.0-or-later, LGPL-2.1, LGPL-2.1-only, LGPL-2.1-or-later,
+            LGPL-3.0, LGPL-3.0-only, LGPL-3.0-or-later
           comment-summary-in-pr: on-failure

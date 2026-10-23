@@ -112,7 +112,6 @@ file_complexity.threshold = 750
 # Security tools are run via pre-commit hooks instead of qlty plugins:
 # - detect-secrets: Secrets detection
 # - bandit: Python security linter (via pyproject.toml [tool.bandit])
-# - safety: Dependency vulnerability scanning
 #
 # This approach is more reliable as qlty plugin availability varies.
 # See .pre-commit-config.yaml for the full security tool configuration.

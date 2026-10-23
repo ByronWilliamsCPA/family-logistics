@@ -15,13 +15,16 @@
 #           on pushes and same-repository PRs when the secret is missing. Fork
 #           PRs never receive secrets, so for them the job fails with a notice:
 #           a maintainer must re-run the check from a same-repository branch
-#           before merging. The checker prints locations and term numbers,
-#           never the terms (a file path that contains a term is shown as
-#           "<file argument #N>"). Files or history it cannot decode, and
-#           binary changes, fail the job (fail closed).
+#           before merging. The checker prints file, line and term number,
+#           never a term: a path that contains a term is printed with that
+#           segment masked, and the summary carries counts only. It also scans
+#           author and committer identities, and files that are not UTF-8
+#           text (UTF-16, Latin-1, binary), instead of skipping them.
 #
-# Concurrency: superseded PR runs are cancelled; runs for pushes to main are
-# never cancelled, so every main commit gets a complete scan.
+# Not enforced by this file: making both jobs required checks is a repository
+# ruleset setting (a repository admin action). Pushes to main are never cancelled by a
+# later push (each push has its own concurrency group), so every pushed range
+# is scanned.
 name: Private Data Guard
 
 "on":
@@ -34,10 +37,16 @@ permissions:
   contents: read
 
 concurrency:
-  group: private-data-guard-${{ github.event.pull_request.number || github.ref }}
+  # Pull requests: a newer push to the same PR supersedes the older run. Pushes
+  # and manual runs get a per-commit group, so one can never cancel another and
+  # leave its commit range unscanned.
+  group: private-data-guard-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  # Bump GITLEAKS_VERSION and GITLEAKS_SHA256 together, taking the checksum from
+  # the release's checksums file, and keep the gitleaks rev in
+  # .pre-commit-config.yaml on the same release. Renovate does not manage these.
   GITLEAKS_VERSION: "8.30.1"
   GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"  # pragma: allowlist secret (published release checksum)
 
@@ -124,5 +133,7 @@ jobs:
               ;;
             *) range="HEAD" ;;
           esac
-          git ls-files -z | xargs -0 python3 scripts/check_private_terms.py \
-            --require-list --git-range "$range"
+          # One invocation: the file list arrives on stdin, so a large tree never
+          # splits into several runs that would each repeat the history scan.
+          git ls-files -z | python3 scripts/check_private_terms.py \
+            --require-list --files-from - --git-range "$range"

@@ -11,17 +11,28 @@
 # from uv.lock: one source of truth, kept current by Renovate lock maintenance.
 # Run `uv sync --all-extras` before `uv run pre-commit install`.
 #
-# Every hook fails closed: there are no `command -v ... || echo` skip shims.
-# Remote `rev:` values are commit SHAs, updated by Renovate's pre-commit manager.
+# Hooks fail closed: there are no `command -v ... || echo` skip shims. The one
+# deliberate exception is private-terms, which warns and passes when no
+# deny-list is configured (a contributor without the list cannot run it); CI
+# runs it with --require-list, and owners set FL_PRIVATE_TERMS_REQUIRED=1.
+# Remote `rev:` values are commit SHAs, updated by Renovate (the custom regex
+# manager in renovate.json reads the tag from the trailing comment).
 
 default_install_hook_types: [pre-commit, commit-msg, pre-push]
 
 ci:
   autoupdate_schedule: monthly
   autofix_prs: true
-  # Local hooks need the uv environment or out-of-tree inputs. They run in the
-  # "Pre-commit Hooks" job of .github/workflows/ci.yml (pre-commit and
-  # pre-push stages); private-terms runs in private-data-guard.yml.
+  # Renovate is the only intended source of rev updates. If the pre-commit.ci
+  # app is installed, turn off its autoupdate PRs in the app settings: this file
+  # cannot disable them, and they rewrite rev: to a tag, undoing the SHA pins.
+  #
+  # The hooks below are skipped on pre-commit.ci because they need the uv
+  # environment or inputs outside the repository. They run on a contributor's
+  # machine and in the "Pre-commit Hooks" job of .github/workflows/ci.yml
+  # (pre-commit and pre-push stages, required through CI Gate). private-terms
+  # skips there without its list; Private Data Guard enforces it with the
+  # secret, alongside gitleaks.
   skip:
     - validate-front-matter
     - private-terms
@@ -91,17 +102,21 @@ repos:
       # in CI). With no list the hook warns and passes so contributors without
       # the list can commit; CI is the enforcement point. Owners set
       # FL_PRIVATE_TERMS_REQUIRED=1 to make the local hook fail closed.
+      # verbose: true shows that warning, because pre-commit hides the output of
+      # passing hooks. All file types are scanned (the checker also reads
+      # non-UTF-8 and binary files). Commit messages and history are scanned by
+      # the CI job, not here.
       - id: private-terms
         name: Private household terms
         entry: python3 scripts/check_private_terms.py
         language: system
-        types: [text]
+        verbose: true
         stages: [pre-commit]
 
       # detect-secrets: baseline-regression layer at pre-push, where the tree is
       # clean (pre-commit's auto-stash shifts line numbers in a whole-tree
       # baseline). After auditing new hits, regenerate with:
-      #   uv run detect-secrets scan > .secrets.baseline
+      #   uv run detect-secrets scan --baseline .secrets.baseline
       - id: detect-secrets
         name: detect-secrets (baseline regression)
         entry: uv run --no-sync detect-secrets-hook --baseline .secrets.baseline
@@ -121,7 +136,7 @@ repos:
         language: system
         types: [python]
         stages: [pre-commit]
-        exclude: ^(tests|scripts|benchmarks|tools|fuzz)/
+        exclude: ^(tests|scripts|tools)/
       - id: bandit-full
         name: Bandit Security Scan (full src/)
         entry: uv run --no-sync bandit -c pyproject.toml -r src/ -ll -q
@@ -201,7 +216,7 @@ repos:
         language: system
         types: [python]
         stages: [pre-commit]
-        exclude: ^(tests|scripts|benchmarks|tools)/
+        exclude: ^(tests|scripts|tools)/
 
   # ============================================================================
   # Markdown and house style

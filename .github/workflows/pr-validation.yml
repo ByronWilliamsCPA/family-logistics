@@ -4,9 +4,18 @@
 #     and the changelog from it, so no per-PR CHANGELOG edit is required)
 #   - Documentation link check (advisory)
 #
-# The org's python-pr-validation.yml was removed upstream; its checks now live
-# in python-ci.yml (tests, coverage, dead code) and python-supplemental-checks.yml.
-# Template sync is checked by validate-cruft.yml.
+# The org's python-pr-validation.yml still exists but is marked DEPRECATED
+# ("will be removed in a future release"), so this repo no longer builds on it.
+# Its checks moved as follows:
+#   tests, coverage threshold, dead code (advisory)  python-ci.yml
+#   Conventional Commits title                       commit-lint below
+#   documentation links                              link check below (advisory)
+#   CHANGELOG-updated gate                           dropped on purpose:
+#                                                    python-semantic-release writes it
+#   template sync                                    validate-cruft.yml
+# Dropped without a replacement: the minimum PR description length and the
+# breaking-change body check. Breaking changes are still surfaced because the
+# commit-lint title check accepts the `!` marker that semantic-release reads.
 name: PR Validation
 
 on:
@@ -36,12 +45,14 @@ jobs:
       enable-cruft-check: false
       enable-automerge: false
 
-  # Name is a required status check in the organization ruleset; keep it.
-  # Scope: this check now gates ONLY the supplemental checks above (PR title
-  # Conventional Commits lint; the link check is advisory). Tests, coverage,
-  # lint and types are gated by "CI Gate" (ci.yml), and household data by
-  # Private Data Guard. Those are separate status checks: the ruleset must
-  # require them by name for them to block a merge.
+  # Name is a required status check in the organization ruleset; keep it so
+  # branch protection keeps matching. What it gates today is exactly the
+  # supplemental job above: commit-lint (blocking) and the link check (not
+  # blocking, link-check-fail is false). Tests, coverage, lint and types are
+  # gated by "CI Gate" (ci.yml) and household data by Private Data Guard; those
+  # are separate status checks, so the ruleset must require them by name for
+  # them to block a merge. Renaming this job needs a matching ruleset change by
+  # a repo admin.
   validate-dependencies:
     name: Dependency & Standards Validation
     runs-on: ubuntu-latest

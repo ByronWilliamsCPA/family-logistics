@@ -31,7 +31,7 @@ uv run family-logistics config        # non-secret settings only
 | Command | Purpose |
 |---------|---------|
 | `serve [--upgrade-db]` | Run the API (single process, single SQLite writer); refuses an out-of-date schema unless `--upgrade-db` is given |
-| `migrate [--revision R] [--downgrade]` | Upgrade the schema to head (or `R`) in one transaction; a target below the current revision is refused unless `--downgrade` is given |
+| `migrate [--revision R] [--downgrade [--yes]]` | Upgrade the schema to head (or to `R`) in one transaction; a target below the current revision is refused unless `--downgrade` is given, and a downgrade needs an explicit `--revision R` and a confirmation prompt, which `--yes` skips |
 | `verify-db PATH` | Read-only integrity and schema-revision check of a database file |
 | `healthcheck` | Probe the local `/healthz`; exit 0 when healthy |
 | `config` | Print non-secret configuration values |
@@ -39,8 +39,10 @@ uv run family-logistics config        # non-secret settings only
 ## Run the API locally
 
 `serve` refuses to start without a Home Assistant token of at least 32
-characters, or when the database schema is behind head. Use a throwaway token
-and database for development:
+characters, when the database schema is behind head (unless `--upgrade-db` is
+given; that upgrade is atomic and serialized by a lock), or when the schema is
+newer than this release (a clean message and a non-zero exit, never a
+downgrade). Use a throwaway token and database for development:
 
 ```bash
 export FL_DATABASE_PATH=./data/dev.db

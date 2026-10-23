@@ -3,25 +3,26 @@
 Subcommands:
 
 - ``serve``: run the API after startup checks (refuses to start without
-  ``FL_HA_TOKEN``, with an unusable database, or on a database that is not
-  at the packaged schema head unless ``--upgrade-db`` is given).
+  ``FL_HA_TOKEN``, without ``FL_DATA_KEY`` and ``FL_APPRISE_URL`` in production
+  notification mode, with an unusable database, on a schema newer than this
+  release, or on a schema behind head unless ``--upgrade-db`` is given).
 - ``healthcheck``: one-shot probe of ``/healthz`` for the container healthcheck.
 - ``config``: print non-secret configuration.
-- ``migrate``: upgrade (or downgrade) the database schema.
+- ``migrate``: upgrade (or, with confirmation, downgrade) the database schema.
 - ``verify-db``: integrity and schema-revision check of a database file, for
   example a restored backup.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import sys
-from http.client import HTTPConnection
+from http.client import HTTPConnection, HTTPException
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
 import click
-from alembic.util import CommandError
 
 from family_logistics import __version__
 from family_logistics.core.config import get_settings
@@ -62,12 +63,61 @@ def _settings() -> Settings:
         _fail(str(exc))
 
 
+def _config_problems(settings: Settings) -> list[str]:
+    """Return configuration that blocks ``serve`` (names only, no values)."""
+    problems: list[str] = []
+    if settings.ha_token is None:
+        problems.append("FL_HA_TOKEN is required to serve")
+    if settings.notification_mode == "production":
+        if settings.data_key is None:
+            problems.append(
+                "FL_DATA_KEY is required when FL_NOTIFICATION_MODE=production"
+            )
+        if settings.apprise_url is None:
+            problems.append(
+                "FL_APPRISE_URL is required when FL_NOTIFICATION_MODE=production"
+            )
+    return problems
+
+
+def _existing_database_verdict(path: Path) -> list[str] | None:
+    """Inspect an existing database through a read-only connection.
+
+    Args:
+        path: Database file path.
+
+    Returns:
+        ``[]`` when it is at head, the blocking problems when it cannot be
+        used or records a schema newer than this release, or None when it is
+        missing or behind head (an upgrade decides).
+    """
+    if not path.exists():
+        return None
+    engine = create_readonly_engine(path)
+    try:
+        if not check_database(engine):
+            return [f"database {path} cannot be opened"]
+        state = migrations_api.schema_state(engine)
+        if state is migrations_api.SchemaState.AHEAD:
+            current = migrations_api.current_revision(engine)
+            return [migrations_api.ahead_message(current)]
+    finally:
+        engine.dispose()
+    if state is migrations_api.SchemaState.AT_HEAD:
+        return []
+    return None
+
+
 def startup_problems(settings: Settings, *, upgrade_db: bool) -> list[str]:
     """Check everything ``serve`` needs before it accepts requests.
 
-    The database is only written when every other check passed and an
-    upgrade was requested: a refusal never creates, upgrades or otherwise
-    changes the database file. Inspection uses a read-only connection.
+    Configuration and directory problems are reported without opening the
+    database. An existing database is then inspected through a read-only
+    connection, so a refused start never creates, upgrades or otherwise
+    changes the file. Only when every check passed and ``upgrade_db`` is set
+    is a missing or behind-head schema upgraded (atomically, under the
+    database's write lock). A schema newer than this release is refused, never
+    upgraded or downgraded.
 
     Args:
         settings: Application settings.
@@ -77,63 +127,37 @@ def startup_problems(settings: Settings, *, upgrade_db: bool) -> list[str]:
         Problems that block startup; empty when the service may start. Messages
         never contain secret values.
     """
-    problems: list[str] = []
-    if settings.ha_token is None:
-        problems.append("FL_HA_TOKEN is required to serve")
-    if settings.notification_mode == "production" and settings.data_key is None:
-        problems.append("FL_DATA_KEY is required when FL_NOTIFICATION_MODE=production")
-    problems += directory_problems(settings.database_path)
+    problems = _config_problems(settings) + directory_problems(settings.database_path)
     if problems:
         return problems
-    path = settings.database_path
-    verdict = _existing_database_verdict(path)
+    verdict = _existing_database_verdict(settings.database_path)
     if verdict is not None:
         return verdict
     if not upgrade_db:
         return [SCHEMA_BEHIND_MESSAGE]
-    engine = create_sqlite_engine(path)
+    engine = create_sqlite_engine(settings.database_path)
     try:
         migrations_api.upgrade(engine)
-    except migrations_api.MigrationRefusedError as exc:
+    except migrations_api.MigrationError as exc:
         return [str(exc)]
     finally:
         engine.dispose()
     return []
 
 
-def _existing_database_verdict(path: Path) -> list[str] | None:
-    """Inspect an existing database read-only.
+def _probe_host(bind_host: str) -> str:
+    """Return where the healthcheck should connect for a bind address.
 
-    Args:
-        path: Database file path.
-
-    Returns:
-        ``[]`` when it is at head, the blocking problems when it cannot be
-        used, or None when it is missing or behind head (an upgrade decides).
+    A wildcard bind address is not a destination, so its loopback address of
+    the same family is probed instead; a specific address is probed as is.
     """
-    if not path.exists():
-        return None
-    engine = create_readonly_engine(path)
     try:
-        if not check_database(engine):
-            return [f"database {path} cannot be opened"]
-        state = migrations_api.schema_state(engine)
-    finally:
-        engine.dispose()
-    if state is migrations_api.SchemaState.AT_HEAD:
-        return []
-    if state is migrations_api.SchemaState.UNKNOWN:
-        return [_unknown_schema_message(path)]
-    return None
-
-
-def _unknown_schema_message(path: Path) -> str:
-    """Build the refusal message for a schema this build does not know."""
-    engine = create_readonly_engine(path)
-    try:
-        return migrations_api.unknown_revision_message(engine)
-    finally:
-        engine.dispose()
+        address = ipaddress.ip_address(bind_host)
+    except ValueError:
+        return bind_host
+    if not address.is_unspecified:
+        return bind_host
+    return "::1" if address.version == 6 else "127.0.0.1"
 
 
 def _configure_logging(settings: Settings) -> None:
@@ -164,14 +188,6 @@ def cli() -> None:
 )
 def serve(upgrade_db: bool) -> None:
     """Run the API server (single process, single writer)."""
-    # #ASSUME: Timing: with --upgrade-db (the image's default command) every
-    # container start may migrate the schema. That is safe only while one
-    # container at a time owns the database file. BEGIN IMMEDIATE serialises
-    # two concurrent migrations and Alembic re-reads the revision inside the
-    # transaction, but both containers would then write the same file, which
-    # the single-writer design forbids.
-    # #VERIFY: the deployment stops the old container before starting the new
-    # one (runbook "Start and stop"); see the PR #2 proposal on --upgrade-db.
     settings = _settings()
     _configure_logging(settings)
     problems = startup_problems(settings, upgrade_db=upgrade_db)
@@ -196,12 +212,14 @@ def healthcheck() -> None:
     """Probe the local /healthz endpoint; exit 0 when healthy."""
     settings = _settings()
     connection = HTTPConnection(
-        "127.0.0.1", settings.port, timeout=HEALTHCHECK_TIMEOUT_SECONDS
+        _probe_host(settings.bind_host),
+        settings.port,
+        timeout=HEALTHCHECK_TIMEOUT_SECONDS,
     )
     try:
         connection.request("GET", "/healthz")
         healthy = connection.getresponse().status == 200
-    except OSError:
+    except (OSError, HTTPException):
         healthy = False
     finally:
         connection.close()
@@ -224,38 +242,55 @@ def config() -> None:
 @cli.command()
 @click.option(
     "--revision",
-    default="head",
-    show_default=True,
+    default=None,
     help=(
-        "Target revision. Moving below the current revision requires "
-        "--downgrade; without it the command refuses."
+        "Target revision id, head or base. Upgrades only move forward (default "
+        "head); a target below the current revision needs --downgrade."
     ),
 )
 @click.option(
     "--downgrade",
     is_flag=True,
-    help="Downgrade to --revision (may destroy data, including audit history).",
+    help=(
+        "Downgrade to --revision, which is required and must be below the "
+        "current revision (may destroy data, including audit history)."
+    ),
 )
-def migrate(revision: str, downgrade: bool) -> None:
-    """Upgrade (or explicitly downgrade) the database schema."""
+@click.option("--yes", is_flag=True, help="Downgrade without asking to confirm.")
+def migrate(revision: str | None, downgrade: bool, yes: bool) -> None:
+    """Upgrade (or explicitly downgrade) the database schema.
+
+    Exit status is 0 on success, 1 when a downgrade is not confirmed, and 2
+    when the migration is refused or fails (the schema is then unchanged).
+    """
     # #CRITICAL: Data integrity: --downgrade below 0001 drops the append-only
-    # audit log and its history. It requires the explicit flag; a lower
-    # --revision without it is refused.
-    # #VERIFY: tests/unit/test_cli_ops.py::TestMigrateAndVerify::
-    # test_migrate_lower_revision_needs_downgrade_flag.
+    # audit log and its history. It needs the explicit flag, a --revision and a
+    # confirmation (or --yes); a lower --revision without the flag is refused.
+    # #VERIFY: tests/unit/test_cli_ops.py::TestMigrateAndVerify covers the
+    # refused lower revision, the missing --revision and the confirmation.
     settings = _settings()
     problems = directory_problems(settings.database_path)
     if problems:
         _fail("; ".join(problems))
+    if downgrade:
+        if revision is None:
+            _fail("--downgrade needs --revision, for example --revision base")
+        if not yes:
+            prompt = (
+                f"Downgrade the schema to {revision}? This may destroy data, "
+                "including audit history; take a backup first"
+            )
+            click.confirm(prompt, abort=True)
     engine = create_sqlite_engine(settings.database_path)
     try:
-        if downgrade:
-            migrations_api.downgrade(engine, revision)
-        else:
-            migrations_api.upgrade(engine, revision)
+        try:
+            if downgrade and revision is not None:
+                migrations_api.downgrade(engine, revision)
+            else:
+                migrations_api.upgrade(engine, revision or "head")
+        except migrations_api.MigrationError as exc:
+            _fail(str(exc))
         current = migrations_api.current_revision(engine)
-    except (migrations_api.MigrationRefusedError, CommandError) as exc:
-        _fail(f"Migration refused: {exc}")
     finally:
         engine.dispose()
     click.echo(f"Schema revision: {current or 'base'}")
@@ -267,16 +302,24 @@ def verify_db(path: Path) -> None:
     """Check a database file's integrity and schema revision.
 
     Use it on a restored backup before starting the service on it. The file is
-    opened read-only and is not modified.
+    opened through SQLite's read-only mode, so its contents are never changed;
+    SQLite may still create ``-wal`` and ``-shm`` files beside a WAL database.
+
+    Exit status is 0 only when the file is intact and at this release's schema
+    head; 1 when the integrity check fails or the schema is behind head or
+    newer than this release.
     """
     engine = create_readonly_engine(path)
     try:
         intact = integrity_ok(engine)
         current = migrations_api.current_revision(engine) if intact else None
+        state = migrations_api.schema_state(engine) if intact else None
     finally:
         engine.dispose()
     head = migrations_api.head_revision()
     click.echo(f"Integrity: {'ok' if intact else 'FAILED'}")
+    if state is not None:
+        click.echo(f"Schema state: {state.value}")
     click.echo(f"Schema revision: {current or 'none'} (head: {head})")
     sys.exit(0 if intact and current == head else 1)
 

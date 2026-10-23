@@ -155,8 +155,8 @@ extra:
     property: !ENV GOOGLE_ANALYTICS_KEY
 
 # Pages that are not part of the published site. Planning documents are
-# template placeholders (the real plan lives in the private deployment
-# repository); templates contain placeholder links; _data holds front-matter
+# template placeholders (the public plan is docs/project/roadmap.md);
+# templates contain placeholder links; _data holds front-matter
 # vocabularies; template_feedback.md is a local, gitignored buffer.
 exclude_docs: |
   planning/

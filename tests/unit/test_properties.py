@@ -33,6 +33,9 @@ LINES = st.one_of(
     st.builds(lambda label, value: f"{label}: {value}", LABELS, st.text(max_size=40)),
 )
 NOTE_BLOCKS = st.lists(LINES, max_size=20).map("\n".join)
+# Pinned from the current implementation: a change to the canonical form is a
+# change to every code already written into calendars and must be deliberate.
+GOLDEN_DEFAULT_CODE = "5E81DB"
 FAST = settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
 
 
@@ -40,13 +43,10 @@ FAST = settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
 class TestParserProperties:
     @FAST
     @given(NOTE_BLOCKS)
-    def test_parser_never_raises_and_blocks_on_critical(self, text):
+    def test_parser_never_raises_and_a_trip_exists_exactly_when_unblocked(self, text):
         result = parse(text)
         blocked = any(f.severity is Severity.CRITICAL for f in result.findings)
-        if blocked:
-            assert result.trip is None
-        else:
-            assert all(f.severity is not Severity.CRITICAL for f in result.findings)
+        assert (result.trip is None) is blocked
 
     @FAST
     @given(st.text(max_size=400))
@@ -70,10 +70,9 @@ class TestConfirmationProperties:
     @FAST
     @given(st.text(max_size=60).filter(lambda s: "\n" not in s and "\r" not in s))
     def test_code_is_deterministic_and_ignores_free_text(self, free):
-        base = trip(notes())
-        with_free = trip(notes(free=free))
-        assert confirmation_code(trip(notes())) == confirmation_code(base)
-        assert confirmation_code(with_free) == confirmation_code(base)
+        base = confirmation_code(trip(notes()))
+        assert confirmation_code(trip(notes())) == base
+        assert confirmation_code(trip(notes(free=free))) == base
 
     @FAST
     @given(
@@ -85,3 +84,20 @@ class TestConfirmationProperties:
         assert len(code) == 6
         assert code == code.upper()
         int(code, 16)
+
+    def test_code_changes_when_trip_content_changes(self):
+        codes = {
+            confirmation_code(trip(notes())),
+            confirmation_code(trip(notes(driver="Morgan"))),
+            confirmation_code(trip(notes(pickup="School"))),
+            confirmation_code(trip(notes(destinations=(("Sam", "School"),)))),
+        }
+        assert len(codes) == 4
+
+    def test_trip_type_is_not_material_to_the_code(self):
+        assert confirmation_code(trip(notes(trip_type="dropoff"))) == (
+            confirmation_code(trip(notes()))
+        )
+
+    def test_golden_code_for_the_default_trip(self):
+        assert confirmation_code(trip(notes())) == GOLDEN_DEFAULT_CODE

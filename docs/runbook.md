@@ -20,17 +20,37 @@ The container runs one process with one SQLite writer.
 - **Start:** start the deployment's container. The image runs
   `family-logistics serve --upgrade-db`, which migrates the schema to head
   before serving. Outside a container, run `family-logistics migrate` and then
-  `family-logistics serve`. The process refuses to start when `FL_HA_TOKEN` is
-  missing or shorter than 32 characters, when `FL_DATA_KEY` is missing in
-  production mode, when the schema is behind head (without `--upgrade-db`),
-  when the database records a schema revision this image does not know (it
-  was written by a newer image: run that image or restore a matching
-  backup), or when a setting fails validation; read the startup error and
-  fix it. A refused start never creates or changes the database file, and a
-  migration that fails is rolled back as a whole.
+  `family-logistics serve`. The process refuses to start (exit 2) when
+  `FL_HA_TOKEN` is missing or shorter than 32 characters, when `FL_DATA_KEY` or
+  `FL_APPRISE_URL` is missing in production mode, when the schema is behind
+  head (without `--upgrade-db`), when the schema is newer than the image (see
+  [Upgrading the image](#upgrading-the-image)), or when a setting fails
+  validation; read the startup error and fix it. A refused start lists every
+  problem it found and never creates or migrates the database.
 - **Stop:** stop the container. Wait for it to exit before touching the
   database file, so the WAL is checkpointed.
-- Never run two instances against the same database file.
+- Never run two serving instances against the same database file. The
+  migration lock (see [Upgrading the image](#upgrading-the-image)) only makes an
+  accidental concurrent start safe: the second start waits for the first
+  upgrade to finish instead of migrating twice. It does not make two writers a
+  supported setup.
+
+## Upgrading the image
+
+Take a backup (see [Backup and restore](#backup-and-restore)) before starting
+an image that ships a new schema revision; `serve --upgrade-db` migrates the
+database as soon as the container starts.
+
+- A migration runs in one transaction: if it fails, nothing is changed and the
+  service refuses to start with `migration failed and was rolled back`.
+- Migrations take the database's write lock, so a second container started on
+  the same volume waits for the first to finish instead of migrating twice. If
+  the lock is held for more than two minutes, it refuses to start with
+  `database is locked by another process`.
+- An image older than the database's schema (a rolled-back image, or a backup
+  taken from a newer release) refuses to start with `database schema revision
+  ... is newer than this release`. Start the newer image, or restore a backup
+  taken for this release; never downgrade with the older image.
 
 ## Health
 
@@ -41,8 +61,8 @@ curl -s http://127.0.0.1:8080/healthz
 
 | Response | Meaning | Action |
 |----------|---------|--------|
-| `200 {"status": "ok", "database": true}` | Healthy | None |
-| `503 {"database": false}` | Database unreachable | Check the data volume is mounted and writable, free disk space, then restart |
+| `200 {"status": "ok", "database": true, "version": "..."}` | Healthy | None |
+| `503 {"status": "degraded", "database": false, "version": "..."}` | Database unreachable | Check the data volume is mounted and writable, free disk space, then restart |
 | No response | Process down | Check container logs, then start |
 
 A healthy process does not mean the last assessment succeeded. The
@@ -104,32 +124,41 @@ deployment. To restore:
    family-logistics verify-db /path/to/family_logistics.db
    ```
 
-   It must report `Integrity: ok` and print the schema revision next to the
-   head revision of the image you will start. A revision behind head is
-   upgraded by `serve --upgrade-db` at start; a revision the image does not
-   know is refused.
+   It reports `Integrity: ok` or `FAILED`, the schema state (`at head`,
+   `behind head`, or `unknown revision, newer than this release`) and the
+   schema revision next to the head revision of the image you will start. It
+   exits 0 only when the file is intact and at head, and 1 otherwise,
+   including when the schema is merely behind head; a revision behind head is
+   upgraded by `serve --upgrade-db` at start. A newer revision needs the newer
+   image.
 4. Start the container and confirm `/healthz` returns `200`.
 5. Run an on-demand assessment and confirm the status card is not stale.
+
+Test a restore at least monthly.
 
 ### Rolling back a schema change
 
 Downgrades are explicit and may destroy data, including audit history. Take a
-backup first, stop the container, then:
+backup first, stop the container, then run the downgrade with the image that
+holds the current revision (an older image refuses a schema it does not know):
 
 ```bash
 family-logistics migrate --downgrade --revision <revision>
 ```
 
-Start the matching older image afterwards; a newer image would upgrade the
-schema again.
-
-Test a restore at least monthly.
+The command asks for confirmation (`--yes` skips the prompt in scripts) and
+refuses a target that is not below the current revision. `migrate` without
+`--downgrade` only moves forward. Start the matching older image afterwards; a
+newer image would upgrade the schema again.
 
 ## Ops alerting
 
-The Apprise client sends only to the six configured `FL_APPRISE_TAG_*` tags and
-refuses any other tag before making a request; `ops_alert()` sends operator
-alerts to the `fl-ops` tag. Triggering it from the scheduler (failed or
+The Apprise client posts to the saved Apprise configuration,
+`POST /notify/{FL_APPRISE_CONFIG_KEY}`, and selects the services within it with
+the `fl-*` tag in the JSON body; who receives each tag is configured in Apprise.
+It sends only to the six configured `FL_APPRISE_TAG_*` tags and refuses any
+other tag before making a request; `ops_alert()` sends operator alerts to the
+`fl-ops` tag. Triggering it from the scheduler (failed or
 incomplete runs, collection failures, routing budget threshold, database
 unreachable) arrives with the scheduler in M3. Until then, rely on the
 external monitor of `/healthz`.

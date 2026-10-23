@@ -21,6 +21,7 @@ src/family_logistics/
 │   └── llama_cpp/     # narrative LLM client (M5)
 ├── api/               # FastAPI app, /healthz, Home Assistant routes (M3)
 ├── core/              # settings, address encryption, SQLite, exceptions
+├── db/                # table definitions, Alembic migrations, audit log
 ├── domain/            # models, notes parser, confirmation codes, change
 │                      # impact, capacity, stop ordering, rules, run status
 ├── middleware/        # correlation IDs, security headers

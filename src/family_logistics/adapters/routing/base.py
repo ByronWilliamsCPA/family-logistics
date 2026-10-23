@@ -14,6 +14,9 @@ which the domain treats as unknown (ROUTE-010 / incomplete), never as zero.
 
 #ASSUME: External resources: Waze (via HA) and Google Routes may be
 unavailable or rate-limited at any time; callers must handle ``None``.
+#VERIFY: tests/unit/test_stop_order.py::TestStopOrder pins that an unknown
+estimate yields an INCOMPLETE order, never a zero-length leg; every future
+provider (M3) needs the same test for its own failure modes.
 """
 
 from __future__ import annotations

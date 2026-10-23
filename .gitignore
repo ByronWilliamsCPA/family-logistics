@@ -1,12 +1,21 @@
 # =============================================================================
 # .gitignore for family-logistics (PUBLIC repository)
 # =============================================================================
-# Build and tool directory patterns are anchored to the repository root with a
-# leading "/" so that a future source package is never silently ignored.
-# Every pattern that protects household data or credentials (registry*,
-# backups/, reports/, assessments/, .aws/, .ssh/, *.db, *.ics, ...) stays
-# UNANCHORED on purpose: it must match at any depth. tests/unit/
-# test_gitignore_household.py pins this with `git check-ignore`.
+# Two deliberate styles; tests/unit/test_gitignore_guards.py and
+# tests/unit/test_gitignore_household.py enforce the second one with real git:
+#
+# 1. Build, packaging and generic output directories (/build/, /dist/, /lib/,
+#    /var/, /logs/, /tmp/, ...) are anchored to the repository root with a
+#    leading "/", so a future source package of the same name below src/ is
+#    never silently ignored. Tool caches and editor directories (__pycache__/,
+#    .pytest_cache/, .vscode/, ...) stay unanchored because they appear in any
+#    subdirectory and never hold source.
+# 2. Everything that protects household data or credentials (registry seeds,
+#    backups, reports, assessments, transcripts, databases, calendar exports,
+#    .aws/, .ssh/, .gcloud/) is unanchored on purpose: it must match at any
+#    depth, because the file that leaks is usually not at the repository root.
+#    If a source package ever needs one of those names, add an explicit
+#    negation for that package path rather than anchoring the guard.
 
 # -----------------------------------------------------------------------------
 # Python bytecode, builds and packaging
@@ -97,7 +106,7 @@ secrets.json
 **/service-account*.json
 **/gcp-credentials*.json
 **/*-key.json
-/.gcloud/
+.gcloud/
 /.config/gcloud/
 .aws/
 .ssh/
@@ -181,13 +190,17 @@ reuse-spdx.json
 /output/
 /notebooks/.ipynb_checkpoints/
 
-# Local-only template feedback buffer (see CLAUDE.md)
+# Template feedback buffer: kept untracked here, so entries are shared with the
+# template team out of band (see CLAUDE.md)
 /docs/template_feedback.md
 
 # =============================================================================
 # Family Logistics: real household data stays local (this repository is public)
 # =============================================================================
-# Runtime database, WAL/SHM side files and backups (any depth)
+# Runtime database and WAL/SHM side files. The *.db and *.sqlite globs match at
+# any depth; /data/ is root-anchored on purpose (the tracked data/.gitkeep
+# placeholder lives there and a package data directory below src/ must stay
+# trackable). Backups match at any depth.
 /data/
 *.db
 *.db-wal
@@ -200,7 +213,10 @@ db.sqlite3-journal
 backups/
 
 # Registry seed data and site configuration (people, locations, addresses,
-# calendar IDs, school assignments). Commit only *.example.* templates.
+# calendar IDs, school assignments). Commit only *.example.* templates. The
+# globs and their example exceptions have no slash, so both apply at any depth;
+# config/local/ is written with a leading **/ for the same reason (a bare
+# config/local/ contains a slash, so git would root it at the repository root).
 **/config/local/
 registry*.yaml
 registry*.yml
@@ -222,7 +238,8 @@ stack.env
 /tools/m0/*-results.md
 /tools/m0/RESULTS.md
 
-# Pseudonym mappings and the private-terms deny-list (any depth, never in Git)
+# Pseudonym mappings and the private-terms deny-list (any depth; ignore rules do
+# not untrack a file that was already added, so also keep them out of the tree)
 pseudonyms*.yaml
 pseudonyms*.json
 private-terms*.txt

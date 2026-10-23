@@ -1,10 +1,12 @@
 ---
 blank_issues_enabled: false
-# Only links that resolve today. The documentation site is not published yet
-# (GitHub Pages is off) and Discussions are disabled, so the docs link points
-# at the Markdown sources. Switch it to the Pages URL in mkdocs.yml (site_url)
-# once the docs workflow deploys.
+# Every destination below must exist: the repository has Discussions and GitHub
+# Pages disabled, and an unclaimed external docs hostname could be registered by
+# anyone and then served from this chooser.
 contact_links:
   - name: Documentation
     url: https://github.com/ByronWilliamsCPA/family-logistics/tree/main/docs
-    about: Usage guides, configuration reference and runbook (Markdown sources)
+    about: Read the usage guides and reference in the repository docs folder
+  - name: Report a security vulnerability
+    url: https://github.com/ByronWilliamsCPA/family-logistics/security/advisories/new
+    about: Privately report a vulnerability; do not open a public issue for it

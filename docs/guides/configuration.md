@@ -10,11 +10,13 @@ tags:
 ---
 
 Family Logistics reads its configuration from environment variables with the
-`FL_` prefix (Pydantic Settings, `family_logistics.core.config.Settings`).
-The application does **not** read a `.env` file. `docker compose` reads `.env`
-only to fill in the variables that `docker-compose.yml` passes through; for
-commands run outside Compose, export the variables first (for example
-`set -a; . ./.env; set +a`). Start from
+`FL_` prefix (Pydantic Settings, `family_logistics.core.config.Settings`). A
+`.env` file in the working directory is also read, after the process
+environment, which always wins; it is meant for local development, and
+production values come from the deployment's secret store. A blank value
+(`FL_X=`) counts as unset, so a template line or a compose default leaves the
+setting at its default (or, for a required secret, fails closed with a clear
+message). Start from
 [`.env.example`](https://github.com/ByronWilliamsCPA/family-logistics/blob/main/.env.example).
 Secrets are supplied only at runtime and are never printed: `family-logistics config`
 shows non-secret values only.
@@ -53,8 +55,8 @@ shows non-secret values only.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `FL_APPRISE_URL` | unset | Apprise API base URL |
-| `FL_APPRISE_CONFIG_KEY` | `family-logistics` | Apprise API persistent-configuration key (`/notify/<key>`); letters, digits, `-` and `_` only |
+| `FL_APPRISE_URL` | unset | Apprise API base URL (`http` or `https`, no embedded credentials); `serve` refuses to start without it when `FL_NOTIFICATION_MODE=production` |
+| `FL_APPRISE_CONFIG_KEY` | `family-logistics` | Key of the saved Apprise configuration holding the app's services; 1 to 64 letters, digits, `_` or `-` |
 | `FL_APPRISE_TAG_REPORT` | `fl-report` | Weekly and daily report e-mail |
 | `FL_APPRISE_TAG_STATUS` | `fl-status` | Completed-assessment push |
 | `FL_APPRISE_TAG_WARNING` | `fl-warning` | New validation error push |
@@ -66,12 +68,17 @@ shows non-secret values only.
 | `FL_QUIET_HOURS_END` | `06:00` | End of quiet hours (local time) |
 | `FL_IMMINENT_WINDOW_MINUTES` | `180` | Rides starting within this window may bypass quiet hours |
 
-Recipients for each tag are configured in Apprise, never in this application:
-the client posts to `/notify/<FL_APPRISE_CONFIG_KEY>` and names the tag in the
-request's `tag` field. Every `FL_APPRISE_TAG_*` value must match
-`fl-[a-z0-9-]+` (one plain dedicated tag, no tag expression) or settings fail
-to load, and the client refuses any tag other than these six before making a
-request, so shared severity tags can never be used.
+The client sends through one saved Apprise configuration: `POST
+/notify/{FL_APPRISE_CONFIG_KEY}` with a JSON body of `title`, `body` and the
+`fl-*` tag. The key selects the configuration; the tag selects the services
+inside it. The key is not a tag.
+
+Recipients for each tag are configured in Apprise, never in this application.
+Every `FL_APPRISE_TAG_*` value must be one plain dedicated tag,
+`fl-<word>[-<word>]` in lower case with no tag expression, and the six must
+differ, or settings fail to load. The Apprise client also refuses any tag other
+than these six before making a request, so shared severity tags can never be
+used.
 
 ## Routing
 

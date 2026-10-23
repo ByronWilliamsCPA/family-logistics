@@ -11,9 +11,14 @@ Features:
 - Structlog integration for log correlation
 
 Standard Headers Supported:
-- X-Request-ID: Primary correlation header
-- X-Correlation-ID: Alternative correlation header
-- X-Trace-ID: Distributed tracing header
+- X-Correlation-ID: Primary correlation header
+- X-Request-ID: Fallback correlation header; also the request ID
+- X-Trace-ID and X-Span-ID: Distributed tracing headers, forwarded as-is
+  (never used as a correlation fallback)
+
+Inbound IDs are attacker-controlled: each one is accepted only when it is a
+short plain token (see ``sanitize_id``); an unsafe correlation or request ID is
+replaced by a generated UUID, and an unsafe trace or span ID is dropped.
 
 Usage:
     from fastapi import FastAPI
@@ -73,7 +78,8 @@ SPAN_ID_HEADER = "X-Span-ID"
 # #CRITICAL: Security: inbound IDs are attacker-controlled. They are logged and
 # echoed back, so only short, plain tokens are accepted; anything else
 # (oversized, control characters, spaces) is replaced or dropped.
-# #VERIFY: tests/unit/test_correlation_sanitize.py.
+# #VERIFY: tests/unit/test_correlation_sanitize.py rejects each unsafe shape
+# from sanitize_id and through every inbound header of the middleware.
 _SAFE_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 
@@ -201,14 +207,18 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
     Extracts or generates correlation IDs for each request and stores them
     in context variables for access throughout the request lifecycle.
 
-    Header Priority:
-    1. X-Correlation-ID (primary)
-    2. X-Request-ID (fallback)
-    3. X-Trace-ID (for distributed tracing)
-    4. Generate new UUID if none provided
+    Correlation ID priority:
+    1. X-Correlation-ID, when it is a safe token
+    2. X-Request-ID, when it is a safe token
+    3. A newly generated UUID4
+
+    The request ID is the safe X-Request-ID, else a generated UUID4.
+    X-Trace-ID and X-Span-ID are separate: each is forwarded only when it is a
+    safe token, otherwise dropped; neither is a correlation fallback.
 
     Features:
-    - Extracts existing correlation IDs from incoming requests
+    - Extracts safe correlation IDs from incoming requests
+    - Replaces unsafe correlation and request IDs, drops unsafe trace IDs
     - Generates new IDs for requests without correlation headers
     - Stores IDs in async-safe context variables
     - Adds correlation headers to responses

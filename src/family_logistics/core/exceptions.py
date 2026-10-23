@@ -155,7 +155,10 @@ class ValidationError(ProjectBaseError):
     Args:
         message: Description of the validation failure.
         field: Name of the field that failed validation.
-        value: The invalid value (will be sanitized in logs).
+        value: The invalid value. It is stored as ``str(value)`` truncated to
+            100 characters in ``details["value"]`` and appears in ``to_dict()``
+            and so in API responses. It is truncated, not redacted: never pass
+            a secret, an address or other private data as ``value``.
         details: Additional validation context.
         error_code: Machine-readable error code.
 

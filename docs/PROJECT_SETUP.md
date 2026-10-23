@@ -394,12 +394,12 @@ Your project includes several GitHub Actions workflows:
 | Workflow | File | Purpose |
 |----------|------|---------|
 | CI Pipeline | `ci.yml` | Tests, linting, type checking |
-| Security Analysis | `security-analysis.yml` | Bandit and OSV-Scanner dependency scanning |
-| PR Validation | `pr-validation.yml` | Lock file and requirements sync validation |
+| Security Analysis | `security-analysis.yml` | Bandit and OSV-Scanner (CodeQL was retired upstream) |
+| PR Validation | `pr-validation.yml` | Conventional Commits PR title check and an advisory documentation link check |
 | OpenSSF Scorecard | `scorecard.yml` | Supply chain security assessment |
 | SBOM & Security Scan | `sbom.yml` | Software Bill of Materials generation |
 | Release | `release.yml` | Semantic versioning, changelog and the GHCR container image |
-| Documentation | `docs.yml` | Build and deploy MkDocs |
+| Documentation | `docs.yml` | Build MkDocs (deploy to GitHub Pages stays off until Pages is enabled) |
 | REUSE Compliance | `reuse.yml` | License compliance checking |
 | SonarCloud | `sonarcloud.yml` | Code quality analysis |
 

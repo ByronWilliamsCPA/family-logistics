@@ -4,20 +4,27 @@ The application owns its schema: ``serve`` refuses to start on a database
 that is not at the head revision unless started with ``--upgrade-db``, and
 ``family-logistics migrate`` upgrades (or downgrades) explicitly.
 
-#CRITICAL: Data integrity: a migration run is all-or-nothing. Python's
-sqlite3 driver (legacy transaction control) runs DDL outside any
-transaction, so Alembic's own transaction would not cover CREATE/DROP and a
-failure halfway would leave a schema that matches no revision. Every run
-therefore takes a connection whose driver-level transaction handling is off
-and wraps the whole run, version-table update included, in one explicit
-``BEGIN IMMEDIATE`` ... ``COMMIT`` (SQLite DDL is transactional).
-#VERIFY: tests/unit/test_migrations_atomic.py makes a migration fail after
-creating a table and asserts the table is gone and the recorded revision is
-unchanged.
-#EDGE: A database whose recorded revision is unknown to this build (written
-by a newer image, or not ours) is never upgraded or downgraded: it is
-reported as SchemaState.UNKNOWN so callers refuse with a clear message.
-#VERIFY: tests/unit/test_cli_ops.py::TestNewerSchema.
+Every upgrade or downgrade runs in one SQLite transaction opened with
+``BEGIN IMMEDIATE``:
+
+- it is atomic: SQLite DDL is transactional once a transaction is open, so a
+  failed or interrupted migration rolls back completely (the sqlite3 module's
+  legacy mode would otherwise autocommit each CREATE or DROP);
+- it is serialized: ``BEGIN IMMEDIATE`` takes the database's write lock, so a
+  second migrator (another container on the same volume) waits, then finds the
+  schema already at head and does nothing;
+- it refuses a schema it does not know (written by a newer release), so an
+  older image never runs against it.
+
+#CRITICAL: Data integrity: the default container command runs
+``serve --upgrade-db``, so every start may migrate the household database.
+#VERIFY: tests/unit/test_migrations_safety.py forces a mid-migration failure
+(nothing persists), runs concurrent upgraders (one migrates, the rest no-op)
+and refuses an unknown newer revision; take a backup before deploying an
+image with a new revision.
+#ASSUME: Concurrency: SQLite's file lock is honoured by every migrator, which
+holds for processes on one host and a local volume, not for NFS.
+#VERIFY: the core.database #CRITICAL keeps the file on local disk.
 """
 
 from __future__ import annotations
@@ -25,20 +32,50 @@ from __future__ import annotations
 import enum
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
+from alembic.util import CommandError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
+
+from family_logistics.core.database import BUSY_TIMEOUT_MS
+from family_logistics.core.exceptions import DatabaseError
 
 if TYPE_CHECKING:
-    import sqlite3
     from collections.abc import Generator
 
     from sqlalchemy.engine import Connection, Engine
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+MIGRATION_LOCK_TIMEOUT_MS = 120_000
+"""How long a migrator waits for another one to finish before giving up."""
+
+
+class MigrationError(DatabaseError):
+    """A migration was refused or failed; the schema is unchanged."""
+
+
+class MigrationLockError(MigrationError):
+    """Another process held the database's write lock for too long."""
+
+
+class SchemaAheadError(MigrationError):
+    """The database records a revision this release does not ship."""
+
+
+class MigrationDirectionError(MigrationError):
+    """An upgrade target is below, or a downgrade target not below, current."""
+
+
+class SchemaState(enum.Enum):
+    """Where a database's schema stands relative to this release."""
+
+    AT_HEAD = "at head"
+    BEHIND = "behind head"
+    AHEAD = "unknown revision, newer than this release"
 
 
 def _config() -> Config:
@@ -48,6 +85,11 @@ def _config() -> Config:
     return config
 
 
+def _script() -> ScriptDirectory:
+    """Return the packaged migration scripts."""
+    return ScriptDirectory.from_config(_config())
+
+
 def head_revision() -> str:
     """Return the newest revision shipped with this version of the app.
 
@@ -55,13 +97,19 @@ def head_revision() -> str:
         The head revision identifier.
 
     Raises:
-        RuntimeError: If the packaged migrations do not have exactly one head.
+        MigrationError: If the packaged migrations have no head. Several heads
+            raise alembic's ``CommandError`` instead.
     """
-    head = ScriptDirectory.from_config(_config()).get_current_head()
+    head = _script().get_current_head()
     if head is None:
         msg = "packaged migrations have no single head revision"
-        raise RuntimeError(msg)
+        raise MigrationError(msg, operation="migrate")
     return head
+
+
+def _revision_of(connection: Connection) -> str | None:
+    """Return the revision recorded on an open connection."""
+    return MigrationContext.configure(connection).get_current_revision()
 
 
 def current_revision(engine: Engine) -> str | None:
@@ -74,61 +122,46 @@ def current_revision(engine: Engine) -> str | None:
         The current revision, or None for an empty or unversioned database.
     """
     with engine.connect() as connection:
-        return MigrationContext.configure(connection).get_current_revision()
+        return _revision_of(connection)
 
 
-class SchemaState(enum.Enum):
-    """How a database's recorded revision relates to this build."""
+def _position(script: ScriptDirectory, revision: str | None) -> int | None:
+    """Return a revision's distance from base, or None if it is unknown."""
+    if revision is None or revision == "base":
+        return 0
+    order = [item.revision for item in script.walk_revisions()]
+    order.reverse()
+    if revision in {"head", "heads"}:
+        return len(order)
+    try:
+        found = script.get_revision(revision)
+    except CommandError:
+        return None
+    return order.index(found.revision) + 1
 
-    AT_HEAD = "at_head"
-    BEHIND = "behind"
-    UNKNOWN = "unknown"
 
-
-class MigrationRefusedError(RuntimeError):
-    """A requested migration would do something other than what was asked."""
-
-
-def _known_revisions() -> set[str]:
-    """Return every revision identifier shipped with this build."""
-    script = ScriptDirectory.from_config(_config())
-    return {rev.revision for rev in script.walk_revisions()}
+def _state(script: ScriptDirectory, current: str | None) -> SchemaState:
+    """Classify a recorded revision against the packaged scripts."""
+    if _position(script, current) is None:
+        return SchemaState.AHEAD
+    if current == script.get_current_head():
+        return SchemaState.AT_HEAD
+    return SchemaState.BEHIND
 
 
 def schema_state(engine: Engine) -> SchemaState:
-    """Classify the database schema relative to the packaged migrations.
+    """Report where the database's schema stands relative to this release.
+
+    A revision that the packaged migrations do not contain is reported as
+    ``AHEAD``: it was most likely written by a newer release.
 
     Args:
-        engine: The application engine.
+        engine: The application engine (a read-only engine works).
 
     Returns:
-        AT_HEAD, BEHIND (empty, unversioned or an older known revision) or
-        UNKNOWN (a revision this build does not ship, such as one written by
-        a newer image).
+        The schema state.
     """
-    current = current_revision(engine)
-    if current == head_revision():
-        return SchemaState.AT_HEAD
-    if current is None or current in _known_revisions():
-        return SchemaState.BEHIND
-    return SchemaState.UNKNOWN
-
-
-def unknown_revision_message(engine: Engine) -> str:
-    """Explain an UNKNOWN schema state without guessing at a fix.
-
-    Args:
-        engine: The application engine.
-
-    Returns:
-        A message naming the recorded and packaged revisions.
-    """
-    return (
-        f"database schema revision {current_revision(engine)!r} is not known to "
-        f"this version (head {head_revision()!r}); it was written by a newer "
-        "build or is not a Family Logistics database. Run the matching image "
-        "or restore a backup taken with this version"
-    )
+    return _state(_script(), current_revision(engine))
 
 
 def is_at_head(engine: Engine) -> bool:
@@ -143,98 +176,126 @@ def is_at_head(engine: Engine) -> bool:
     return current_revision(engine) == head_revision()
 
 
+def ahead_message(current: str | None) -> str:
+    """Explain a refused schema written by a newer release.
+
+    Args:
+        current: The revision recorded in the database.
+
+    Returns:
+        A one-line message for the operator.
+    """
+    return (
+        f"database schema revision {current} is newer than this release "
+        f"(head {head_revision()}); run the newer image, or restore a backup "
+        "taken for this release"
+    )
+
+
 @contextmanager
-def _atomic_connection(engine: Engine) -> Generator[Connection]:
-    """Yield a connection whose whole use is one SQLite transaction.
+def _locked_transaction(engine: Engine) -> Generator[Connection]:
+    """Yield a connection inside ``BEGIN IMMEDIATE``; commit on success.
+
+    Any exception from the caller rolls the whole transaction back.
 
     Args:
         engine: The application engine.
 
     Yields:
-        Connection: A connection inside ``BEGIN IMMEDIATE``; committed on
-        success and rolled back on any exception.
+        Connection: A connection holding the database's write lock.
 
     Raises:
-        BaseException: Whatever the body raised, re-raised after rollback.
+        MigrationLockError: If the write lock is not granted in time.
     """
     with engine.connect() as connection:
-        if engine.dialect.name != "sqlite":  # pragma: no cover - SQLite only
-            with connection.begin():
-                yield connection
-            return
-        driver = cast("sqlite3.Connection", connection.connection.driver_connection)
-        previous = driver.isolation_level
-        driver.isolation_level = None
+        connection.exec_driver_sql(f"PRAGMA busy_timeout={MIGRATION_LOCK_TIMEOUT_MS}")
         try:
-            _ = connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+            except OperationalError as exc:
+                msg = (
+                    "database is locked by another process (another instance "
+                    "may be migrating); schema unchanged"
+                )
+                raise MigrationLockError(msg, operation="migrate") from exc
+            committed = False
             try:
                 yield connection
-            except BaseException:
-                connection.rollback()
-                raise
-            connection.commit()
+                connection.commit()
+                committed = True
+            finally:
+                if not committed:
+                    connection.rollback()
         finally:
-            driver.isolation_level = previous
+            connection.exec_driver_sql(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+            connection.commit()
 
 
-def _run(engine: Engine, revision: str, *, downgrade: bool) -> None:
-    """Run an Alembic upgrade or downgrade atomically."""
-    if schema_state(engine) is SchemaState.UNKNOWN:
-        raise MigrationRefusedError(unknown_revision_message(engine))
-    config = _config()
-    with _atomic_connection(engine) as connection:
-        config.attributes["connection"] = connection
-        if downgrade:
-            command.downgrade(config, revision)
-        else:
-            command.upgrade(config, revision)
-
-
-def is_below_current(engine: Engine, revision: str) -> bool:
-    """Report whether ``revision`` is an ancestor of the current revision.
+def _migrate(engine: Engine, revision: str, *, downgrade: bool) -> None:
+    """Move the schema to ``revision`` atomically, under the write lock.
 
     Args:
         engine: The application engine.
-        revision: A target revision identifier, ``base`` or ``head``.
+        revision: Target revision id, ``head`` or ``base``.
+        downgrade: True to move down, False to move up.
 
-    Returns:
-        True when moving to ``revision`` would be a downgrade.
+    Raises:
+        SchemaAheadError: If the database records an unknown revision.
+        MigrationDirectionError: If the target is on the wrong side of current.
+        MigrationError: If the target is unknown or the migration failed.
     """
-    current = current_revision(engine)
-    if current is None or revision in {"head", "heads", current}:
-        return False
-    if revision == "base":
-        return True
-    script = ScriptDirectory.from_config(_config())
-    ancestors = {rev.revision for rev in script.iterate_revisions(current, "base")}
-    return revision in ancestors
+    script = _script()
+    target = _position(script, revision)
+    if target is None:
+        msg = f"unknown revision {revision!r}; schema unchanged"
+        raise MigrationError(msg, operation="migrate")
+    try:
+        with _locked_transaction(engine) as connection:
+            current = _revision_of(connection)
+            position = _position(script, current)
+            if position is None:
+                raise SchemaAheadError(ahead_message(current), operation="migrate")
+            if not downgrade and target < position:
+                msg = (
+                    f"revision {revision} is below the current revision "
+                    f"{current}; use an explicit downgrade"
+                )
+                raise MigrationDirectionError(msg, operation="migrate")
+            if downgrade and target >= position:
+                msg = (
+                    f"a downgrade target must be below the current revision "
+                    f"{current or 'base'}; got {revision}"
+                )
+                raise MigrationDirectionError(msg, operation="migrate")
+            config = _config()
+            config.attributes["connection"] = connection
+            if downgrade:
+                command.downgrade(config, revision)
+            else:
+                command.upgrade(config, revision)
+    except (CommandError, SQLAlchemyError) as exc:
+        detail = str(exc).splitlines()[0]
+        msg = f"migration failed and was rolled back; schema unchanged: {detail}"
+        raise MigrationError(msg, operation="migrate") from exc
 
 
 def upgrade(engine: Engine, revision: str = "head") -> None:
-    """Upgrade the schema in one transaction.
+    """Upgrade the schema atomically; a concurrent migrator waits its turn.
 
     Args:
         engine: The application engine.
-        revision: Target revision (default: head).
-
-    Raises:
-        MigrationRefusedError: The recorded revision is unknown to this build,
-            or ``revision`` is below the current one (use ``downgrade``).
+        revision: Target revision id, ``head`` (default) or ``base``. It must
+            not be below the current revision.
     """
-    if is_below_current(engine, revision):
-        msg = (
-            f"revision {revision!r} is below the current schema revision; "
-            "pass --downgrade to move down (may destroy data)"
-        )
-        raise MigrationRefusedError(msg)
-    _run(engine, revision, downgrade=False)
+    _migrate(engine, revision, downgrade=False)
 
 
 def downgrade(engine: Engine, revision: str) -> None:
-    """Downgrade the schema in one transaction (operator action; may destroy data).
+    """Downgrade the schema atomically (operator action; may destroy data).
 
     Args:
         engine: The application engine.
-        revision: Target revision, for example ``base``.
+        revision: Target revision, for example ``base``; it must be below the
+            current revision.
     """
-    _run(engine, revision, downgrade=True)
+    _migrate(engine, revision, downgrade=True)

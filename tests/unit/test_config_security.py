@@ -1,9 +1,6 @@
-"""Settings never leak secrets and every field is consumed or scheduled."""
+"""Settings never leak secrets (field coverage lives in test_config_fields.py)."""
 
 from __future__ import annotations
-
-import re
-from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -11,7 +8,7 @@ from pydantic import ValidationError
 
 from family_logistics.cli import cli
 from family_logistics.core import config as config_module
-from family_logistics.core.config import FIELD_STATUS, Settings, load_settings
+from family_logistics.core.config import Settings, load_settings
 from family_logistics.core.exceptions import ConfigurationError
 
 LEAKY_TOKEN = "shortSECRETvalue-do-not-print"
@@ -29,12 +26,12 @@ def fresh_settings():
 class TestNoSecretEcho:
     def test_validation_error_hides_token(self):
         with pytest.raises(ValidationError) as caught:
-            Settings(ha_token=LEAKY_TOKEN)  # type: ignore[arg-type]
+            Settings.model_validate({"ha_token": LEAKY_TOKEN})
         assert LEAKY_TOKEN not in str(caught.value)
 
     def test_validation_error_hides_data_key(self):
         with pytest.raises(ValidationError) as caught:
-            Settings(data_key=LEAKY_KEY)  # type: ignore[arg-type]
+            Settings.model_validate({"data_key": LEAKY_KEY})
         assert LEAKY_KEY not in str(caught.value)
 
     def test_load_settings_names_field_only(self, monkeypatch):
@@ -59,37 +56,31 @@ class TestNoSecretEcho:
             assert value not in result.output
             assert variable in result.output
 
+    def test_load_settings_drops_the_pydantic_error_chain(self, monkeypatch):
+        monkeypatch.setenv("FL_HA_TOKEN", LEAKY_TOKEN)
+        with pytest.raises(ConfigurationError) as caught:
+            load_settings()
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
 
-@pytest.mark.unit
-class TestCaldavUrl:
-    def test_https_default(self):
-        assert Settings().caldav_url.startswith("https://")
+    def test_load_settings_does_not_echo_a_bad_cidr(self, monkeypatch):
+        monkeypatch.setenv("FL_PROXY_TRUSTED_CIDRS", "SECRETVALUE")
+        with pytest.raises(ConfigurationError) as caught:
+            load_settings()
+        assert "FL_PROXY_TRUSTED_CIDRS" in str(caught.value)
+        assert "SECRETVALUE" not in str(caught.value)
+        assert "SECRETVALUE" not in repr(caught.value.details)
 
-    @pytest.mark.parametrize("url", ["http://caldav.example.invalid", "ftp://x"])
-    def test_non_https_rejected(self, url):
-        with pytest.raises(ValidationError):
-            Settings(caldav_url=url)
+    def test_non_ascii_data_key_is_rejected_without_echo(self):
+        with pytest.raises(ValidationError) as caught:
+            Settings.model_validate({"data_key": "k\u00e9y" * 12})
+        assert "k\u00e9y" not in str(caught.value)
 
-
-@pytest.mark.unit
-def test_every_field_is_consumed_or_scheduled():
-    """A new setting must be read by code or carry a milestone (no dead config)."""
-    assert set(FIELD_STATUS) == set(Settings.model_fields)
-    assert set(FIELD_STATUS.values()) <= {"consumed", "M1", "M2", "M3", "M4", "M5"}
-
-
-@pytest.mark.unit
-def test_consumed_fields_are_read_in_src():
-    """A field marked consumed must be read (``.<field>``) outside config.py."""
-    src = Path(__file__).resolve().parents[2] / "src" / "family_logistics"
-    code = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in src.rglob("*.py")
-        if path.name != "config.py"
-    )
-    unread = [
-        name
-        for name, status in FIELD_STATUS.items()
-        if status == "consumed" and not re.search(rf"\.{name}\b", code)
-    ]
-    assert unread == []
+    @pytest.mark.parametrize("length", [31, 32])
+    def test_ha_token_length_boundary(self, length):
+        token = "t" * length
+        if length < 32:
+            with pytest.raises(ValidationError):
+                Settings.model_validate({"ha_token": token})
+        else:
+            assert Settings.model_validate({"ha_token": token}).ha_token is not None

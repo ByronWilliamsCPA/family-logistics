@@ -18,9 +18,11 @@ feed a Home Assistant status card and Apprise notifications. A local LLM may
 later explain findings, but it never decides them.
 
 **Status: M0 (discovery).** The domain core (notes parser, confirmation codes,
-passenger-level change impact, run status) is implemented and tested.
-Collection, scheduling, notifications and the Home Assistant API arrive in
-milestones M1 to M5. Production notifications stay off
+passenger-level change impact, run status) is implemented and tested, as is the
+platform around it: Alembic schema migrations, a hash-only audit log, a minimal
+Apprise API client, and `serve` startup checks that refuse to start on missing
+secrets or an out-of-date schema. Collection, scheduling, notifications and the
+Home Assistant API arrive in milestones M1 to M5. Production notifications stay off
 (`FL_NOTIFICATION_MODE=shadow`) until the household approves the defaults and a
 two-week shadow period completes.
 
@@ -67,10 +69,13 @@ uv run family-logistics healthcheck   # exit 0 when /healthz reports ok
 kill %1
 ```
 
-`serve` refuses to start without `FL_HA_TOKEN` (32 characters or more) or when
-the database schema is behind; run `migrate` first or start with
-`serve --upgrade-db` (the container image does the latter). All
-settings use the `FL_` prefix; see
+`serve` refuses to start without `FL_HA_TOKEN` (32 characters or more), when
+the database schema is behind, or when it is newer than this release; in
+production mode it also needs `FL_DATA_KEY` and `FL_APPRISE_URL`. Run `migrate`
+first or start with `serve --upgrade-db` (the container image does the latter);
+the upgrade is atomic and concurrent starts are serialized by a database lock.
+A newer schema is refused with a message and a non-zero exit, never downgraded.
+All settings use the `FL_` prefix; see
 [docs/guides/configuration.md](docs/guides/configuration.md) and
 [.env.example](.env.example).
 
@@ -93,7 +98,7 @@ private deployment repository.
 | Command | Purpose |
 |---------|---------|
 | `family-logistics serve [--upgrade-db]` | Run the API (single process, single SQLite writer); `--upgrade-db` migrates to head first |
-| `family-logistics migrate [--revision R] [--downgrade]` | Upgrade the schema to head, or explicitly downgrade to revision `R` |
+| `family-logistics migrate [--revision R] [--downgrade [--yes]]` | Upgrade the schema to head (or to `R`); a downgrade needs an explicit `--revision R` and a confirmation prompt, which `--yes` skips |
 | `family-logistics verify-db PATH` | Read-only integrity and schema-revision check of a database file (for restored backups) |
 | `family-logistics healthcheck` | Probe the local `/healthz`; used by the container healthcheck |
 | `family-logistics config` | Print non-secret configuration |
@@ -105,6 +110,7 @@ src/family_logistics/
 ├── adapters/      # caldav (read-only transport), routing, apprise, home_assistant, llama_cpp
 ├── api/           # FastAPI app, /healthz, Home Assistant routes (M3)
 ├── core/          # settings, crypto (address encryption), database, exceptions
+├── db/            # table definitions, Alembic migrations, audit log repository
 ├── domain/        # models, notes parser, confirmation, change impact, rules, run status
 ├── middleware/    # correlation IDs, security headers
 ├── services/      # collector, scheduler, assessments, notifications (M1 to M3)

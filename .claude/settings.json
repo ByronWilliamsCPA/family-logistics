@@ -9,6 +9,8 @@
       "Bash(uv run pip-audit:*)",
       "Bash(uv run pre-commit run:*)",
       "Bash(uv run mkdocs build:*)",
+      "Bash(uv run family-logistics --help:*)",
+      "Bash(uv run family-logistics verify-db:*)",
       "Bash(uv sync:*)",
       "Bash(git status:*)"
     ],
@@ -18,12 +20,17 @@
       "Read(~/.config/family-logistics/**)",
       "Read(./data/**)",
       "Read(./backups/**)",
-      "Read(./config/local/**)"
+      "Read(./config/local/**)",
+      "Read(~/.ssh/**)",
+      "Read(./.secrets*)",
+      "Read(./.infisical.json)",
+      "Read(./**/*.pem)",
+      "Bash(git diff --no-index:*)"
     ],
     "ask": [
-      "Bash(uv run family-logistics:*)",
       "Bash(git diff:*)",
       "Bash(git log:*)",
+      "Bash(uv run family-logistics migrate:*)",
       "Bash(git push:*)",
       "Bash(gh pr create:*)",
       "Bash(rm:*)"

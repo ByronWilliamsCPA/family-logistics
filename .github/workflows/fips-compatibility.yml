@@ -80,9 +80,11 @@ jobs:
 
       - name: Run FIPS compatibility check
         id: fips-check
-        shell: bash
         env:
           STRICT_MODE: ${{ inputs.strict_mode }}
+        # An explicit bash shell enables `-eo pipefail`; the default shell for
+        # `run` steps does not, which is how the gate used to be dead.
+        shell: bash
         run: |
           # Run the FIPS check script
           STRICT_FLAG=""
@@ -90,7 +92,10 @@ jobs:
             STRICT_FLAG="--strict"
           fi
 
-          # Run check and capture output
+          # #CRITICAL: security: this step is the FIPS gate; its exit status
+          # must be the checker's, not tee's.
+          # #VERIFY: PIPESTATUS[0] holds the checker's status after the pipe;
+          # the 'Check result' step fails the job when it is non-zero.
           set +e
           uv run --frozen python scripts/check_fips_compatibility.py \
             --fix-hints \
@@ -102,23 +107,34 @@ jobs:
           EXIT_CODE=${PIPESTATUS[0]}
           set -e
 
-          # Also generate JSON report
+          # Also generate the JSON report. The checker exits 1 when it finds
+          # errors but still writes the JSON, so its status is not used here;
+          # the report itself is validated below instead.
+          set +e
           uv run --frozen python scripts/check_fips_compatibility.py \
             --json \
             --include-tests \
-            > fips-report.json 2>/dev/null || true
+            > fips-report.json
+          set -e
 
-          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
-
-          # Extract summary for PR comment
-          if [ -f fips-report.json ]; then
-            ERRORS=$(jq -r '.summary.errors' fips-report.json)
-            WARNINGS=$(jq -r '.summary.warnings' fips-report.json)
-            INFO=$(jq -r '.summary.info' fips-report.json)
-            echo "errors=$ERRORS" >> $GITHUB_OUTPUT
-            echo "warnings=$WARNINGS" >> $GITHUB_OUTPUT
-            echo "info=$INFO" >> $GITHUB_OUTPUT
+          # #ASSUME: external resources: the JSON report is complete and
+          # parseable. A crashed checker leaves it empty or truncated.
+          # #VERIFY: fail closed (exit_code=1) when the summary counts are not
+          # all numbers, instead of reporting a green run.
+          if ! jq -e '.summary | [.errors, .warnings, .info] | all(type == "number")' \
+              fips-report.json > /dev/null; then
+            echo "::error::fips-report.json is missing or unparsable; treating the FIPS check as failed."
+            EXIT_CODE=1
+          else
+            # Extract summary for PR comment
+            {
+              echo "errors=$(jq -r '.summary.errors' fips-report.json)"
+              echo "warnings=$(jq -r '.summary.warnings' fips-report.json)"
+              echo "info=$(jq -r '.summary.info' fips-report.json)"
+            } >> "$GITHUB_OUTPUT"
           fi
+
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
 
       - name: Upload FIPS report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -136,15 +152,18 @@ jobs:
           FIPS_ERRORS: ${{ steps.fips-check.outputs.errors }}
           FIPS_WARNINGS: ${{ steps.fips-check.outputs.warnings }}
           FIPS_INFO: ${{ steps.fips-check.outputs.info }}
+          FIPS_EXIT_CODE: ${{ steps.fips-check.outputs.exit_code }}
         with:
           script: |
             const errors = parseInt(process.env.FIPS_ERRORS) || 0;
             const warnings = parseInt(process.env.FIPS_WARNINGS) || 0;
             const info = parseInt(process.env.FIPS_INFO) || 0;
 
+            const checkFailed = process.env.FIPS_EXIT_CODE !== '0';
+
             let status = '✅ PASSED';
             let emoji = '✅';
-            if (errors > 0) {
+            if (errors > 0 || checkFailed) {
               status = '❌ FAILED';
               emoji = '❌';
             } else if (warnings > 0) {

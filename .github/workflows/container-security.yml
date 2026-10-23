@@ -22,7 +22,7 @@ on:
       - 'pyproject.toml'
       - 'uv.lock'
   schedule:
-    # Weekly scan on Wednesdays at 7 AM UTC
+    # Weekly scan on Wednesdays at 07:29 UTC
     - cron: '29 7 * * 3'
   workflow_dispatch:
 
@@ -39,7 +39,6 @@ jobs:
     name: Container Security Scan
     permissions:
       contents: read
-      security-events: write
     uses: ByronWilliamsCPA/.github/.github/workflows/python-container-security.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
     with:
       dockerfile-path: 'Dockerfile'
@@ -48,13 +47,14 @@ jobs:
       build-image: true
       severity-threshold: 'CRITICAL,HIGH'
       fail-on-vulnerabilities: true
-      # Base-image CVEs with no upstream fix cannot be patched here; they are
-      # retired by refreshing the digest-pinned DHI base image.
-      ignore-unfixed: true
+      # Pull requests and pushes gate on fixable findings only. The weekly and
+      # manual runs report the full inventory, including base-image CVEs with
+      # no upstream fix yet, which is the only ongoing monitor of the pinned
+      # DHI base digests.
+      ignore-unfixed: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
       # Bases come from the public GHCR DHI mirror, not dhi.io.
       enable-dhi-login: false
       run-hadolint: true
       hadolint-failure-threshold: 'warning'
       generate-sbom: true
-      upload-sarif: true
       artifact-retention-days: 90
