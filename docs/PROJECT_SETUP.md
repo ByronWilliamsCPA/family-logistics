@@ -580,8 +580,9 @@ Add these as required checks:
 Your `SECURITY.md` file is already configured. Update these sections:
 
 1. **Supported Versions**: Update as you release new versions
-2. **Security Contact**: Change `security@byronwilliams.dev` if needed
-3. **PGP Key**: Add your security team's PGP key for encrypted reports
+2. **Security Contact**: Reports go only through GitHub private vulnerability
+   reporting (the security advisory link); do not add an e-mail address or a
+   PGP key
 
 ### REUSE Compliance
 
