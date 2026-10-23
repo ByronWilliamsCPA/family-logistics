@@ -51,7 +51,7 @@ MUST_NOT_IGNORE = [
 def _ignored(path: str) -> bool:
     """Return True when Git would ignore ``path``."""
     assert GIT is not None
-    result = subprocess.run(  # noqa: S603 - fixed git binary, literal paths
+    result = subprocess.run(
         [GIT, "check-ignore", "--no-index", "-q", path],
         cwd=REPO_ROOT,
         capture_output=True,
