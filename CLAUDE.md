@@ -132,8 +132,8 @@ src/family_logistics/
 ├── api/           # FastAPI app, /healthz, Home Assistant routes (M3)
 ├── core/          # config, crypto, database, exceptions
 ├── db/            # schema, audit log, migrations_api, Alembic migrations/
-├── domain/        # models, parser, confirmation, change_impact, capacity,
-│                  # stop_order, registry, rules, run_status
+├── domain/        # models, events, parser, confirmation, change_impact,
+│                  # capacity, stop_order, registry, rules, run_status
 ├── middleware/    # correlation IDs, security headers
 ├── services/      # collector, scheduler, assessments, notifications (M1-M3)
 ├── utils/         # structured logging
