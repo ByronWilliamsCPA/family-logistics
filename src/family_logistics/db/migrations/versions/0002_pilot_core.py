@@ -29,6 +29,52 @@ _TZ = sa.DateTime(timezone=True)
 _PERSON_ID_FK = "person.person_id"
 
 
+# ``alias.target_id`` is polymorphic (person, passenger or location ids) and has
+# no foreign key, so deleting a target used to leave orphan aliases. These
+# AFTER DELETE triggers remove them. They are migration-only: ``db.schema``
+# does not declare triggers (the audit_log triggers in 0001 are the precedent).
+_ALIAS_TRIGGERS = {
+    "trg_external_passenger_delete_alias": (
+        "CREATE TRIGGER trg_external_passenger_delete_alias "
+        "AFTER DELETE ON external_passenger BEGIN "
+        "DELETE FROM alias WHERE kind = 'passenger' "
+        "AND target_id = OLD.passenger_id; END"
+    ),
+    "trg_person_delete_alias": (
+        "CREATE TRIGGER trg_person_delete_alias "
+        "AFTER DELETE ON person BEGIN "
+        "DELETE FROM alias WHERE kind = 'person' "
+        "AND target_id = OLD.person_id; END"
+    ),
+    "trg_location_delete_alias": (
+        "CREATE TRIGGER trg_location_delete_alias "
+        "AFTER DELETE ON location BEGIN "
+        "DELETE FROM alias WHERE kind = 'location' "
+        "AND target_id = OLD.location_id; END"
+    ),
+}
+
+
+def _fernet_check(column: str) -> str:
+    """Return the CHECK text that keeps a ciphertext column Fernet-shaped.
+
+    Kept identical to the helper in ``db.schema``; the parity tests compare the
+    two texts.
+
+    Args:
+        column: Name of the nullable ciphertext column.
+
+    Returns:
+        SQL accepting NULL or a blob of at least 100 bytes (the size of the
+        smallest Fernet token) whose first six bytes are ``gAAAAA``.
+    """
+    return (
+        f"{column} IS NULL OR (typeof({column}) = 'blob' "
+        f"AND length({column}) >= 100 "
+        f"AND substr({column}, 1, 6) = X'674141414141')"
+    )
+
+
 def _location_fk(name: str, *, nullable: bool = True) -> sa.Column[str]:
     """Build a column referencing ``location.location_id``.
 
@@ -58,6 +104,17 @@ def upgrade() -> None:
             sa.String(16),
             nullable=False,
             server_default="unverified",
+        ),
+        # A Fernet token starts with version byte 0x80 and a small timestamp,
+        # which is "gAAAAA" in base64 (hex 674141414141); plaintext and
+        # text-typed values fail.
+        sa.CheckConstraint(
+            _fernet_check("address_ciphertext"),
+            name="ck_location_address_ciphertext_fernet",
+        ),
+        sa.CheckConstraint(
+            _fernet_check("latlon_ciphertext"),
+            name="ck_location_latlon_ciphertext_fernet",
         ),
     )
     op.create_table(
@@ -216,6 +273,14 @@ def upgrade() -> None:
             "length(trim(display_first_name)) >= 1 AND length(display_first_name) <= 60",
             name="ck_external_passenger_first_name",
         ),
+        # A passenger is either active with no end date or inactive with one.
+        sa.CheckConstraint(
+            (
+                "(active = 1 AND inactive_since IS NULL) "
+                "OR (active = 0 AND inactive_since IS NOT NULL)"
+            ),
+            name="ck_external_passenger_active_inactive_since",
+        ),
     )
     op.create_table(
         "alias",
@@ -321,14 +386,19 @@ def upgrade() -> None:
     )
     op.create_index("ix_finding_lifecycle", "finding", ["lifecycle"])
     op.create_index("ix_finding_rule", "finding", ["rule_id"])
+    for ddl in _ALIAS_TRIGGERS.values():
+        op.execute(ddl)
 
 
 def downgrade() -> None:
     """Drop the pilot-core tables in reverse dependency order.
 
     This destroys collected events, registry data and findings; it is an
-    operator action for rollback only.
+    operator action for rollback only. The alias-cleanup triggers are dropped
+    first, before the tables they sit on.
     """
+    for name in _ALIAS_TRIGGERS:
+        op.execute(f"DROP TRIGGER IF EXISTS {name}")
     op.drop_index("ix_finding_rule", table_name="finding")
     op.drop_index("ix_finding_lifecycle", table_name="finding")
     op.drop_table("finding")

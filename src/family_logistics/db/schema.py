@@ -6,9 +6,11 @@ revision's columns for query building. The pilot-core tables (revision 0002)
 also declare their indexes, unique constraints and named CHECK constraints
 here, with the same names and SQL text as the migration, so metadata and
 migration stay in parity. ``audit_log`` is the exception: its CHECK constraints
-and its append-only triggers exist only in migration 0001, so
-``metadata.create_all`` does not build a production schema. Always create
-databases with ``migrations_api.upgrade``.
+and its append-only triggers exist only in migration 0001. The triggers that
+remove ``alias`` rows when a person, external passenger or location is deleted
+(migration 0002) are likewise migration-only. So ``metadata.create_all`` does
+not build a production schema. Always create databases with
+``migrations_api.upgrade``.
 
 Pilot-core timestamp columns use ``UtcDateTime`` (ORM and Core layer only; the
 DDL type is still ``DateTime(timezone=True)``). SQLite stores naive text, so a
@@ -27,7 +29,6 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
-    LargeBinary,
     MetaData,
     String,
     Table,
@@ -36,12 +37,30 @@ from sqlalchemy import (
     func,
 )
 
-from family_logistics.db.column_types import UtcDateTime
+from family_logistics.db.column_types import FernetToken, UtcDateTime
 
 metadata = MetaData()
 
 _PERSON_ID_FK = "person.person_id"
 _LOCATION_ID_FK = "location.location_id"
+
+
+def _fernet_check(column: str) -> str:
+    """Return the CHECK text that keeps a ciphertext column Fernet-shaped.
+
+    Args:
+        column: Name of the nullable ciphertext column.
+
+    Returns:
+        SQL accepting NULL or a blob of at least 100 bytes (the size of the
+        smallest Fernet token) whose first six bytes are ``gAAAAA``.
+    """
+    return (
+        f"{column} IS NULL OR (typeof({column}) = 'blob' "
+        f"AND length({column}) >= 100 "
+        f"AND substr({column}, 1, 6) = X'674141414141')"
+    )
+
 
 audit_log = Table(
     "audit_log",
@@ -65,10 +84,14 @@ username, so rows are pseudonymous, not anonymous. See
 # ---------------------------------------------------------------------------
 # Pilot core (revision 0002_pilot_core)
 # ---------------------------------------------------------------------------
-# Registry tables hold household data. Addresses and coordinates are stored
-# only as Fernet ciphertext (``core.crypto``); names of external children are
-# first-name labels keyed by an internal passenger ID. Aliases for people,
-# passengers and locations live in the single ``alias`` table.
+# Registry tables hold household data. Registry addresses and coordinates
+# (``location.address_ciphertext`` and ``location.latlon_ciphertext``) live only
+# as Fernet ciphertext (``core.crypto``); ``FernetToken`` and a CHECK constraint
+# reject anything else. This does not cover ``source_event.location``, which is
+# the raw calendar text: Restricted, and nulled 30 days after the event ends or
+# is deleted by ``db.retention.purge_raw_source_text``. Names of external
+# children are first-name labels keyed by an internal passenger ID. Aliases for
+# people, passengers and locations live in the single ``alias`` table.
 
 calendar_source = Table(
     "calendar_source",
@@ -138,8 +161,12 @@ source_event = Table(
 )
 """Normalized occurrences, one row per (calendar, UID, RECURRENCE-ID).
 
-Rows missing from a *complete* collection window get ``deleted_at``; they are
-never removed, so change impact can compare against the prior commitment."""
+Rows missing from a *complete* collection window get ``deleted_at``; the rows
+are never removed, so change impact can compare against the prior commitment.
+``location`` and ``description`` are raw calendar text (Restricted): they are
+nulled 30 days after the event ends or is deleted by
+``db.retention.purge_raw_source_text``, while ``summary`` and the normalized
+fields persist."""
 
 sync_state = Table(
     "sync_state",
@@ -162,11 +189,23 @@ location = Table(
     Column("location_id", String(64), primary_key=True),
     Column("name", String(200), nullable=False),
     Column("ha_zone_entity_id", String(128), nullable=True),
-    Column("address_ciphertext", LargeBinary, nullable=True),
-    Column("latlon_ciphertext", LargeBinary, nullable=True),
+    Column("address_ciphertext", FernetToken(), nullable=True),
+    Column("latlon_ciphertext", FernetToken(), nullable=True),
     Column("verification_state", String(16), nullable=False, default="unverified"),
+    # The Fernet token starts with version byte 0x80 and a small timestamp, which
+    # is "gAAAAA" in base64 (hex 674141414141). The column stores the token's
+    # ASCII bytes, so the blob type and that prefix keep plaintext out.
+    CheckConstraint(
+        _fernet_check("address_ciphertext"),
+        name="ck_location_address_ciphertext_fernet",
+    ),
+    CheckConstraint(
+        _fernet_check("latlon_ciphertext"),
+        name="ck_location_latlon_ciphertext_fernet",
+    ),
 )
-"""Places. Address and ``lat,lon`` are Fernet ciphertext only."""
+"""Places. Address and ``lat,lon`` are Fernet ciphertext only, enforced by the
+``FernetToken`` column type and by CHECK constraints on the stored blob."""
 
 vehicle = Table(
     "vehicle",
@@ -254,8 +293,18 @@ external_passenger = Table(
         "length(trim(display_first_name)) >= 1 AND length(display_first_name) <= 60",
         name="ck_external_passenger_first_name",
     ),
+    # A passenger is either active with no end date or inactive with one.
+    CheckConstraint(
+        (
+            "(active = 1 AND inactive_since IS NULL) "
+            "OR (active = 0 AND inactive_since IS NOT NULL)"
+        ),
+        name="ck_external_passenger_active_inactive_since",
+    ),
 )
-"""Children of other families; ``inactive_since`` drives 90-day removal."""
+"""Children of other families. ``inactive_since`` drives removal 180 days after
+the carpool ends (180, not 90, so a summer break does not trigger removal). The
+removal job arrives with the scheduler in M3; until then rows are kept."""
 
 alias = Table(
     "alias",
@@ -269,7 +318,9 @@ alias = Table(
     ),
 )
 """Alternative names. ``kind`` is ``person``, ``passenger`` or ``location``;
-uniqueness is case-insensitive per kind."""
+uniqueness is case-insensitive per kind. ``target_id`` is polymorphic and has no
+foreign key, so migration-only triggers delete a target's aliases when the
+person, external passenger or location row is deleted."""
 
 Index(
     "ux_alias_kind_alias",

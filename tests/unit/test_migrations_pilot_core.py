@@ -12,6 +12,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     UniqueConstraint,
+    delete,
     func,
     insert,
     inspect,
@@ -49,9 +50,23 @@ AUDIT_TRIGGERS = {
     "audit_log_no_replace",
     "audit_log_no_delete",
 }
+# Migration-only triggers that delete a target's alias rows (0002).
+ALIAS_TRIGGERS = {
+    "trg_external_passenger_delete_alias",
+    "trg_person_delete_alias",
+    "trg_location_delete_alias",
+}
 NOW = datetime(2026, 10, 21, 18, 0, tzinfo=UTC)
 LATER = NOW + timedelta(hours=1)
 EARLIER = NOW - timedelta(minutes=1)
+
+# Shaped like a Fernet token (the migration CHECKs test the blob type and the
+# "gAAAAA" prefix only). Inserted with raw SQL, which bypasses ``FernetToken``.
+FERNET_SHAPED = b"gAAAAA" + b"B" * 94
+FERNET_CHECKS = {
+    "address_ciphertext": "ck_location_address_ciphertext_fernet",
+    "latlon_ciphertext": "ck_location_latlon_ciphertext_fernet",
+}
 
 # One valid row per table. Foreign keys point at the rows ``seed_registry``
 # inserts; primary keys do not collide with them.
@@ -109,8 +124,9 @@ BASE_ROWS: dict[str, dict[str, object]] = {
 }
 
 # (case id, constraint, table, overrides violating only that constraint,
-# overrides of the neighbouring valid row). ck_calendar_source_person_owner has
-# its own four-way test below.
+# overrides of the neighbouring valid row). ck_calendar_source_person_owner and
+# the two location ciphertext CHECKs have their own tests below: the latter need
+# raw SQL, because the column type rejects a bad value before the database does.
 CHECK_CASES = [
     (
         "calendar-kind",
@@ -167,6 +183,20 @@ CHECK_CASES = [
         "external_passenger",
         {"display_first_name": "x" * 61},
         {"display_first_name": "x" * 60},
+    ),
+    (
+        "passenger-active-with-inactive-date",
+        "ck_external_passenger_active_inactive_since",
+        "external_passenger",
+        {"active": True, "inactive_since": date(2026, 9, 1)},
+        {"active": False, "inactive_since": date(2026, 9, 1)},
+    ),
+    (
+        "passenger-inactive-without-date",
+        "ck_external_passenger_active_inactive_since",
+        "external_passenger",
+        {"active": False, "inactive_since": None},
+        {"active": True, "inactive_since": None},
     ),
     (
         "alias-kind",
@@ -312,6 +342,33 @@ def object_names(engine, object_type: str) -> set[str]:
         return {row[0] for row in rows if not row[0].startswith("sqlite_")}
 
 
+# Fixed statements, one per ciphertext column, so no SQL is built from strings.
+RAW_LOCATION_INSERT = {
+    "address_ciphertext": (
+        "INSERT INTO location (location_id, name, address_ciphertext) VALUES (?, ?, ?)"
+    ),
+    "latlon_ciphertext": (
+        "INSERT INTO location (location_id, name, latlon_ciphertext) VALUES (?, ?, ?)"
+    ),
+}
+STORED_TYPE = {
+    "address_ciphertext": (
+        "SELECT typeof(address_ciphertext) FROM location WHERE location_id = ?"
+    ),
+    "latlon_ciphertext": (
+        "SELECT typeof(latlon_ciphertext) FROM location WHERE location_id = ?"
+    ),
+}
+
+
+def insert_raw_location(engine, location_id: str, column: str, value: object) -> None:
+    """Insert a location with raw SQL, bypassing the ``FernetToken`` bind check."""
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            RAW_LOCATION_INSERT[column], (location_id, "Example Hall", value)
+        )
+
+
 def seed_registry(connection) -> None:
     """Insert the parent rows referenced by ``BASE_ROWS``."""
     put(connection, "location", location_id="loc-home", name="Home")
@@ -359,6 +416,14 @@ def seed_every_table(connection) -> None:
         default_dropoff_location_id="loc-school",
     )
     put(connection, "alias", **BASE_ROWS["alias"])
+    put(
+        connection,
+        "alias",
+        kind="passenger",
+        alias="Passenger E nickname",
+        target_id="pass-1",
+    )
+    put(connection, "alias", kind="location", alias="Home base", target_id="loc-home")
     put(
         connection,
         "transport_default",
@@ -475,13 +540,17 @@ class TestPilotCoreMigration:
         for name in PILOT_TABLES | {"audit_log"}:
             assert row_count(engine, name) >= 1, name
 
+        assert row_count(engine, "alias") == 3
+        assert object_names(engine, "trigger") == AUDIT_TRIGGERS | ALIAS_TRIGGERS
+
         # Dropping a parent before its children raises "FOREIGN KEY constraint
         # failed" here because the engine enforces foreign keys.
         migrations_api.downgrade(engine, "0001_baseline")
 
         assert table_names(engine) == {"audit_log"}
         assert migrations_api.current_revision(engine) == "0001_baseline"
-        assert object_names(engine, "trigger") >= AUDIT_TRIGGERS
+        # No alias trigger is left behind; the audit triggers belong to 0001.
+        assert object_names(engine, "trigger") == AUDIT_TRIGGERS
         assert object_names(engine, "index") == {"ix_audit_log_object_ref"}
         assert row_count(engine, "audit_log") == 1
 
@@ -489,10 +558,27 @@ class TestPilotCoreMigration:
 
         assert migrations_api.is_at_head(engine)
         assert table_names(engine) == PILOT_TABLES | {"audit_log"}
-        assert object_names(engine, "trigger") >= AUDIT_TRIGGERS
+        assert object_names(engine, "trigger") == AUDIT_TRIGGERS | ALIAS_TRIGGERS
         for name in PILOT_TABLES:
             assert row_count(engine, name) == 0, name
         assert row_count(engine, "audit_log") == 1
+
+    def test_alias_triggers_exist_after_upgrade_and_not_after_downgrade(self, engine):
+        migrations_api.upgrade(engine)
+        assert object_names(engine, "trigger") == AUDIT_TRIGGERS | ALIAS_TRIGGERS
+        with engine.connect() as connection:
+            rows = connection.exec_driver_sql(
+                "SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger'"
+            ).fetchall()
+        assert {row[0]: row[1] for row in rows if row[0] in ALIAS_TRIGGERS} == {
+            "trg_external_passenger_delete_alias": "external_passenger",
+            "trg_person_delete_alias": "person",
+            "trg_location_delete_alias": "location",
+        }
+
+        migrations_api.downgrade(engine, "0001_baseline")
+
+        assert object_names(engine, "trigger") == AUDIT_TRIGGERS
 
     def test_migrated_columns_match_schema_module(self, engine):
         migrations_api.upgrade(engine)
@@ -699,13 +785,65 @@ class TestCheckConstraints:
                 insert_row(seeded, "calendar_source", row)
             assert row_count(seeded, "calendar_source") == before
 
+    @pytest.mark.parametrize("column", sorted(FERNET_CHECKS))
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            b"1 Example Way, Sample Town",
+            b"hAAAAA" + b"B" * 94,
+            b"gAAAA",
+            "gAAAAA" + "B" * 94,
+            "1 Example Way, Sample Town",
+            12345,
+            b"",
+            b"gAAAAA" + b"B" * 10,
+        ],
+        ids=[
+            "plaintext-bytes",
+            "wrong-prefix",
+            "prefix-too-short",
+            "text-typed-with-fernet-prefix",
+            "text-typed-plaintext",
+            "integer",
+            "empty-blob",
+            "short-blob-with-fernet-prefix",
+        ],
+    )
+    def test_ciphertext_check_rejects_non_token_values(self, seeded, column, bad):
+        constraint = FERNET_CHECKS[column]
+        before = row_count(seeded, "location")
+        with pytest.raises(IntegrityError, match=constraint):
+            insert_raw_location(seeded, "loc-bad", column, bad)
+        assert row_count(seeded, "location") == before
+
+    @pytest.mark.parametrize("column", sorted(FERNET_CHECKS))
+    def test_ciphertext_check_accepts_a_fernet_shaped_blob(self, seeded, column):
+        before = row_count(seeded, "location")
+        insert_raw_location(seeded, "loc-ok", column, FERNET_SHAPED)
+        assert row_count(seeded, "location") == before + 1
+        with seeded.connect() as connection:
+            stored = connection.exec_driver_sql(
+                STORED_TYPE[column], ("loc-ok",)
+            ).scalar()
+        assert stored == "blob"
+
+    @pytest.mark.parametrize("column", sorted(FERNET_CHECKS))
+    def test_ciphertext_check_allows_null(self, seeded, column):
+        before = row_count(seeded, "location")
+        insert_raw_location(seeded, "loc-null", column, None)
+        assert row_count(seeded, "location") == before + 1
+
     def test_every_declared_check_has_a_behaviour_test(self):
         declared = {
             name
             for table_name in PILOT_TABLES
             for name in declared_checks(schema.metadata.tables[table_name])
         }
-        covered = {case[1] for case in CHECK_CASES} | {OWNER_CHECK}
+        covered = (
+            {case[1] for case in CHECK_CASES}
+            | {OWNER_CHECK}
+            | set(FERNET_CHECKS.values())
+        )
         assert covered == declared
 
     @pytest.mark.parametrize(
@@ -820,3 +958,87 @@ class TestMetadataParity:
                 for check, text in migrated_checks(inspector, name).items()
             }
             assert migrated == declared, name
+
+
+# (table, key column, alias kind, row to insert): each row has no dependants, so
+# it can be deleted without tripping a foreign key.
+TRIGGER_CASES = [
+    pytest.param(
+        "external_passenger",
+        "passenger_id",
+        "passenger",
+        BASE_ROWS["external_passenger"],
+        id="external-passenger",
+    ),
+    pytest.param(
+        "person",
+        "person_id",
+        "person",
+        BASE_ROWS["person"],
+        id="person",
+    ),
+    pytest.param(
+        "location",
+        "location_id",
+        "location",
+        {"location_id": "loc-extra", "name": "Example Hall"},
+        id="location",
+    ),
+]
+
+
+@pytest.mark.unit
+class TestAliasCleanupTriggers:
+    """Deleting a person, passenger or location removes only its own aliases."""
+
+    @pytest.mark.parametrize(("table_name", "key", "kind", "row"), TRIGGER_CASES)
+    def test_delete_removes_only_the_matching_kind_and_target(
+        self, seeded, table_name, key, kind, row
+    ):
+        target = str(row[key])
+        other_kinds = sorted({"person", "passenger", "location"} - {kind})
+        insert_row(seeded, table_name, dict(row))
+        alias_rows = [
+            # Removed: the deleted row's own aliases (two, to show it is not a
+            # single-row delete).
+            {"kind": kind, "alias": "own one", "target_id": target},
+            {"kind": kind, "alias": "own two", "target_id": target},
+            # Survive: another kind that happens to share the target id string.
+            {"kind": other_kinds[0], "alias": "same id one", "target_id": target},
+            {"kind": other_kinds[1], "alias": "same id two", "target_id": target},
+            # Survive: the same kind pointing at a different target.
+            {"kind": kind, "alias": "other target", "target_id": "someone-else"},
+        ]
+        for alias_row in alias_rows:
+            insert_row(seeded, "alias", alias_row)
+        assert row_count(seeded, "alias") == len(alias_rows)
+
+        with seeded.begin() as connection:
+            connection.execute(
+                delete(schema.metadata.tables[table_name]).where(
+                    schema.metadata.tables[table_name].c[key] == target
+                )
+            )
+
+        with seeded.connect() as connection:
+            remaining = {
+                row.alias for row in connection.execute(select(schema.alias.c.alias))
+            }
+        assert remaining == {"same id one", "same id two", "other target"}
+
+    @pytest.mark.parametrize(("table_name", "key", "kind", "row"), TRIGGER_CASES)
+    def test_delete_of_another_row_leaves_aliases_alone(
+        self, seeded, table_name, key, kind, row
+    ):
+        target = str(row[key])
+        insert_row(seeded, table_name, dict(row))
+        insert_row(
+            seeded, "alias", {"kind": kind, "alias": "kept", "target_id": target}
+        )
+        with seeded.begin() as connection:
+            connection.execute(
+                delete(schema.metadata.tables[table_name]).where(
+                    schema.metadata.tables[table_name].c[key] == "no-such-row"
+                )
+            )
+        assert row_count(seeded, "alias") == 1

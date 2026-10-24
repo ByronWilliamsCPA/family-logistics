@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime
+from sqlalchemy import DateTime, LargeBinary
 from sqlalchemy.types import TypeDecorator
 
 if TYPE_CHECKING:
@@ -81,3 +82,101 @@ class UtcDateTime(TypeDecorator[datetime]):
         if value.tzinfo is None:
             return value.replace(tzinfo=UTC)
         return value.astimezone(UTC)
+
+
+# A Fernet token is url-safe base64 of: version byte 0x80, an 8-byte big-endian
+# timestamp, a 16-byte IV, the ciphertext (a multiple of 16 bytes) and a 32-byte
+# HMAC. The first six characters encode 0x80 followed by the four high timestamp
+# bytes, which stay zero until the year 2106, so every token starts "gAAAAA".
+# The smallest token (empty plaintext) is 73 bytes, which is 100 characters of
+# padded base64.
+_FERNET_SHAPE = re.compile(r"gAAAAA[A-Za-z0-9_-]*={0,2}")
+_FERNET_MIN_LENGTH = 100
+
+
+def _ascii_text(value: object) -> str | None:
+    """Return ``value`` as ASCII text, or None if it is not ``str`` or ASCII bytes.
+
+    Args:
+        value: The candidate value.
+
+    Returns:
+        The text, or None when the type or the encoding is wrong.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        try:
+            return value.decode("ascii")
+        except UnicodeDecodeError:
+            return None
+    return None
+
+
+class FernetToken(TypeDecorator[str]):
+    """A protected value column that only accepts Fernet-shaped token text.
+
+    The Python side is ``str`` so it round-trips with ``AddressCipher.encrypt``
+    (which returns token text) and ``AddressCipher.decrypt`` (which takes it).
+    The stored form is the token's ASCII bytes in a ``LargeBinary`` column. On
+    write, ``None`` passes through, ``str`` (ASCII) and ``bytes`` are accepted,
+    and anything else, or any value that is not shaped like a Fernet token
+    (``gAAAAA`` prefix, url-safe base64 alphabet with optional ``=`` padding, at
+    least 100 characters), raises ``ValueError``. The error text never contains
+    the offending value, so a plaintext address passed by mistake does not reach
+    logs or API responses.
+
+    # #CRITICAL: Security: this is a shape check, not authentication. Checking
+    # the HMAC needs the key, which a column type must not hold, so a forged
+    # value that merely looks like a token passes. It stops the accidental
+    # plaintext write, which is the failure that exposes an address.
+    # #VERIFY: only ``core.crypto.AddressCipher`` produces values for these
+    # columns; a raw SQL writer is limited by the migration CHECK constraints,
+    # which test the blob type and the ``gAAAAA`` prefix but not the HMAC.
+    """
+
+    impl = LargeBinary
+    cache_ok = True
+
+    def process_bind_param(self, value: object, dialect: Dialect) -> bytes | None:
+        """Reject anything that is not Fernet-shaped and store its ASCII bytes.
+
+        Args:
+            value: Token text or bytes, or None.
+            dialect: The active dialect (unused).
+
+        Returns:
+            The token as ASCII bytes, or None.
+
+        Raises:
+            ValueError: If ``value`` is not None, ``str`` or ASCII ``bytes``, or
+                is not shaped like a Fernet token. The message never contains
+                the value.
+        """
+        del dialect
+        if value is None:
+            return None
+        text = _ascii_text(value)
+        if (
+            text is None
+            or len(text) < _FERNET_MIN_LENGTH
+            or _FERNET_SHAPE.fullmatch(text) is None
+        ):
+            msg = "protected value rejected: not a Fernet token"
+            raise ValueError(msg)
+        return text.encode("ascii")
+
+    def process_result_value(self, value: bytes | None, dialect: Dialect) -> str | None:
+        """Return the stored token bytes as text.
+
+        Args:
+            value: The stored bytes, or None.
+            dialect: The active dialect (unused).
+
+        Returns:
+            The token as ``str``, or None.
+        """
+        del dialect
+        if value is None:
+            return None
+        return bytes(value).decode("ascii")
