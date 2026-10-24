@@ -409,7 +409,7 @@ Set these in Repository Settings > Secrets and variables > Actions:
 
 | Secret | Required For | How to Get |
 |--------|--------------|------------|
-| `FL_PRIVATE_TERMS` | Private-terms check | Newline-separated real names and places that must never be committed (kept only as a secret) |
+| `FL_PRIVATE_TERMS` | Private-terms check | Newline-separated terms that must never be committed (kept only as a secret): children's names, school names and street names. Never include anything that appears in a maintainer's own commit name or e-mail (such as the family surname): identity scanning would fail every commit |
 | `CODECOV_TOKEN` | Codecov uploads | codecov.io > Settings > Upload Token |
 | `SONAR_TOKEN` | SonarCloud analysis | sonarcloud.io > Account > Security |
 | `SCORECARD_TOKEN` | Scorecard (optional) | GitHub PAT with repo scope |

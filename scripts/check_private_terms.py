@@ -31,6 +31,11 @@ What is scanned:
   and e-mail addresses, the message, and the full diff including the paths in
   the diff headers, so a term added and later removed is still caught.
 
+Because commit identities are scanned, the term list must not contain anything
+that appears in a maintainer's own commit name or e-mail address (such as the
+family surname): identity scanning would then fail every commit. The intended
+terms are children's names, school names and street names.
+
 Files are decoded as UTF-8 when possible. A file that is not valid UTF-8 is
 never skipped: it is scanned as Latin-1, as UTF-16 and UTF-32 (with or without
 a BOM) and with NUL bytes removed, so a term inside a UTF-16 document, a Latin-1
