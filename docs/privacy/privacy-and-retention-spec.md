@@ -49,7 +49,7 @@ send more than a channel needs, and treat other families' data as on loan.
 | Trip and trip passenger | trip_id, type, status, driver, origin, destinations, constraints, sequence | C (R where an external passenger or external address is involved) | Destinations stored as location IDs, not free-text addresses. |
 | Finding | issue_id, rule_id, severity, affected IDs, first/last seen, resolved_at, evidence | C | Evidence references IDs, not raw notes text. |
 | Analysis run | run_id, trigger, window, freshness, rules version, state, counts, output | I (output C) | Report HTML stored as an artifact with run-log retention. |
-| Audit | timestamp, actor, object, prior hash, new hash, action, correlation ID | I | Hashes only, never content. The hashes are unkeyed SHA-256 of a canonical state, so they are pseudonymous, not anonymous: anyone who can guess a state can confirm it. Whether to key them is an open decision. The table is append-only: the database rejects updates, overwrites and deletes of rows younger than 365 days. |
+| Audit | timestamp, actor, object, prior hash, new hash, hash key version, action, correlation ID | I | Hashes only, never content. The hashes are HMAC-SHA256 of a canonical state under `FL_AUDIT_KEY` (kept in the secret store, never in the database), and each row records the key version. Holding the table alone does not let anyone confirm a guessed state; whoever also holds the key can, so rows stay pseudonymous, not anonymous. The table is append-only: the database rejects updates, overwrites and deletes of rows younger than 365 days. |
 | HA snapshot | school/district events, zones, fetched_at | C | Only the configured school calendars and zones; no person-tracker or device-location entities are ever accepted. |
 | Route cache | endpoints (location IDs), bucket, duration, source, age | C | Keyed by location ID, not address. |
 
@@ -169,7 +169,7 @@ verification.
 Treat as an incident: secret exposure, a log or push containing an external
 address, unauthorised registry access, or a backup leaving the house.
 
-1. Rotate the affected secret (Apple app password, `FL_HA_TOKEN`, `FL_DATA_KEY`)
+1. Rotate the affected secret (Apple app password, `FL_HA_TOKEN`, `FL_DATA_KEY`, `FL_AUDIT_KEY`)
    and revoke the old one.
 2. Purge the exposed artifact where possible (log, notification history).
 3. If another family's data was exposed, Morgan or Riley tells that family.

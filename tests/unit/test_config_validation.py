@@ -155,7 +155,23 @@ class TestCaldavUrl:
             build(caldav_url=url)
 
     def test_scheme_is_case_insensitive(self):
-        assert build(caldav_url="HTTPS://caldav.example.invalid")
+        assert build(
+            caldav_url="HTTPS://caldav.example.invalid",
+            caldav_allowed_hosts="example.invalid",
+        )
+
+    def test_default_url_is_inside_the_default_allowlist(self):
+        settings = Settings()
+        assert settings.caldav_url == "https://caldav.icloud.com"
+        assert settings.caldav_allowed_hosts == ["icloud.com"]
+
+    def test_url_outside_the_allowlist_is_rejected(self):
+        with pytest.raises(ValidationError, match="FL_CALDAV_ALLOWED_HOSTS"):
+            build(caldav_url="https://caldav.example.invalid")
+
+    def test_lookalike_url_is_rejected(self):
+        with pytest.raises(ValidationError, match="FL_CALDAV_ALLOWED_HOSTS"):
+            build(caldav_url="https://evil-icloud.com")
 
 
 @pytest.mark.unit

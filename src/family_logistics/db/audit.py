@@ -2,20 +2,27 @@
 
 Every registry change and confirmation-state change is recorded as one row:
 when, who (an actor identifier such as an Authentik username or ``system``),
-which object (an internal reference such as ``trip:<id>``), what action, and
-SHA-256 hashes of the state before and after. The state itself is never stored
-here; only the hashes are.
+which object (an internal reference such as ``trip:<id>``), what action,
+HMAC-SHA256 digests of the state before and after, and the version of the key
+that produced them. The state itself is never stored here; only the digests are.
 
-#CRITICAL: Security: the hashes are unkeyed SHA-256, so they are pseudonymous,
-not anonymous. Anyone holding the table can confirm a guess of a low-entropy
-state (a name, a street address) by hashing the guess. Actor, object_ref,
-action and correlation_id are stored as given, so they must be internal
-identifiers, never names; the code checks their length, not their meaning.
-Treat the table as Confidential audit evidence (privacy spec section 2), not as
-anonymised data.
-#VERIFY: callers put protected values into a state only as a keyed digest
-(``AddressCipher``) and never as ``SensitiveStr``, which ``state_hash``
-refuses; whether to key the audit hash itself is an open owner decision.
+#CRITICAL: Security: the digests are HMAC-SHA256 under ``FL_AUDIT_KEY`` (32
+random bytes, never stored in the database), so holding the table alone does
+not let anyone confirm a guess of a low-entropy state (a name, a street
+address) by hashing it. There is no unkeyed fallback: ``state_hash`` requires
+the key and ``AuditRepository.record`` raises ``ConfigurationError`` without
+one. The rows stay pseudonymous: whoever also holds the key can still confirm a
+guess, and actor, object_ref, action and correlation_id are stored as given, so
+they must be internal identifiers, never names; the code checks their length,
+not their meaning. ``hash_key_version`` is stored per row so a future rotation
+can tell which key produced a digest. Treat the table as Confidential audit
+evidence (privacy spec section 2), not as anonymised data, and keep the key in
+the secret store, separate from ``FL_DATA_KEY``.
+#VERIFY: tests/unit/test_audit.py::TestStateHash (same key and input give the
+same digest, another key does not, it differs from plain SHA-256, the key is
+checked) and TestRecord (key required, version persisted); callers put protected
+values into a state only as a keyed digest (``AddressCipher``) and never as
+``SensitiveStr``, which ``state_hash`` refuses.
 
 #CRITICAL: Data integrity: the table is append-only. The repository exposes no
 update or delete, and migration 0001's triggers abort, on every connection,
@@ -30,19 +37,28 @@ bare sqlite3 connection; downgrades are an explicit, confirmed operator action.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 from sqlalchemy import insert, select
 
-from family_logistics.core.exceptions import DatabaseError, ValidationError
+from family_logistics.core.config import decode_audit_key
+from family_logistics.core.exceptions import (
+    ConfigurationError,
+    DatabaseError,
+    ValidationError,
+)
 from family_logistics.db.schema import audit_log
 
 if TYPE_CHECKING:
+    from pydantic import SecretStr
     from sqlalchemy.engine import Engine
+
+    from family_logistics.core.config import Settings
 
 MAX_ACTOR_LENGTH = 64
 MAX_REF_LENGTH = 128
@@ -72,24 +88,54 @@ def _canonical(value: object) -> str:
     raise TypeError(msg)
 
 
-def state_hash(state: object | None) -> str | None:
-    """Hash a JSON-serialisable state canonically.
+def _key_bytes(key: SecretStr) -> bytes:
+    """Return the raw HMAC key bytes of an audit key.
+
+    Args:
+        key: ``Settings.audit_key``.
+
+    Returns:
+        The 32 key bytes.
+
+    Raises:
+        ConfigurationError: If the key is not 32 bytes of url-safe base64. The
+            message never echoes the key.
+    """
+    try:
+        return decode_audit_key(key.get_secret_value())
+    except ValueError:
+        msg = "FL_AUDIT_KEY must be 32 random bytes as url-safe base64 (44 characters)"
+        # Raised outside the handler so the key-bearing error is not chained.
+        raise ConfigurationError(msg) from None
+
+
+def state_hash(state: object | None, *, key: SecretStr) -> str | None:
+    """Digest a JSON-serialisable state canonically, keyed with HMAC-SHA256.
 
     Keys are sorted, separators are compact, non-ASCII is escaped, and dates,
     times and datetimes are encoded as ISO 8601. Anything else is refused, so
-    the same state always has the same hash.
+    the same state under the same key always has the same digest. There is no
+    unkeyed mode.
 
     Args:
         state: State to hash, or None when there is no state (create/delete).
+        key: ``Settings.audit_key``; checked even when ``state`` is None.
 
     Returns:
-        Hex SHA-256 of the canonical JSON, or None for no state.
+        64 lowercase hex characters of HMAC-SHA256 over the canonical JSON, or
+        None for no state.
 
     Raises:
         ValidationError: For a value with no canonical encoding, dictionary
             keys of mixed types, or NaN or infinity. The message names types,
             never values.
+
+    Note:
+        A ``key`` that is not 32 bytes of url-safe base64 raises
+        ConfigurationError, even when ``state`` is None; the message never
+        echoes the key.
     """
+    key_bytes = _key_bytes(key)
     if state is None:
         return None
     try:
@@ -103,7 +149,7 @@ def state_hash(state: object | None) -> str | None:
     except (TypeError, ValueError) as exc:
         msg = f"state cannot be hashed canonically: {exc}"
         raise ValidationError(msg, field="state") from exc
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return hmac.new(key_bytes, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,9 +161,10 @@ class AuditEntry:
         actor: Who made the change.
         object_ref: Internal reference of the changed object.
         action: What happened (for example ``create``, ``update``).
-        prior_hash: Hash of the state before, if any.
-        new_hash: Hash of the state after, if any.
+        prior_hash: Keyed digest of the state before, if any.
+        new_hash: Keyed digest of the state after, if any.
         correlation_id: Request or run correlation ID, if any.
+        hash_key_version: Version of ``FL_AUDIT_KEY`` that produced the digests.
     """
 
     recorded_at: datetime
@@ -127,9 +174,10 @@ class AuditEntry:
     prior_hash: str | None
     new_hash: str | None
     correlation_id: str | None
+    hash_key_version: int
 
     def __post_init__(self) -> None:
-        """Reject a naive timestamp or a hash that is not 64 lowercase hex.
+        """Reject a naive timestamp, a malformed hash or a key version below 1.
 
         Raises:
             ValidationError: If an invariant does not hold.
@@ -144,6 +192,9 @@ class AuditEntry:
             if value is not None and not _HASH.fullmatch(value):
                 msg = f"audit {name} must be 64 lowercase hex characters"
                 raise ValidationError(msg, field=name)
+        if self.hash_key_version < 1:
+            msg = "audit hash_key_version must be at least 1"
+            raise ValidationError(msg, field="hash_key_version")
 
 
 def _check_fields(
@@ -179,10 +230,38 @@ class AuditRepository:
 
     Args:
         engine: The application engine (schema at head).
+        key: ``Settings.audit_key``. May be None for read-only use; ``record``
+            then raises ``ConfigurationError`` instead of writing anything.
+        key_version: ``Settings.audit_key_version``, stored with every row.
+
+    Raises:
+        ConfigurationError: If ``key_version`` is below 1.
     """
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(
+        self, engine: Engine, *, key: SecretStr | None, key_version: int = 1
+    ) -> None:
+        if key_version < 1:
+            msg = "audit key version must be at least 1"
+            raise ConfigurationError(msg)
         self._engine = engine
+        self._key = key
+        self._key_version = key_version
+
+    @classmethod
+    def from_settings(cls, engine: Engine, settings: Settings) -> Self:
+        """Build a repository keyed from the application settings.
+
+        Args:
+            engine: The application engine (schema at head).
+            settings: Application settings (``audit_key``, ``audit_key_version``).
+
+        Returns:
+            A repository that keys and versions every digest it records.
+        """
+        return cls(
+            engine, key=settings.audit_key, key_version=settings.audit_key_version
+        )
 
     def record(  # noqa: PLR0913 - keyword-only audit fields
         self,
@@ -194,7 +273,7 @@ class AuditRepository:
         new_state: object | None = None,
         correlation_id: str | None = None,
     ) -> AuditEntry:
-        """Append one audit row with hashes of the prior and new state.
+        """Append one audit row with keyed digests of the prior and new state.
 
         Args:
             actor: Who made the change.
@@ -207,21 +286,29 @@ class AuditRepository:
         Returns:
             The recorded entry.
 
+        Raises:
+            ConfigurationError: If the repository has no audit key.
+
         Note:
             The row commits in its own transaction, separately from the change
             it describes. A reference field that is empty or longer than its
             column, or a state ``state_hash`` cannot encode, raises
-            ValidationError. Nothing is written in either case.
+            ValidationError; a malformed audit key also raises
+            ConfigurationError. Nothing is written in any of these cases.
         """
+        if self._key is None:
+            msg = "FL_AUDIT_KEY is required before recording audit entries"
+            raise ConfigurationError(msg)
         _check_fields(actor, object_ref, action, correlation_id)
         entry = AuditEntry(
             recorded_at=datetime.now(UTC),
             actor=actor,
             object_ref=object_ref,
             action=action,
-            prior_hash=state_hash(prior_state),
-            new_hash=state_hash(new_state),
+            prior_hash=state_hash(prior_state, key=self._key),
+            new_hash=state_hash(new_state, key=self._key),
             correlation_id=correlation_id,
+            hash_key_version=self._key_version,
         )
         with self._engine.begin() as connection:
             connection.execute(
@@ -233,6 +320,7 @@ class AuditRepository:
                     prior_hash=entry.prior_hash,
                     new_hash=entry.new_hash,
                     correlation_id=entry.correlation_id,
+                    hash_key_version=entry.hash_key_version,
                 )
             )
         return entry
@@ -255,6 +343,7 @@ class AuditRepository:
                 audit_log.c.prior_hash,
                 audit_log.c.new_hash,
                 audit_log.c.correlation_id,
+                audit_log.c.hash_key_version,
             )
             .where(audit_log.c.object_ref == object_ref)
             .order_by(audit_log.c.id)
@@ -269,6 +358,14 @@ class AuditRepository:
 def _optional_text(value: object) -> str | None:
     """Return a column value as text, keeping NULL as None."""
     return None if value is None else str(value)
+
+
+def _key_version(value: object) -> int:
+    """Return the stored key version, refusing anything but an integer."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = "audit_log.hash_key_version is not an integer"
+        raise DatabaseError(msg, operation="read", table="audit_log")
+    return value
 
 
 def _entry_from_row(row: dict[str, object]) -> AuditEntry:
@@ -288,4 +385,5 @@ def _entry_from_row(row: dict[str, object]) -> AuditEntry:
         prior_hash=_optional_text(row["prior_hash"]),
         new_hash=_optional_text(row["new_hash"]),
         correlation_id=_optional_text(row["correlation_id"]),
+        hash_key_version=_key_version(row["hash_key_version"]),
     )

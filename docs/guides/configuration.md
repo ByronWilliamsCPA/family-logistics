@@ -38,6 +38,7 @@ shows non-secret values only.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `FL_CALDAV_URL` | `https://caldav.icloud.com` | CalDAV base URL; must use `https://` |
+| `FL_CALDAV_ALLOWED_HOSTS` | `icloud.com` | Comma-separated registrable domains the collector may reach, for the first request and every redirect hop; a host matches the domain or any subdomain (`p42-caldav.icloud.com`), never a lookalike (`evil-icloud.com`). Entries are bare domains: no scheme, path, port or wildcard. `FL_CALDAV_URL` must be inside it |
 | `FL_CALDAV_USERNAME` | unset | Dedicated Apple ID holding View Only calendar shares |
 | `FL_CALDAV_APP_PASSWORD` | unset | **Secret.** App-specific password for that Apple ID |
 | `FL_CALDAV_CALENDARS` | empty | Comma-separated calendar hrefs to collect |
@@ -50,6 +51,8 @@ shows non-secret values only.
 | `FL_PROXY_TRUSTED_CIDRS` | empty | Reverse-proxy addresses whose identity headers are believed; empty trusts none |
 | `FL_UI_ALLOWED_USERS` | empty | Single sign-on usernames allowed into the registry UI; empty denies everyone |
 | `FL_DATA_KEY` | unset | **Secret.** Fernet key encrypting protected addresses at rest; required before any address is stored, and `serve` refuses to start without it when `FL_NOTIFICATION_MODE=production` |
+| `FL_AUDIT_KEY` | unset | **Secret.** HMAC-SHA256 key for the audit-log state hashes: 32 random bytes as url-safe base64 (44 characters, `python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"`); must differ from `FL_DATA_KEY`; no audit row is written without it, and `serve` refuses to start without it when `FL_NOTIFICATION_MODE=production` |
+| `FL_AUDIT_KEY_VERSION` | `1` | Version stored with every audit row so a key rotation can be told apart; at least 1 |
 
 ## Notifications
 

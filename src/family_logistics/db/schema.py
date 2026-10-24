@@ -23,9 +23,11 @@ audit_log = Table(
     Column("action", String(32), nullable=False),
     Column("prior_hash", String(64), nullable=True),
     Column("new_hash", String(64), nullable=True),
+    Column("hash_key_version", Integer, nullable=False),
     Column("correlation_id", String(64), nullable=True),
 )
 """Append-only audit trail (enforced by triggers in migration 0001). Rows carry
-SHA-256 hashes of the prior and new state, never the state itself; the actor is
-a username, so rows are pseudonymous, not anonymous. See
+HMAC-SHA256 digests of the prior and new state (never the state itself) and the
+version of the key that produced them (``hash_key_version``); the actor is a
+username, so rows are pseudonymous, not anonymous. See
 ``family_logistics.db.audit`` for what the hashes do and do not protect."""

@@ -117,12 +117,13 @@ class TestStartupProblems:
             }
         )
         problems = startup_problems(settings, upgrade_db=True)
-        assert problems[:3] == [
+        assert problems[:4] == [
             "FL_HA_TOKEN is required to serve",
             "FL_DATA_KEY is required when FL_NOTIFICATION_MODE=production",
+            "FL_AUDIT_KEY is required when FL_NOTIFICATION_MODE=production",
             "FL_APPRISE_URL is required when FL_NOTIFICATION_MODE=production",
         ]
-        assert "does not exist" in problems[3]
+        assert "does not exist" in problems[4]
 
     def test_schema_newer_than_head_is_refused(self, tmp_path):
         _database_at(tmp_path / "fl.db", FUTURE_REVISION)
@@ -166,9 +167,12 @@ class TestStartupProblems:
         problems = startup_problems(settings_for(tmp_path), upgrade_db=True)
         assert problems == [f"database {tmp_path / 'fl.db'} cannot be opened"]
 
-    def test_production_requires_data_key(self, tmp_path):
+    def test_production_requires_data_key(self, tmp_path, audit_key_text):
         settings = settings_for(
-            tmp_path, notification_mode="production", apprise_url=APPRISE_URL
+            tmp_path,
+            notification_mode="production",
+            apprise_url=APPRISE_URL,
+            audit_key=audit_key_text,
         )
         problems = startup_problems(settings, upgrade_db=True)
         assert problems == [
@@ -178,15 +182,45 @@ class TestStartupProblems:
             tmp_path,
             notification_mode="production",
             apprise_url=APPRISE_URL,
+            audit_key=audit_key_text,
             data_key=Fernet.generate_key().decode(),
         )
         assert startup_problems(keyed, upgrade_db=True) == []
 
-    def test_production_requires_apprise(self, tmp_path):
+    def test_production_requires_audit_key(self, tmp_path):
+        settings = settings_for(
+            tmp_path,
+            notification_mode="production",
+            apprise_url=APPRISE_URL,
+            data_key=Fernet.generate_key().decode(),
+        )
+        assert startup_problems(settings, upgrade_db=True) == [
+            "FL_AUDIT_KEY is required when FL_NOTIFICATION_MODE=production"
+        ]
+
+    def test_shadow_mode_does_not_require_the_audit_key(self, tmp_path):
+        assert startup_problems(settings_for(tmp_path), upgrade_db=True) == []
+
+    def test_serve_refuses_production_without_the_audit_key(
+        self, tmp_path, monkeypatch, fresh_settings
+    ):
+        monkeypatch.setattr(cli_module, "create_sqlite_engine", _must_not_serve)
+        monkeypatch.setenv("FL_HA_TOKEN", GOOD_TOKEN)
+        monkeypatch.setenv("FL_DATABASE_PATH", str(tmp_path / "fl.db"))
+        monkeypatch.setenv("FL_NOTIFICATION_MODE", "production")
+        monkeypatch.setenv("FL_APPRISE_URL", APPRISE_URL)
+        monkeypatch.setenv("FL_DATA_KEY", Fernet.generate_key().decode())
+        result = CliRunner().invoke(cli, ["serve", "--upgrade-db"])
+        assert result.exit_code == 2
+        assert "FL_AUDIT_KEY is required" in result.output
+        assert not (tmp_path / "fl.db").exists()
+
+    def test_production_requires_apprise(self, tmp_path, audit_key_text):
         settings = settings_for(
             tmp_path,
             notification_mode="production",
             data_key=Fernet.generate_key().decode(),
+            audit_key=audit_key_text,
         )
         assert startup_problems(settings, upgrade_db=True) == [
             "FL_APPRISE_URL is required when FL_NOTIFICATION_MODE=production"

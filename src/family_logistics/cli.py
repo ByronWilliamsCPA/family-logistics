@@ -3,8 +3,8 @@
 Subcommands:
 
 - ``serve``: run the API after startup checks (refuses to start without
-  ``FL_HA_TOKEN``, without ``FL_DATA_KEY`` and ``FL_APPRISE_URL`` in production
-  notification mode, with an unusable database, on a schema newer than this
+  ``FL_HA_TOKEN``, without ``FL_DATA_KEY``, ``FL_AUDIT_KEY`` and
+  ``FL_APPRISE_URL`` in production notification mode, with an unusable database, on a schema newer than this
   release, or on a schema behind head unless ``--upgrade-db`` is given).
 - ``healthcheck``: one-shot probe of ``/healthz`` for the container healthcheck.
 - ``config``: print non-secret configuration.
@@ -72,6 +72,10 @@ def _config_problems(settings: Settings) -> list[str]:
         if settings.data_key is None:
             problems.append(
                 "FL_DATA_KEY is required when FL_NOTIFICATION_MODE=production"
+            )
+        if settings.audit_key is None:
+            problems.append(
+                "FL_AUDIT_KEY is required when FL_NOTIFICATION_MODE=production"
             )
         if settings.apprise_url is None:
             problems.append(

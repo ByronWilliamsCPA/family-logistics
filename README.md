@@ -71,7 +71,8 @@ kill %1
 
 `serve` refuses to start without `FL_HA_TOKEN` (32 characters or more), when
 the database schema is behind, or when it is newer than this release; in
-production mode it also needs `FL_DATA_KEY` and `FL_APPRISE_URL`. Run `migrate`
+production mode it also needs `FL_DATA_KEY`, `FL_AUDIT_KEY` and
+`FL_APPRISE_URL`. Run `migrate`
 first or start with `serve --upgrade-db` (the container image does the latter);
 the upgrade is atomic and concurrent starts are serialized by a database lock.
 A newer schema is refused with a message and a non-zero exit, never downgraded.

@@ -1,42 +1,50 @@
-"""Audit log: hashes only; no update, no overwrite, delete only after 365 days."""
+"""Audit log: keyed hashes only; no update, no overwrite, delete only after 365 days."""
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import inspect
+import re
 import sqlite3
 from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.exc import DatabaseError, IntegrityError
 
 from family_logistics.core import exceptions
+from family_logistics.core.config import Settings
 from family_logistics.core.database import create_sqlite_engine
 from family_logistics.db import audit, migrations_api
 from family_logistics.db.audit import AuditEntry, AuditRepository, state_hash
 from family_logistics.domain.models import SensitiveStr
 
 INSERT = {
-    "plain": "INSERT INTO audit_log (id, recorded_at, actor, object_ref, action) "
-    "VALUES (:id, :recorded_at, 'forger', 'x:1', 'create')",
+    "plain": "INSERT INTO audit_log (id, recorded_at, actor, object_ref, action, hash_key_version) "
+    "VALUES (:id, :recorded_at, 'forger', 'x:1', 'create', 1)",
     "OR REPLACE": "INSERT OR REPLACE INTO audit_log "
-    "(id, recorded_at, actor, object_ref, action) "
-    "VALUES (:id, :recorded_at, 'forger', 'x:1', 'create')",
+    "(id, recorded_at, actor, object_ref, action, hash_key_version) "
+    "VALUES (:id, :recorded_at, 'forger', 'x:1', 'create', 1)",
     "OR IGNORE": "INSERT OR IGNORE INTO audit_log "
-    "(id, recorded_at, actor, object_ref, action) "
-    "VALUES (:id, :recorded_at, 'forger', 'x:1', 'create')",
+    "(id, recorded_at, actor, object_ref, action, hash_key_version) "
+    "VALUES (:id, :recorded_at, 'forger', 'x:1', 'create', 1)",
     "OR ROLLBACK": "INSERT OR ROLLBACK INTO audit_log "
-    "(id, recorded_at, actor, object_ref, action) "
-    "VALUES (:id, :recorded_at, 'forger', 'x:1', 'create')",
-    "REPLACE": "REPLACE INTO audit_log (id, recorded_at, actor, object_ref, action) "
-    "VALUES (:id, :recorded_at, 'forger', 'x:1', 'create')",
-    "UPSERT": "INSERT INTO audit_log (id, recorded_at, actor, object_ref, action) "
-    "VALUES (:id, :recorded_at, 'forger', 'x:1', 'create') "
+    "(id, recorded_at, actor, object_ref, action, hash_key_version) "
+    "VALUES (:id, :recorded_at, 'forger', 'x:1', 'create', 1)",
+    "REPLACE": "REPLACE INTO audit_log (id, recorded_at, actor, object_ref, action, hash_key_version) "
+    "VALUES (:id, :recorded_at, 'forger', 'x:1', 'create', 1)",
+    "UPSERT": "INSERT INTO audit_log (id, recorded_at, actor, object_ref, action, hash_key_version) "
+    "VALUES (:id, :recorded_at, 'forger', 'x:1', 'create', 1) "
     "ON CONFLICT(id) DO UPDATE SET actor = 'forger'",
 }
 INSERT_FULL = text(
     "INSERT INTO audit_log (id, recorded_at, actor, object_ref, action, "
-    "prior_hash, new_hash, correlation_id) VALUES (:id, :recorded_at, :actor, "
-    ":object_ref, :action, :prior_hash, :new_hash, :correlation_id)"
+    "prior_hash, new_hash, correlation_id, hash_key_version) VALUES (:id, "
+    ":recorded_at, :actor, :object_ref, :action, :prior_hash, :new_hash, "
+    ":correlation_id, :hash_key_version)"
 )
 NOW_TEXT = "2026-10-22 12:00:00.000000"
 OLD_TEXT = "2020-01-01 00:00:00.000000"
@@ -59,6 +67,16 @@ def engine(database):
     engine.dispose()
 
 
+def _versions(engine) -> list[int]:
+    with engine.connect() as connection:
+        return [
+            row[0]
+            for row in connection.execute(
+                text("SELECT hash_key_version FROM audit_log ORDER BY id")
+            )
+        ]
+
+
 def _rows(engine) -> list[tuple[object, ...]]:
     with engine.connect() as connection:
         return [
@@ -71,8 +89,8 @@ def _rows(engine) -> list[tuple[object, ...]]:
 
 @pytest.mark.unit
 class TestRecord:
-    def test_records_hashes_not_state(self, engine):
-        repo = AuditRepository(engine)
+    def test_records_hashes_not_state(self, audit_key, engine):
+        repo = AuditRepository(engine, key=audit_key)
         prior = {"destination": "Passenger E home address"}
         new = {"destination": "Music Studio"}
         entry = repo.record(
@@ -94,17 +112,17 @@ class TestRecord:
         assert entry.prior_hash != entry.new_hash
         assert entry.recorded_at.tzinfo is UTC
 
-    def test_create_has_no_prior_hash(self, engine):
-        entry = AuditRepository(engine).record(
+    def test_create_has_no_prior_hash(self, audit_key, engine):
+        entry = AuditRepository(engine, key=audit_key).record(
             actor="system", object_ref="person:p1", action="create", new_state={"a": 1}
         )
         assert entry.prior_hash is None
-        assert entry.new_hash == (
-            "015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862"
-        )
+        # Computed here from the raw key bytes, independently of state_hash.
+        expected = hmac.new(bytes(range(32)), b'{"a":1}', hashlib.sha256).hexdigest()
+        assert entry.new_hash == expected
 
-    def test_entries_for_is_oldest_first_and_filtered(self, engine):
-        repo = AuditRepository(engine)
+    def test_entries_for_is_oldest_first_and_filtered(self, audit_key, engine):
+        repo = AuditRepository(engine, key=audit_key)
         for action in ("create", "update", "retire"):
             repo.record(actor="system", object_ref="trip:1", action=action)
         repo.record(actor="system", object_ref="trip:2", action="create")
@@ -119,8 +137,10 @@ class TestRecord:
         ("field", "limit"),
         [("actor", 64), ("object_ref", 128), ("action", 32), ("correlation_id", 64)],
     )
-    def test_reference_fields_match_column_widths(self, engine, field, limit):
-        repository = AuditRepository(engine)
+    def test_reference_fields_match_column_widths(
+        self, audit_key, engine, field, limit
+    ):
+        repository = AuditRepository(engine, key=audit_key)
         values = {"actor": "a", "object_ref": "b", "action": "c", field: "x" * limit}
         assert getattr(repository.record(**values), field) == "x" * limit
         for bad in ("", "x" * (limit + 1)):
@@ -157,6 +177,7 @@ class TestAuditEntryInvariants:
                 prior_hash="Jane Doe lives at 12 Example St",
                 new_hash=None,
                 correlation_id=None,
+                hash_key_version=1,
             )
 
     def test_rejects_naive_timestamp(self):
@@ -169,43 +190,107 @@ class TestAuditEntryInvariants:
                 prior_hash=HEX64,
                 new_hash=None,
                 correlation_id=None,
+                hash_key_version=1,
             )
+
+    @pytest.mark.parametrize("version", [0, -1])
+    def test_rejects_key_version_below_one(self, version):
+        with pytest.raises(exceptions.ValidationError, match="hash_key_version"):
+            AuditEntry(
+                recorded_at=datetime.now(UTC),
+                actor="a",
+                object_ref="b",
+                action="c",
+                prior_hash=None,
+                new_hash=HEX64,
+                correlation_id=None,
+                hash_key_version=version,
+            )
+
+
+def _expected_digest(key: bytes, canonical: bytes) -> str:
+    """HMAC-SHA256 hex computed with the standard library, outside state_hash."""
+    return hmac.new(key, canonical, hashlib.sha256).hexdigest()
 
 
 @pytest.mark.unit
 class TestStateHash:
-    """Known-answer vectors: SHA-256 of the canonical JSON bytes, computed with
-    sha256sum outside this code (non-ASCII is escaped, for example ``\\u00e9``).
+    """Known answers: HMAC-SHA256 over the canonical JSON bytes, computed in the
+    test from the raw key bytes (non-ASCII is escaped, for example ``\\u00e9``).
     """
 
     @pytest.mark.parametrize(
-        ("state", "digest"),
+        ("state", "canonical"),
         [
-            (
-                {"b": 2, "a": 1},
-                "43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777",
-            ),
+            ({"b": 2, "a": 1}, b'{"a":1,"b":2}'),
             (
                 {"t": time(8, 15), "d": date(2026, 10, 21)},
-                "982a93b321a987e5881321204aa9042538a3e2bc674f55643de84787573dd66e",
+                b'{"d":"2026-10-21","t":"08:15:00"}',
             ),
             (
-                {"seats": [1, 2], "name": "Café"},
-                "2f9f5baea7d52a220d06eb9bb806df98d173421d3d1fa4074cb7cbaa4d480cbf",
+                {"seats": [1, 2], "name": "Caf\u00e9"},
+                b'{"name":"Caf\\u00e9","seats":[1,2]}',
             ),
+            ({"b": "Alex", "a": 1}, b'{"a":1,"b":"Alex"}'),
         ],
     )
-    def test_known_answer(self, state, digest):
-        assert state_hash(state) == digest
+    def test_known_answer(self, audit_key, state, canonical):
+        assert state_hash(state, key=audit_key) == _expected_digest(
+            bytes(range(32)), canonical
+        )
 
-    def test_hash_is_pinned(self):
-        # SHA-256 of the canonical JSON '{"a":1,"b":"Alex"}', computed
-        # independently of state_hash so a change of canonical form fails here.
-        expected = "cedaa73517674e9aeb8830412088ce0b22552789c3bb369a74bf119c109274ce"
-        assert state_hash({"b": "Alex", "a": 1}) == expected
+    def test_same_input_and_key_give_the_same_hash(self, audit_key, audit_key_text):
+        state = {"b": "Alex", "a": [1, 2]}
+        same_key = SecretStr(audit_key_text)
+        assert state_hash(state, key=audit_key) == state_hash(state, key=same_key)
 
-    def test_no_state_has_no_hash(self):
-        assert state_hash(None) is None
+    def test_key_order_does_not_matter(self, audit_key):
+        assert state_hash({"a": 1, "b": 2}, key=audit_key) == state_hash(
+            {"b": 2, "a": 1}, key=audit_key
+        )
+
+    def test_a_different_key_gives_a_different_hash(self, audit_key, other_audit_key):
+        state = {"destination": "Music Studio"}
+        assert state_hash(state, key=audit_key) != state_hash(
+            state, key=other_audit_key
+        )
+
+    def test_it_differs_from_plain_sha256(self, audit_key):
+        state = {"b": "Alex", "a": 1}
+        plain = hashlib.sha256(b'{"a":1,"b":"Alex"}').hexdigest()
+        assert state_hash(state, key=audit_key) != plain
+
+    def test_output_is_64_lowercase_hex(self, audit_key):
+        digest = state_hash({"a": 1}, key=audit_key)
+        assert digest is not None
+        assert re.fullmatch(r"[0-9a-f]{64}", digest)
+
+    def test_no_state_has_no_hash(self, audit_key):
+        assert state_hash(None, key=audit_key) is None
+
+    def test_key_is_required_and_keyword_only(self):
+        parameter = inspect.signature(state_hash).parameters["key"]
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameter.default is inspect.Parameter.empty
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "",
+            "not-a-valid-SECRET-audit-key",
+            "k\u00e9y" * 12,
+            base64.urlsafe_b64encode(b"short").decode(),
+            base64.urlsafe_b64encode(bytes(range(33))).decode(),
+        ],
+        ids=["empty", "text", "non-ascii", "short", "long"],
+    )
+    @pytest.mark.parametrize("state", [{"a": 1}, None], ids=["state", "no-state"])
+    def test_a_bad_key_is_refused_without_echo(self, bad, state):
+        with pytest.raises(exceptions.ConfigurationError) as caught:
+            state_hash(state, key=SecretStr(bad))
+        assert "FL_AUDIT_KEY" in str(caught.value)
+        assert bad == "" or bad not in str(caught.value)
+        assert caught.value.__cause__ is None
 
     @pytest.mark.parametrize(
         "value",
@@ -217,14 +302,124 @@ class TestStateHash:
         ],
         ids=["set", "object", "sensitive", "nan"],
     )
-    def test_non_canonical_values_are_refused(self, value):
+    def test_non_canonical_values_are_refused(self, audit_key, value):
         with pytest.raises(exceptions.ValidationError, match="canonically"):
-            state_hash({"v": value})
+            state_hash({"v": value}, key=audit_key)
 
-    def test_protected_values_never_hash_as_their_mask(self):
+    def test_protected_values_never_hash_as_their_mask(self, audit_key):
         # A masked value would make two different addresses hash alike.
         with pytest.raises(exceptions.ValidationError, match="SensitiveStr"):
-            state_hash({"address": SensitiveStr("12 Example St")})
+            state_hash({"address": SensitiveStr("12 Example St")}, key=audit_key)
+
+
+@pytest.mark.unit
+class TestKeyVersion:
+    def test_default_version_is_persisted(self, engine, audit_key):
+        entry = AuditRepository(engine, key=audit_key).record(
+            actor="system", object_ref="x:1", action="create", new_state={"a": 1}
+        )
+        assert entry.hash_key_version == 1
+        assert _versions(engine) == [1]
+
+    def test_configured_version_is_persisted_and_read_back(self, engine, audit_key):
+        repository = AuditRepository(engine, key=audit_key, key_version=7)
+        entry = repository.record(actor="system", object_ref="x:1", action="update")
+        assert entry.hash_key_version == 7
+        assert _versions(engine) == [7]
+        assert repository.entries_for("x:1") == [entry]
+
+    def test_from_settings_uses_the_key_and_version(self, engine, audit_key_text):
+        settings = Settings.model_validate(
+            {"audit_key": audit_key_text, "audit_key_version": 4}
+        )
+        entry = AuditRepository.from_settings(engine, settings).record(
+            actor="system", object_ref="x:1", action="create", new_state={"a": 1}
+        )
+        assert entry.hash_key_version == 4
+        expected = _expected_digest(bytes(range(32)), b'{"a":1}')
+        assert entry.new_hash == expected
+
+    @pytest.mark.parametrize("version", [0, -3])
+    def test_a_version_below_one_is_refused(self, engine, audit_key, version):
+        with pytest.raises(exceptions.ConfigurationError, match="version"):
+            AuditRepository(engine, key=audit_key, key_version=version)
+
+    def test_rotation_is_visible_per_row(self, engine, audit_key, other_audit_key):
+        old = AuditRepository(engine, key=audit_key, key_version=1)
+        new = AuditRepository(engine, key=other_audit_key, key_version=2)
+        state = {"a": 1}
+        first = old.record(
+            actor="s", object_ref="x:1", action="create", new_state=state
+        )
+        second = new.record(
+            actor="s", object_ref="x:1", action="update", new_state=state
+        )
+        assert first.new_hash != second.new_hash
+        assert [e.hash_key_version for e in new.entries_for("x:1")] == [1, 2]
+
+    def test_a_row_without_a_version_cannot_be_inserted(self, engine):
+        statement = text(
+            "INSERT INTO audit_log (recorded_at, actor, object_ref, action) "
+            "VALUES (:recorded_at, 'a', 'x:1', 'create')"
+        )
+        with (
+            engine.begin() as connection,
+            pytest.raises(IntegrityError, match="NOT NULL"),
+        ):
+            connection.execute(statement, {"recorded_at": NOW_TEXT})
+
+    def test_a_non_integer_stored_version_is_a_database_error(self):
+        with pytest.raises(exceptions.DatabaseError, match="hash_key_version"):
+            audit._key_version("1")
+        flag = True  # a bool is an int in Python but never a stored version
+        with pytest.raises(exceptions.DatabaseError, match="hash_key_version"):
+            audit._key_version(flag)
+
+
+@pytest.mark.unit
+class TestKeyRequired:
+    def test_record_without_a_key_raises_and_writes_nothing(self, engine):
+        repository = AuditRepository(engine, key=None)
+        with pytest.raises(exceptions.ConfigurationError, match="FL_AUDIT_KEY"):
+            repository.record(
+                actor="system", object_ref="x:1", action="create", new_state={"a": 1}
+            )
+        assert _rows(engine) == []
+
+    def test_from_settings_without_a_key_cannot_record(self, engine):
+        repository = AuditRepository.from_settings(engine, Settings())
+        with pytest.raises(exceptions.ConfigurationError, match="FL_AUDIT_KEY"):
+            repository.record(actor="system", object_ref="x:1", action="create")
+        assert _rows(engine) == []
+
+    def test_reading_needs_no_key(self, engine, audit_key):
+        AuditRepository(engine, key=audit_key).record(
+            actor="system", object_ref="x:1", action="create"
+        )
+        [entry] = AuditRepository(engine, key=None).entries_for("x:1")
+        assert entry.action == "create"
+
+    def test_a_malformed_key_writes_nothing(self, engine):
+        repository = AuditRepository(engine, key=SecretStr("short"))
+        with pytest.raises(exceptions.ConfigurationError):
+            repository.record(
+                actor="system", object_ref="x:1", action="create", new_state={"a": 1}
+            )
+        assert _rows(engine) == []
+
+    def test_a_stored_row_holds_no_key_material_or_state(self, engine, audit_key):
+        AuditRepository(engine, key=audit_key).record(
+            actor="system",
+            object_ref="x:1",
+            action="create",
+            new_state={"address": "12 Example St"},
+        )
+        with engine.connect() as connection:
+            dump = "".join(
+                str(row) for row in connection.execute(text("SELECT * FROM audit_log"))
+            )
+        assert audit_key.get_secret_value() not in dump
+        assert "Example" not in dump
 
 
 @pytest.mark.unit
@@ -238,8 +433,8 @@ class TestAppendOnly:
             "DELETE FROM audit_log WHERE id = 1",
         ],
     )
-    def test_rows_cannot_change(self, engine, statement):
-        AuditRepository(engine).record(
+    def test_rows_cannot_change(self, audit_key, engine, statement):
+        AuditRepository(engine, key=audit_key).record(
             actor="system", object_ref="x:1", action="create"
         )
         with engine.begin() as connection:
@@ -249,8 +444,10 @@ class TestAppendOnly:
         assert _rows(engine) == [(1, "system")]
 
     @pytest.mark.parametrize("verb", ["OR REPLACE", "OR IGNORE", "OR ROLLBACK"])
-    def test_existing_row_cannot_be_overwritten_via_sqlalchemy(self, engine, verb):
-        AuditRepository(engine).record(
+    def test_existing_row_cannot_be_overwritten_via_sqlalchemy(
+        self, audit_key, engine, verb
+    ):
+        AuditRepository(engine, key=audit_key).record(
             actor="system", object_ref="x:1", action="create"
         )
         with engine.begin() as connection:
@@ -262,9 +459,9 @@ class TestAppendOnly:
 
     @pytest.mark.parametrize("verb", ["OR REPLACE", "REPLACE", "UPSERT"])
     def test_existing_row_cannot_be_overwritten_via_raw_sqlite3(
-        self, database, engine, verb
+        self, audit_key, database, engine, verb
     ):
-        AuditRepository(engine).record(
+        AuditRepository(engine, key=audit_key).record(
             actor="system", object_ref="x:1", action="create"
         )
         engine.dispose()
@@ -280,8 +477,8 @@ class TestAppendOnly:
             raw.close()
         assert rows == [(1, "system")]
 
-    def test_new_rows_still_append(self, engine):
-        repo = AuditRepository(engine)
+    def test_new_rows_still_append(self, audit_key, engine):
+        repo = AuditRepository(engine, key=audit_key)
         repo.record(actor="system", object_ref="x:1", action="create")
         with engine.begin() as connection:
             connection.execute(
@@ -301,6 +498,9 @@ class TestAppendOnly:
             ("object_ref", ""),
             ("action", "b" * 33),
             ("correlation_id", ""),
+            ("hash_key_version", 0),
+            ("hash_key_version", -1),
+            ("hash_key_version", None),
         ],
     )
     def test_check_constraints_reject_bad_rows(self, engine, column, value):
@@ -313,6 +513,7 @@ class TestAppendOnly:
             "prior_hash": None,
             "new_hash": HEX64,
             "correlation_id": None,
+            "hash_key_version": 1,
         }
         with engine.begin() as connection:
             connection.execute(INSERT_FULL, row)

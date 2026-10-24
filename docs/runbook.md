@@ -21,8 +21,8 @@ The container runs one process with one SQLite writer.
   `family-logistics serve --upgrade-db`, which migrates the schema to head
   before serving. Outside a container, run `family-logistics migrate` and then
   `family-logistics serve`. The process refuses to start (exit 2) when
-  `FL_HA_TOKEN` is missing or shorter than 32 characters, when `FL_DATA_KEY` or
-  `FL_APPRISE_URL` is missing in production mode, when the schema is behind
+  `FL_HA_TOKEN` is missing or shorter than 32 characters, when `FL_DATA_KEY`,
+  `FL_AUDIT_KEY` or `FL_APPRISE_URL` is missing in production mode, when the schema is behind
   head (without `--upgrade-db`), when the schema is newer than the image (see
   [Upgrading the image](#upgrading-the-image)), or when a setting fails
   validation; read the startup error and fix it. A refused start lists every
@@ -103,6 +103,23 @@ plain text.
 4. Set the new key and start the container.
 
 Keep the previous key until a restore test with the new key succeeds.
+
+### `FL_AUDIT_KEY`
+
+`FL_AUDIT_KEY` keys the audit-log hashes (HMAC-SHA256), so the table alone
+cannot be used to confirm a guessed name or address. It must differ from
+`FL_DATA_KEY`. Without it no audit row is written and production `serve` will
+not start. Stored hashes cannot be recomputed under a new key, so changing the
+key breaks comparison with older rows unless the version is raised.
+
+1. Generate a key: `python3 -c 'import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())'`.
+2. Set it in the deployment's secret store and raise `FL_AUDIT_KEY_VERSION` by
+   one, so new rows are recorded under the new version (every row stores the
+   version that produced its hashes).
+3. Restart the container.
+
+Keep each retired key until the rows recorded under its version are purged
+(365 days), or older hashes can no longer be checked.
 
 ### CalDAV app-specific password
 

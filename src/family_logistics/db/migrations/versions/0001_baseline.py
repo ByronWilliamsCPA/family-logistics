@@ -16,6 +16,10 @@ the database file rather than in per-connection settings:
 - ``audit_log_no_delete`` aborts a DELETE of a row younger than 365 days, the
   audit retention in the privacy spec; older rows may be purged.
 
+``prior_hash`` and ``new_hash`` are HMAC-SHA256 digests under ``FL_AUDIT_KEY``;
+``hash_key_version`` records which key version produced them. The column was
+added to this revision in place, before any production database existed.
+
 #CRITICAL: Data integrity: the triggers do not stop schema changes. Anyone who
 can write the database file can DROP TRIGGER, DROP TABLE or run this
 revision's downgrade, which deletes the audit history.
@@ -61,6 +65,9 @@ def upgrade() -> None:
         sa.Column("action", sa.String(32), nullable=False),
         sa.Column("prior_hash", sa.String(64), nullable=True),
         sa.Column("new_hash", sa.String(64), nullable=True),
+        # Which FL_AUDIT_KEY version keyed the hashes, so a rotation can be
+        # told apart from a tampered row.
+        sa.Column("hash_key_version", sa.Integer, nullable=False),
         sa.Column("correlation_id", sa.String(64), nullable=True),
         # A positive id keeps NEW.id (-1 for an automatic id in a BEFORE
         # INSERT trigger) from ever matching a stored row.
@@ -79,6 +86,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(HASH_CHECK.format("prior_hash"), name="ck_audit_prior_hash"),
         sa.CheckConstraint(HASH_CHECK.format("new_hash"), name="ck_audit_new_hash"),
+        sa.CheckConstraint("hash_key_version >= 1", name="ck_audit_hash_key_version"),
     )
     op.create_index("ix_audit_log_object_ref", "audit_log", ["object_ref", "id"])
     for name, timing in TRIGGERS.items():

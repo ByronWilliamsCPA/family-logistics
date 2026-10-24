@@ -18,6 +18,7 @@ environment always overrides ``.env`` (same module).
 
 from __future__ import annotations
 
+import base64
 import ipaddress
 import re
 from datetime import time
@@ -26,13 +27,21 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import httpx
 from cryptography.fernet import Fernet
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic import ValidationError as PydanticValidationError
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from family_logistics.core.exceptions import ConfigurationError
-from family_logistics.core.urls import HTTP_OR_HTTPS, HTTPS_ONLY, url_problem
+from family_logistics.core.urls import (
+    HTTP_OR_HTTPS,
+    HTTPS_ONLY,
+    host_allowed,
+    host_allowlist_problem,
+    normalize_host,
+    url_problem,
+)
 
 if TYPE_CHECKING:
     from pydantic import ValidationInfo
@@ -53,6 +62,39 @@ MAX_TAG_LENGTH = 64
 
 APPRISE_KEY_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 """Shape of an Apprise API configuration key (the ``{KEY}`` URL segment)."""
+
+AUDIT_KEY_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}=")
+"""Shape of ``FL_AUDIT_KEY``: 32 bytes as url-safe base64 with padding (44
+characters). Anything else, including the standard-alphabet ``+`` and ``/``,
+whitespace and non-ASCII text, is refused before decoding."""
+
+AUDIT_KEY_BYTES = 32
+"""Length of the decoded audit HMAC key."""
+
+
+def decode_audit_key(text: str) -> bytes:
+    """Decode an audit key, accepting only its canonical 44-character form.
+
+    Args:
+        text: The key as configured (url-safe base64 of exactly 32 bytes).
+
+    Returns:
+        The 32 raw key bytes.
+
+    Raises:
+        ValueError: If the text is not the canonical encoding of 32 bytes. The
+            message is fixed and never echoes the text.
+    """
+    msg = "audit key must be 32 random bytes as url-safe base64 (44 characters)"
+    if AUDIT_KEY_PATTERN.fullmatch(text) is None:
+        raise ValueError(msg)
+    raw = base64.urlsafe_b64decode(text)
+    # Re-encoding rejects a non-canonical final character (spare padding bits),
+    # so one key has exactly one accepted spelling.
+    if len(raw) != AUDIT_KEY_BYTES or base64.urlsafe_b64encode(raw).decode() != text:
+        raise ValueError(msg)
+    return raw
+
 
 DEDICATED_TAG_FIELDS: tuple[str, ...] = (
     "apprise_tag_report",
@@ -110,6 +152,7 @@ FIELD_STATUS: dict[str, str] = {
     "caldav_username": M1,
     "caldav_app_password": M1,
     "caldav_calendars": M1,
+    "caldav_allowed_hosts": M1,
     "ha_token": CONSUMED,
     "apprise_url": CONSUMED,
     "apprise_config_key": M3,
@@ -122,6 +165,8 @@ FIELD_STATUS: dict[str, str] = {
     "proxy_trusted_cidrs": M4,
     "ui_allowed_users": M4,
     "data_key": CONSUMED,
+    "audit_key": CONSUMED,
+    "audit_key_version": CONSUMED,
     "route_provider": M3,
     "google_routes_api_key": M3,
     "routes_monthly_budget_usd": M3,
@@ -170,6 +215,10 @@ class Settings(BaseSettings):
         caldav_username: Apple ID used by the read-only collector.
         caldav_app_password: App-specific password for that Apple ID.
         caldav_calendars: Calendar hrefs or IDs to collect (discovered in M0).
+        caldav_allowed_hosts: Registrable domains the CalDAV collector may reach,
+            for the first request and every redirect hop (default ``icloud.com``;
+            a host matches the domain itself or any subdomain). Closes
+            redirect-to-LAN request forgery. ``caldav_url`` must be inside it.
         ha_token: Bearer token Home Assistant presents to the HA-only routes.
         apprise_url: Apprise API base URL (http or https, no embedded credentials).
         apprise_config_key: Key of the saved Apprise configuration that holds the
@@ -188,6 +237,11 @@ class Settings(BaseSettings):
             empty denies everyone.
         data_key: Fernet key encrypting protected addresses at rest; required
             before any protected address is stored.
+        audit_key: HMAC-SHA256 key for the audit-log state hashes (32 random
+            bytes as url-safe base64, 44 characters); required before any audit
+            row is written and in production mode. Must differ from ``data_key``.
+        audit_key_version: Version recorded with every audit row so a future key
+            rotation can tell which key produced a hash (at least 1).
         route_provider: Which RouteProvider implementation to use.
         google_routes_api_key: API key for Google Routes (optional).
         routes_monthly_budget_usd: Hard monthly cap for paid routing; at the cap
@@ -248,6 +302,7 @@ class Settings(BaseSettings):
     caldav_username: str | None = None
     caldav_app_password: SecretStr | None = None
     caldav_calendars: str = ""
+    caldav_allowed_hosts: CommaList = Field(default_factory=lambda: ["icloud.com"])
 
     ha_token: SecretStr | None = None
 
@@ -269,6 +324,8 @@ class Settings(BaseSettings):
     ui_allowed_users: CommaList = Field(default_factory=list[str])
 
     data_key: SecretStr | None = None
+    audit_key: SecretStr | None = None
+    audit_key_version: int = Field(default=1, ge=1)
 
     route_provider: RouteProviderName = "ha_relay"
     google_routes_api_key: SecretStr | None = None
@@ -492,7 +549,9 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return self
 
-    @field_validator("proxy_trusted_cidrs", "ui_allowed_users", mode="before")
+    @field_validator(
+        "proxy_trusted_cidrs", "ui_allowed_users", "caldav_allowed_hosts", mode="before"
+    )
     @classmethod
     def _split_comma_list(cls, value: object) -> object:
         """Split a comma-separated string into trimmed, non-empty items.
@@ -549,6 +608,89 @@ class Settings(BaseSettings):
                 msg = "FL_DATA_KEY must be a Fernet key (32 url-safe base64 bytes)"
                 raise ValueError(msg) from exc
         return value
+
+    @field_validator("audit_key")
+    @classmethod
+    def _audit_key_is_32_bytes(cls, value: SecretStr | None) -> SecretStr | None:
+        """Reject a configured audit key that is not 32 bytes of url-safe base64.
+
+        Args:
+            value: The configured key, or None when unset.
+
+        Returns:
+            The unchanged value.
+
+        Raises:
+            ValueError: If the key is not the canonical 44-character url-safe
+                base64 encoding of exactly 32 bytes. The message never echoes it.
+        """
+        if value is not None:
+            try:
+                decode_audit_key(value.get_secret_value())
+            except ValueError as exc:
+                msg = (
+                    "FL_AUDIT_KEY must be 32 random bytes as url-safe base64 "
+                    "(44 characters)"
+                )
+                raise ValueError(msg) from exc
+        return value
+
+    @model_validator(mode="after")
+    def _audit_key_differs_from_data_key(self) -> Self:
+        """Require separate keys so one leak cannot expose both uses.
+
+        Returns:
+            The validated settings.
+
+        Raises:
+            ValueError: If both keys are set to the same value.
+        """
+        if (
+            self.audit_key is not None
+            and self.data_key is not None
+            and self.audit_key.get_secret_value() == self.data_key.get_secret_value()
+        ):
+            msg = "FL_AUDIT_KEY must differ from FL_DATA_KEY"
+            raise ValueError(msg)
+        return self
+
+    @field_validator("caldav_allowed_hosts")
+    @classmethod
+    def _caldav_allowed_hosts_are_domains(cls, value: list[str]) -> list[str]:
+        """Normalize the CalDAV host allowlist and refuse malformed entries.
+
+        Args:
+            value: Configured registrable domains.
+
+        Returns:
+            The entries, lower-cased and without a trailing dot.
+
+        Raises:
+            ValueError: If the list is empty or an entry is empty or carries a
+                scheme, path, port, wildcard or anything else but a domain. The
+                message never echoes an entry.
+        """
+        problem = host_allowlist_problem(value)
+        if problem is not None:
+            msg = f"FL_CALDAV_ALLOWED_HOSTS {problem}"
+            raise ValueError(msg)
+        return [normalize_host(entry) for entry in value]
+
+    @model_validator(mode="after")
+    def _caldav_url_host_is_allowed(self) -> Self:
+        """Fail at startup when the CalDAV base URL is outside the allowlist.
+
+        Returns:
+            The validated settings.
+
+        Raises:
+            ValueError: If the host of ``caldav_url`` is not allowed.
+        """
+        host = httpx.URL(self.caldav_url).host
+        if not host_allowed(host, self.caldav_allowed_hosts):
+            msg = "FL_CALDAV_URL host is not covered by FL_CALDAV_ALLOWED_HOSTS"
+            raise ValueError(msg)
+        return self
 
     @property
     def calendar_list(self) -> list[str]:

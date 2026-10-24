@@ -415,6 +415,17 @@ Set these in Repository Settings > Secrets and variables > Actions:
 | `SCORECARD_TOKEN` | Scorecard (optional) | GitHub PAT with repo scope |
 | `QLTY_TOKEN` | Qlty coverage upload (the workflow maps it to the reusable workflow's `QLTY_COVERAGE_TOKEN` input) | qlty.sh > project Settings > Coverage token |
 
+### Runtime Keys (deployment secret store, not GitHub)
+
+The running service takes two independent keys from its secret store through the
+environment. They are not GitHub Actions secrets, and each must be a different
+value; `serve` refuses to start in production mode without both.
+
+| Variable | Purpose | How to Generate |
+|----------|---------|-----------------|
+| `FL_DATA_KEY` | Fernet key encrypting protected addresses at rest | `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `FL_AUDIT_KEY` | HMAC-SHA256 key for the audit-log state hashes (32 random bytes, url-safe base64) | `python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"` |
+
 ### Container Image Publishing
 
 The application is not published to PyPI. The release workflow builds the

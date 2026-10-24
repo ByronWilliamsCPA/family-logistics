@@ -94,7 +94,7 @@ class TestSecretsNeverShipped:
             name: value
             for name, value in dotenv_values(ENV_EXAMPLE).items()
             if any(word in name for word in ("TOKEN", "KEY", "PASSWORD"))
-            and name != "FL_APPRISE_CONFIG_KEY"
+            and name not in {"FL_APPRISE_CONFIG_KEY", "FL_AUDIT_KEY_VERSION"}
         }
         assert values
         assert all(not value for value in values.values())
