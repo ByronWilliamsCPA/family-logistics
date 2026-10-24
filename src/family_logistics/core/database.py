@@ -137,17 +137,21 @@ def create_readonly_engine(path: Path) -> Engine:
 
 
 def check_database(engine: Engine) -> bool:
-    """Run a trivial query to prove the database is reachable.
+    """Read the schema to prove the database is reachable and is a database.
+
+    A bare ``SELECT 1`` never touches the file, so older SQLite versions
+    (3.45.1 on the CI runners) accept a non-database file. Counting rows in
+    ``sqlite_master`` forces SQLite to read and validate the file header.
 
     Args:
         engine: The application engine.
 
     Returns:
-        True when ``SELECT 1`` succeeds.
+        True when the schema table can be read.
     """
     try:
         with engine.connect() as connection:
-            connection.execute(text("SELECT 1"))
+            connection.execute(text("SELECT count(*) FROM sqlite_master")).scalar()
     except SQLAlchemyError as exc:
         _log_failure("database_unreachable", exc)
         return False
