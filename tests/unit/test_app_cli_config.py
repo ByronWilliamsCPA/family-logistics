@@ -149,6 +149,8 @@ class TestCli:
         assert result.exit_code == 0, result.output
         assert calls["workers"] == 1
         assert calls["log_config"] is None
+        # uvicorn would otherwise rewrite request.client from X-Forwarded-For.
+        assert calls["proxy_headers"] is False
         assert (calls["host"], calls["port"]) == (ALL_INTERFACES, 8081)
 
     def test_healthcheck_fails_when_nothing_listens(self, monkeypatch, fresh_settings):

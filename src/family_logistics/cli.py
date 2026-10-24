@@ -208,6 +208,14 @@ def serve(upgrade_db: bool) -> None:
         log_level=settings.log_level.lower(),
         log_config=None,
         workers=1,
+        # #CRITICAL: Security: uvicorn trusts X-Forwarded-For from
+        # FORWARDED_ALLOW_IPS (default 127.0.0.1) and rewrites request.client,
+        # which would let a client pick its own HA throttle key. Keep it off:
+        # request.client must be the TCP peer, and FL_PROXY_TRUSTED_CIDRS (the
+        # app's own proxy trust) is matched against that peer.
+        # #VERIFY: tests/unit/test_app_cli_config.py asserts proxy_headers is
+        # False for serve.
+        proxy_headers=False,
     )
 
 
