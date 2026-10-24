@@ -62,6 +62,7 @@ path = [
     ".shellcheckrc",
     ".yamllint",
     ".gitleaks.toml",
+    ".gitleaksignore",
     "sonar-project.properties",
     "overrides/**",
     "configs/**",

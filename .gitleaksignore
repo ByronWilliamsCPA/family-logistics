@@ -1,0 +1,20 @@
+# gitleaks fingerprints for findings in intermediate commits only.
+#
+# Every entry is a fictional test fixture: a made-up "Jane Doe" street address
+# in tests/unit/test_audit.py, and an SSRF-test private IP in
+# tests/unit/test_security_middleware.py. Later commits already replaced them,
+# so the branch tip is clean, and the squash merge keeps these commits out of
+# main. gitleaks scans every commit, so the intermediate ones need listing.
+# Each fixture appears twice: once on the remote head (c6312c4, 964b141) and
+# once as the equivalent local commit merged onto it (494c8d8, 4c6a858).
+# Do not add entries here for anything that is not a fictional fixture.
+c6312c4d558595362de4941a6de099e02cf890e1:tests/unit/test_audit.py:street-address:154
+c6312c4d558595362de4941a6de099e02cf890e1:tests/unit/test_audit.py:street-address:206
+c6312c4d558595362de4941a6de099e02cf890e1:tests/unit/test_audit.py:street-address:218
+c6312c4d558595362de4941a6de099e02cf890e1:tests/unit/test_audit.py:street-address:289
+964b1414645f3cc3cbc4db2a4cbe6cc2271d526d:tests/unit/test_security_middleware.py:private-ipv4-address:42
+494c8d865e110c26b4f953b67cdc435684c69af7:tests/unit/test_audit.py:street-address:154
+494c8d865e110c26b4f953b67cdc435684c69af7:tests/unit/test_audit.py:street-address:206
+494c8d865e110c26b4f953b67cdc435684c69af7:tests/unit/test_audit.py:street-address:218
+494c8d865e110c26b4f953b67cdc435684c69af7:tests/unit/test_audit.py:street-address:289
+4c6a8588aac7729b321d8de082ca5544c1157ef3:tests/unit/test_security_middleware.py:private-ipv4-address:42
