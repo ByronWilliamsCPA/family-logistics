@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI
 
 from family_logistics import __version__
+from family_logistics.api.ha import build_ha_router
 from family_logistics.api.health import build_health_router
 from family_logistics.core.database import create_sqlite_engine
 from family_logistics.middleware.correlation import CorrelationMiddleware
@@ -36,4 +37,5 @@ def create_app(settings: Settings) -> FastAPI:
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(CorrelationMiddleware)
     app.include_router(build_health_router(engine))
+    app.include_router(build_ha_router(settings))
     return app
