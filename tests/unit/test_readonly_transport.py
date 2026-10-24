@@ -322,7 +322,7 @@ class TestHostAllowlist:
             "icloud.community",
             "example.invalid",
             "localhost",
-            "192.168.1.10",
+            "198.51.100.10",
             "10.0.0.5",
             "127.0.0.1",
             "[::1]",
@@ -351,7 +351,7 @@ class TestHostAllowlist:
         def handler(request: httpx.Request) -> httpx.Response:
             calls.append(str(request.url))
             return httpx.Response(
-                302, headers={"Location": "https://192.168.1.10/admin"}
+                302, headers={"Location": "https://198.51.100.10/admin"}
             )
 
         client = build_readonly_client(
@@ -450,7 +450,7 @@ class TestHostAllowlist:
             )
             assert response.status_code == 207
             with pytest.raises(DisallowedHostError):
-                await client.request("PROPFIND", "https://192.168.1.10/a")
+                await client.request("PROPFIND", "https://198.51.100.10/a")
             with pytest.raises(DisallowedHostError):
                 await client.request("PROPFIND", "https://icloud.com.evil.net/a")
         assert recorder.seen == ["PROPFIND"]

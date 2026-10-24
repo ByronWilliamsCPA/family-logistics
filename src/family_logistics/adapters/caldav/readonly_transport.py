@@ -49,8 +49,8 @@ allowlisted host, or a redirect could reach a LAN service (request forgery) with
 the method and body of the original request. A disallowed host fails closed
 before I/O.
 #VERIFY: tests/unit/test_readonly_transport.py::TestHostAllowlist covers an
-allowed host, a subdomain, a lookalike, a suffix attack, a redirect to
-192.168.1.10, trailing-dot and case handling, and the async transport.
+allowed host, a subdomain, a lookalike, a suffix attack, a redirect to an IP
+literal (198.51.100.10), trailing-dot and case handling, and the async transport.
 #ASSUME: External resources: an allowlisted name resolves to the real service.
 The check is on the host name, so DNS that answers a private address for an
 allowed name is not detected here.
