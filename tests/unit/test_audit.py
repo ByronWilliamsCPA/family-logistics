@@ -501,6 +501,8 @@ class TestAppendOnly:
             ("hash_key_version", 0),
             ("hash_key_version", -1),
             ("hash_key_version", None),
+            ("hash_key_version", "abc"),
+            ("hash_key_version", 1.5),
         ],
     )
     def test_check_constraints_reject_bad_rows(self, engine, column, value):

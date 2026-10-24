@@ -86,7 +86,12 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(HASH_CHECK.format("prior_hash"), name="ck_audit_prior_hash"),
         sa.CheckConstraint(HASH_CHECK.format("new_hash"), name="ck_audit_new_hash"),
-        sa.CheckConstraint("hash_key_version >= 1", name="ck_audit_hash_key_version"),
+        # The table is not STRICT, so a bare ">= 1" would accept TEXT such as
+        # 'abc' (text sorts above integers) and REAL such as 1.5.
+        sa.CheckConstraint(
+            "typeof(hash_key_version) = 'integer' AND hash_key_version >= 1",
+            name="ck_audit_hash_key_version",
+        ),
     )
     op.create_index("ix_audit_log_object_ref", "audit_log", ["object_ref", "id"])
     for name, timing in TRIGGERS.items():
