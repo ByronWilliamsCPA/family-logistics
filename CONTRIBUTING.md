@@ -15,7 +15,7 @@ Thank you for your interest in contributing to Family Logistics! This document p
 
 ## Code of Conduct
 
-This project adheres to the [ByronWilliamsCPA organization Code of Conduct](https://github.com/ByronWilliamsCPA/.github/blob/main/CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to byron@byronwilliams.dev.
+This project adheres to the [ByronWilliamsCPA organization Code of Conduct](https://github.com/ByronWilliamsCPA/.github/blob/main/CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to <byron@byronwilliams.dev>.
 
 ## Getting Started
 
@@ -31,38 +31,31 @@ This project adheres to the [ByronWilliamsCPA organization Code of Conduct](http
 ```bash
 # Clone the repository
 git clone https://github.com/ByronWilliamsCPA/family-logistics.git
-cd family_logistics
+cd family-logistics
 
 # Install dependencies with UV
 uv sync --all-extras
 # Setup pre-commit hooks (REQUIRED)
 uv run pre-commit install
 
-# Install Qlty CLI for unified code quality checks (REQUIRED)
-curl https://qlty.sh | bash
-
 # Verify installation
 uv run pytest -v
-qlty check
+uv run pre-commit run --all-files
 ```
 
 ### Project Structure
 
-```
-family_logistics/
-├── src/family_logistics/       # Main package
-│   ├── __init__.py
-│   ├── core.py                           # Core functionality
-│   └── utils/                            # Utility modules
-├── tests/                                # Test suite
-│   ├── unit/                             # Unit tests
-│   └── integration/                      # Integration tests
-├── docs/                                 # Documentation
-│   ├── ADRs/                             # Architecture Decision Records
-│   ├── planning/                         # Project planning
-│   └── guides/                           # User guides
-└── pyproject.toml                        # Dependencies & config
-```
+See [Project layout in the README](README.md#project-layout).
+
+### Household data stays out of Git
+
+This repository is public. Tests, fixtures and documentation use only the
+fictional household (parents Morgan and Riley; children Alex, Sam, Jordan and
+Casey; "Passenger E" and "Driver S" from other families). Never commit real
+names, addresses, coordinates, calendar identifiers, phone numbers, e-mail
+addresses or site network details. gitleaks and the private-terms pre-commit
+hook check every commit; keep your deny-list at
+`~/.config/family-logistics/private-terms.txt`.
 
 ## Development Workflow
 
@@ -70,7 +63,7 @@ family_logistics/
 
 ```bash
 # Create and checkout a new branch
-git checkout -b feature/your-feature-name
+git checkout -b feat/your-feature-name
 
 # For bug fixes
 git checkout -b fix/issue-description
@@ -81,11 +74,14 @@ git checkout -b docs/documentation-update
 
 ### Branch Naming Convention
 
-- `feature/` - New features or enhancements
+- `feat/` - New features or enhancements
 - `fix/` - Bug fixes
 - `docs/` - Documentation updates
 - `refactor/` - Code refactoring
+- `perf/` - Performance improvements
 - `test/` - Test additions or improvements
+- `build/` - Build system and dependency changes
+- `ci/` - CI/CD changes
 - `chore/` - Maintenance tasks
 
 ### 2. Make Your Changes
@@ -101,22 +97,19 @@ git checkout -b docs/documentation-update
 Before committing, ensure all quality checks pass:
 
 ```bash
-# Run all quality checks with Qlty (RECOMMENDED - fast and comprehensive)
-qlty check
-
-# Or run checks on only changed files (fastest)
-qlty check --filter=diff
+# Run all pre-commit hooks (required: Ruff, BasedPyright, Bandit, gitleaks, markdownlint, ...)
+uv run pre-commit run --all-files
 
 # Auto-format code
-qlty fmt
-# Or run all pre-commit hooks manually
-uv run pre-commit run --all-files
+uv run ruff format .
 
 # Run tests with coverage
 uv run pytest --cov=family_logistics --cov-report=term-missing
 ```
 
-**Note**: Qlty consolidates all quality tools (Ruff, BasedPyright, Bandit, Markdownlint, etc.) into a single fast CLI. See [`.qlty/qlty.toml`](.qlty/qlty.toml) for configuration.
+**Note**: pre-commit is the required gate. Qlty is optional: it is configured with only the Ruff and Bandit
+plugins (see [`.qlty/qlty.toml`](.qlty/qlty.toml)), and CI uses it for coverage upload. BasedPyright and
+markdownlint run through pre-commit, not Qlty.
 
 ## Code Quality Standards
 
@@ -134,7 +127,7 @@ All contributions MUST meet these requirements:
 ### Linting
 
 - **Tool**: Ruff with project configuration
-- **Rules**: Comprehensive rule set (see `pyproject.toml`)
+- **Rules**: PyStrict-aligned rule set (see `pyproject.toml`)
 - **Auto-fix**: `uv run ruff check --fix src tests`
 - **Verification**: `uv run ruff check src tests`
 
@@ -155,16 +148,15 @@ All contributions MUST meet these requirements:
 
 This project uses secure package indexes to protect against supply chain attacks:
 
-**Package Index Priority:**
-
-1. **Google Assured OSS** (SLSA Level 3) - Verified third-party packages
-2. **Internal Artifact Registry** - Organization-maintained packages
-3. **PyPI** (fallback) - Standard packages not available elsewhere
+Dependencies resolve from PyPI and are locked with hashes in `uv.lock`.
+Optional Assured OSS and internal indexes are declared in `pyproject.toml` as
+explicit indexes and are used only for packages routed to them in
+`[tool.uv.sources]` (none today).
 
 **Adding New Dependencies:**
 
 ```bash
-# Add a dependency (UV will resolve from secure indexes first)
+# Add a dependency
 uv add package-name
 
 # Add a dev dependency
@@ -279,33 +271,24 @@ uv run pytest --cov=family_logistics --cov-report=html
 # Open htmlcov/index.html to view coverage report
 
 # Run specific test file
-uv run pytest tests/unit/test_module.py -v
+uv run pytest tests/unit/test_parser.py -v
 ```
 
 ### Writing Tests
 
+Use the shared factories in `tests/fl_factories.py` and the fictional
+household. For example, a parser test:
+
 ```python
 import pytest
-from pathlib import Path
-from family_logistics.core import YourModule
+from fl_factories import notes, parse
 
 
-def test_module_initialization():
-    """Test module initializes correctly."""
-    module = YourModule()
-    assert module is not None
-
-
-def test_module_processes_data(tmp_path: Path):
-    """Test module processes data correctly."""
-    module = YourModule()
-    input_file = tmp_path / "input.txt"
-    input_file.write_text("test data")
-
-    result = module.process(input_file)
-
-    assert result is not None
-    assert result["status"] == "success"
+@pytest.mark.unit
+def test_misspelled_family_name_is_rejected_with_suggestion():
+    result = parse(notes(family="Sma", destinations=(("Sma", "HOME"),)))
+    assert not result.ok
+    assert any(f.rule_id == "NAME-002" for f in result.findings)
 ```
 
 ## Commit Convention
@@ -314,7 +297,7 @@ We follow [Conventional Commits](https://www.conventionalcommits.org/) specifica
 
 ### Commit Message Format
 
-```
+```text
 <type>(<scope>): <subject>
 
 <body>
@@ -332,7 +315,9 @@ We follow [Conventional Commits](https://www.conventionalcommits.org/) specifica
 - `test`: Adding or updating tests
 - `chore`: Maintenance tasks
 - `perf`: Performance improvements
+- `build`: Build system and dependency changes
 - `ci`: CI/CD changes
+- `revert`: Revert a previous commit
 
 ### Examples
 
@@ -340,7 +325,7 @@ We follow [Conventional Commits](https://www.conventionalcommits.org/) specifica
 # Feature addition
 feat(core): add data processing function
 
-Implements new data processing capabilities with comprehensive
+Implements new data processing capabilities with input
 validation and error handling.
 
 Refs: #42
@@ -374,8 +359,9 @@ See migration guide in docs/migration/v1.0.0.md
 ### Submitting a Pull Request
 
 1. **Push your branch**:
+
    ```bash
-   git push origin feature/your-feature-name
+   git push origin feat/your-feature-name
    ```
 
 2. **Create Pull Request** on GitHub with:
@@ -435,8 +421,8 @@ Use the feature request template and include:
 
 - **General Questions**: Open a [GitHub Discussion](https://github.com/ByronWilliamsCPA/family-logistics/discussions)
 - **Bug Reports**: Open a [GitHub Issue](https://github.com/ByronWilliamsCPA/family-logistics/issues)
-- **Security Issues**: See [ByronWilliamsCPA Security Policy](https://github.com/ByronWilliamsCPA/.github/blob/main/SECURITY.md)
-- **Email**: byron@byronwilliams.dev
+- **Security Issues**: Follow [SECURITY.md](SECURITY.md) and report privately; never open a public issue
+- **Email**: <byron@byronwilliams.dev>
 
 ## Recognition
 

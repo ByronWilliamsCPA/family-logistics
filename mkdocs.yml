@@ -1,17 +1,16 @@
-
 # MkDocs Configuration for Family Logistics
 # Documentation: https://www.mkdocs.org/user-guide/configuration/
 
 site_name: Family Logistics
-site_description: Deterministic family transportation assurance: validates iCloud ride commitments before a child is stranded
+site_description: "Deterministic family transportation assurance: validates iCloud ride commitments before a child is stranded"
 site_author: Byron Williams
-site_url: https://family-logistics.readthedocs.io
+site_url: https://byronwilliamscpa.github.io/family-logistics/
 repo_url: https://github.com/ByronWilliamsCPA/family-logistics
-repo_name: ByronWilliamsCPA/family_logistics
+repo_name: ByronWilliamsCPA/family-logistics
 edit_uri: edit/main/docs/
 
 # Copyright
-copyright: Copyright &copy; 2025 Byron Williams
+copyright: Copyright &copy; 2026 Byron Williams
 
 # Theme Configuration
 theme:
@@ -98,6 +97,9 @@ plugins:
 
   - git-revision-date-localized:
       enable_creation_date: true
+      # Do not fail strict builds on files without git history yet (new
+      # pages before their first commit, shallow CI clones).
+      strict: false
       fallback_to_build_date: true
       type: date
 
@@ -112,16 +114,12 @@ markdown_extensions:
   - admonition
   - attr_list
   - def_list
-  - footnotes
-  - md_in_html
   - tables
   - toc:
       permalink: true
       toc_depth: 3
 
   # Python Markdown Extensions
-  - pymdownx.arithmatex:
-      generic: true
   - pymdownx.betterem:
       smart_enable: all
   - pymdownx.caret
@@ -142,8 +140,6 @@ markdown_extensions:
         - name: mermaid
           class: mermaid
           format: !!python/name:pymdownx.superfences.fence_code_format
-  - pymdownx.tabbed:
-      alternate_style: true
   - pymdownx.tasklist:
       custom_checkbox: true
   - pymdownx.tilde
@@ -158,6 +154,16 @@ extra:
     provider: google
     property: !ENV GOOGLE_ANALYTICS_KEY
 
+# Pages that are not part of the published site. Planning documents are
+# template placeholders (the public plan is docs/project/roadmap.md);
+# templates contain placeholder links; _data holds front-matter
+# vocabularies; template_feedback.md is a local, gitignored buffer.
+exclude_docs: |
+  planning/
+  ADRs/adr-template.md
+  _data/
+  template_feedback.md
+
 # Navigation
 nav:
   - Home: index.md
@@ -167,21 +173,39 @@ nav:
       - Configuration: guides/configuration.md
       - Usage: guides/usage.md
 
+  - Operations:
+      - Runbook: runbook.md
+      - Privacy and Retention: privacy/privacy-and-retention-spec.md
+
+  - Architecture Decisions:
+      - Index: ADRs/README.md
+      - 0001 Deterministic authority: ADRs/0001-deterministic-authority-and-llm-boundary.md
+      - 0002 Event contract and confirmation: ADRs/0002-event-contract-and-confirmation-code.md
+      - 0003 Read-only CalDAV ingestion: ADRs/0003-read-only-caldav-ingestion.md
+      - 0004 Passenger-level commitments: ADRs/0004-passenger-level-commitments.md
+      - 0005 SQLite WAL single writer: ADRs/0005-sqlite-wal-single-writer.md
+      - 0006 Route provider abstraction: ADRs/0006-route-provider-abstraction.md
+      - 0007 Home Assistant data exchange: ADRs/0007-ha-initiated-data-exchange.md
+
   - API Reference:
       - Overview: api-reference.md
 
   - Development:
       - Architecture: development/architecture.md
+      - Response-Aware Development: development/response-aware-development.md
       - Testing: development/testing.md
       - Code Quality: development/code-quality.md
       - Contributing: development/contributing.md
+      - Tools Catalog: tools/catalog.md
+      - Project Setup: PROJECT_SETUP.md
+      - Python Compatibility: PYTHON_COMPATIBILITY.md
+      - OpenSSF Compliance: OPENSSF_COMPLIANCE.md
 
   - Project:
       - Roadmap: project/roadmap.md
       - Changelog: project/changelog.md
       - License: project/license.md
 
-# Validation
-# strict mode disabled to allow links to repo root files
-# These files are valid but outside docs/ directory
-strict: false
+# Validation: every link must resolve inside docs/; links to repository files
+# outside docs/ use absolute GitHub URLs.
+strict: true

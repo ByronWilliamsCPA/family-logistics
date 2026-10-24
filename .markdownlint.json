@@ -1,9 +1,9 @@
 {
+  "$comment": "MD013 off: prose is not hard-wrapped. MD033 off: MkDocs Material uses inline HTML. MD041 off: not every page starts with a top-level heading (titles come from front matter or the MkDocs nav). MD024 siblings_only: per-entry registers (known-vulnerabilities) repeat sub-headings under different parents. MD060 off: compact GFM tables render identically; enforcing aligned pipes causes churn on every edit.",
   "default": true,
   "MD013": false,
   "MD033": false,
   "MD041": false,
-  "line-length": false,
-  "no-inline-html": false,
-  "first-line-heading": false
+  "MD024": { "siblings_only": true },
+  "MD060": false
 }

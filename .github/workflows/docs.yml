@@ -3,7 +3,7 @@
 #
 # Features:
 #   - MkDocs Material theme build
-#   - GitHub Pages deployment on push to main
+#   - GitHub Pages deployment (disabled until Pages is enabled)
 #   - PR preview builds
 name: Documentation
 
@@ -18,22 +18,24 @@ on:
     paths:
       - 'docs/**'
       - 'mkdocs.yml'
+      - 'pyproject.toml'
+      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 permissions:
-  contents: write  # For GitHub Pages deployment
-  pages: write
-  id-token: write
+  contents: read
 
 # Uses org-level reusable workflow
 jobs:
   docs:
     name: Build & Deploy Docs
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-docs.yml@main
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-docs.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
     with:
       python-version: '3.12'
-      deploy-to-pages: >-
-        ${{
-          github.event_name == 'push' &&
-          github.ref == 'refs/heads/main'
-        }}
+      # Build-only until GitHub Pages is enabled for the repository (an admin
+      # setting). Then restore: deploy on push to main.
+      deploy-to-pages: false

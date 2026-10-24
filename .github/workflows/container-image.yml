@@ -1,0 +1,130 @@
+# Container Image
+# Builds the application image from the repository Dockerfile (digest-pinned
+# DHI bases) and publishes it to GHCR. This is the only distribution channel:
+# the app is not published to PyPI.
+#
+#   pull_request       build and scan only (never pushes; fork PRs are always build-only)
+#   push to main       push ghcr.io/byronwilliamscpa/family-logistics:sha-<7>
+#   workflow_call      called by release.yml after a release, adding the semver tag
+#   workflow_dispatch  builds and scans any ref, but pushes and attests only on
+#                      main or a v* tag, so an unreviewed branch can never
+#                      publish an image or mint a provenance attestation
+#
+# Vulnerability gate: Trivy fails the run on any fixable CRITICAL or HIGH
+# finding. On pull requests the image is scanned before anything is published,
+# so a Dockerfile or dependency change that introduces one cannot merge. On a
+# push build the reusable workflow can only scan after the push, so the sha tag
+# is already in the registry when the scan fails; the attest job depends on the
+# image job, so a failing image never receives an attestation.
+#
+# Every pushed image gets BuildKit SLSA provenance and an SBOM in the registry
+# (from the reusable workflow) plus a GitHub build-provenance attestation on
+# its digest, verifiable with:
+#   gh attestation verify oci://ghcr.io/byronwilliamscpa/family-logistics:<tag> \
+#     --repo ByronWilliamsCPA/family-logistics
+name: Container Image
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'src/**'
+      - '.github/workflows/container-image.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'src/**'
+      - '.github/workflows/container-image.yml'
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Release version to add as an image tag (e.g. 1.2.3)'
+        type: string
+        required: false
+        default: ''
+
+concurrency:
+  group: container-image-${{ github.event.pull_request.number || github.ref }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: Build Image
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-docker.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write
+    with:
+      image-name: 'byronwilliamscpa/family-logistics'
+      # The deployment target is amd64; the DHI base digests are pinned for amd64.
+      platforms: 'linux/amd64'
+      # #CRITICAL: security: only trusted refs may publish to GHCR.
+      # #VERIFY: a workflow_dispatch on a feature branch builds and scans but
+      # does not push; the same condition guards the attest job below.
+      push: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+      push-on-fork: false
+      tag-sha: true
+      tag-pr: false
+      tag-latest: false
+      tag-semver: false
+      additional-tags: ${{ inputs.version && format('type=raw,value={0}', inputs.version) || '' }}
+      enable-trivy-scan: true
+      # Gate on findings that have an upstream fix. Unfixed base-image CVEs
+      # cannot be acted on here; the weekly container-security.yml scan
+      # reports the full inventory including unfixed ones.
+      trivy-severity: 'CRITICAL,HIGH'
+      trivy-ignore-unfixed: true
+      trivy-fail-on-vuln: true
+      enable-sbom: true
+      enable-provenance: true
+      enable-pr-comment: false
+      # Bases come from the public GHCR DHI mirror, not dhi.io.
+      enable-dhi-login: false
+
+  attest:
+    name: Attest Image Provenance
+    needs: [image]
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      # #ASSUME: external resources: the reusable workflow keeps exposing the
+      # `image-digest` output. A rename would leave this empty.
+      # #VERIFY: fail the run instead of skipping the attestation silently.
+      - name: Require an image digest
+        env:
+          IMAGE_DIGEST: ${{ needs.image.outputs.image-digest }}
+        run: |
+          if [ -z "$IMAGE_DIGEST" ]; then
+            echo "::error::The image job returned no digest; refusing to skip the provenance attestation."
+            exit 1
+          fi
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/byronwilliamscpa/family-logistics
+          subject-digest: ${{ needs.image.outputs.image-digest }}
+          push-to-registry: false

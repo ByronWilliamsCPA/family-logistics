@@ -159,7 +159,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self._last_cleanup = current_time
 
         # Remove expired entries from all IPs
-        stale_ips = []
+        stale_ips: list[str] = []
         for ip, timestamps in self.requests.items():
             # Filter to only recent timestamps
             recent = [t for t in timestamps if current_time - t < 60]
@@ -194,8 +194,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         """Apply rate limiting per IP address."""
         if request.client is None:
             logger.warning(
-                "request.client is None - cannot determine client IP for rate limiting. "
-                "Using 'unknown' as fallback. This may occur during testing or with certain proxy configurations."
+                "request.client is None; rate limiting under the 'unknown' bucket"
             )
         client_ip = request.client.host if request.client else "unknown"
         current_time = time.time()
@@ -243,6 +242,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+# SSRF blocklist entry for "any interface"; it is never used as a bind address.
+ALL_INTERFACES = "0.0.0.0"  # nosec B104
+
+
 class SSRFPreventionMiddleware(BaseHTTPMiddleware):
     """Prevent Server-Side Request Forgery (SSRF) attacks.
 
@@ -266,7 +269,7 @@ class SSRFPreventionMiddleware(BaseHTTPMiddleware):
     BLOCKED_HOSTS: set[str] = {
         "localhost",
         "127.0.0.1",
-        "0.0.0.0",
+        ALL_INTERFACES,
         # AWS/Azure metadata endpoints (shared IP)
         "169.254.169.254",
         "fd00:ec2::254",

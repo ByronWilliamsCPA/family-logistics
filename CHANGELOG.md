@@ -13,11 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - TBD
 
 ### Added
-- Initial project structure with Poetry package management
+- Initial project structure with uv package management
 - Pydantic v2 JSON schema validation
 - Structured logging with structlog and rich console output
 - Pre-commit hooks (Ruff format, Ruff lint, BasedPyright, Bandit, pip-audit)
-- Comprehensive test suite with pytest
+- Test suite with pytest and an 80% coverage gate
 - GitHub Actions CI/CD pipeline with quality gates
 - CLI tool foundation
 - License
@@ -29,17 +29,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - References to ByronWilliamsCPA org-level Code of Conduct
 
 ### Infrastructure
-- Poetry dependency management with lock file
+- uv dependency management with a committed lock file
 - pytest test framework with coverage reporting
 - GitHub issue tracking and templates
-- Automated dependency security scanning (Safety, Bandit)
+- Automated dependency security scanning (OSV-Scanner, Bandit)
 - Code quality enforcement (Ruff, BasedPyright)
 - CI/CD pipeline with multiple quality gates
 
 ### Security
 - Bandit security linting
-- Safety dependency vulnerability scanning
+- OSV-Scanner dependency vulnerability scanning
 - Pre-commit hooks for security validation
 
-[Unreleased]: https://github.com/ByronWilliamsCPA/family_logistics/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/ByronWilliamsCPA/family_logistics/releases/tag/v0.1.0
+[Unreleased]: https://github.com/ByronWilliamsCPA/family-logistics/commits/main
+[0.1.0]: https://github.com/ByronWilliamsCPA/family-logistics/releases

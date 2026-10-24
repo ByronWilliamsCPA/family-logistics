@@ -1,44 +1,60 @@
-# Byte-compiled / optimized / DLL files
+# =============================================================================
+# .gitignore for family-logistics (PUBLIC repository)
+# =============================================================================
+# Two deliberate styles; tests/unit/test_gitignore_guards.py and
+# tests/unit/test_gitignore_household.py enforce the second one with real git:
+#
+# 1. Build, packaging and generic output directories (/build/, /dist/, /lib/,
+#    /var/, /logs/, /tmp/, ...) are anchored to the repository root with a
+#    leading "/", so a future source package of the same name below src/ is
+#    never silently ignored. Tool caches and editor directories (__pycache__/,
+#    .pytest_cache/, .vscode/, ...) stay unanchored because they appear in any
+#    subdirectory and never hold source.
+# 2. Everything that protects household data or credentials (registry seeds,
+#    backups, reports, assessments, transcripts, databases, calendar exports,
+#    .aws/, .ssh/, .gcloud/) is unanchored on purpose: it must match at any
+#    depth, because the file that leaks is usually not at the repository root.
+#    If a source package ever needs one of those names, add an explicit
+#    negation for that package path rather than anchoring the guard.
+
+# -----------------------------------------------------------------------------
+# Python bytecode, builds and packaging
+# -----------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
-
-# Distribution / packaging
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
+/build/
+/dist/
+/develop-eggs/
+/downloads/
+/eggs/
+/.eggs/
+/lib/
+/lib64/
+/parts/
+/sdist/
+/var/
+/wheels/
+/pip-wheel-metadata/
+/share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
 MANIFEST
-
-# PyInstaller
 *.manifest
 *.spec
-
-# Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
+/__pypackages__/
 
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
+# -----------------------------------------------------------------------------
+# Tests, coverage and tool caches
+# -----------------------------------------------------------------------------
+/htmlcov/
+/.tox/
+/.nox/
 .coverage
 .coverage.*
 .cache
@@ -48,283 +64,187 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
-pytest-html-report/
-test-results/
+/pytest-html-report/
+/test-results/
+.mutmut-cache
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.ruff_cache/
+/.scannerwork/
+/.sonar/
+.pre-commit-framework-cache
 
-# Translations
-*.mo
-*.pot
-
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-*.ipynb
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-.python-version
-
-# pipenv
-Pipfile.lock
-
-# PEP 582
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
+# -----------------------------------------------------------------------------
+# Environments and local configuration
+# -----------------------------------------------------------------------------
 .env
 .env.local
 .env.*.local
 .venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+/env/
+/venv/
+/ENV/
+/env.bak/
+/venv.bak/
+.python-version
+Pipfile.lock
+local.ini
+local.conf
+local_settings.py
+docker-compose.override.yml
 
-# Google Cloud / Assured OSS Credentials
+# -----------------------------------------------------------------------------
+# Credentials and secrets (never commit)
+# -----------------------------------------------------------------------------
+*.pem
+*.key
+*.cert
+credentials.json
+secrets.json
 **/service-account*.json
 **/gcp-credentials*.json
 **/*-key.json
 .gcloud/
-.config/gcloud/
+/.config/gcloud/
+.aws/
+.ssh/
 
-# Hugging Face
-.cache/huggingface/
-**/.cache/huggingface/
-huggingface_cache/
-
-# Modal Labs
-.modal/
-**/.modal/
-
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# Ruff cache
-.ruff_cache/
-
-# IDE specific files
+# -----------------------------------------------------------------------------
+# Editors, IDEs and OS files
+# -----------------------------------------------------------------------------
 .vscode/
 .idea/
-*.swp
-*.swo
-*~
-.DS_Store
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+.spyderproject
+.spyproject
+.ropeproject
 .project
 .pydevproject
 .settings/
-*.sublime-project
-*.sublime-workspace
 .clj-kondo/
 .lsp/
-
-# Pre-commit
-.pre-commit-framework-cache
-
-# OS specific files
+*.swp
+*.swo
+*~
 .DS_Store
-Thumbs.db
 .AppleDouble
 .LSOverride
-
-# Pytest
-.pytest_cache
-test-results/
-htmlcov/
-
-# Coverage
-.coverage
-.coverage.*
-htmlcov/
-coverage.xml
-
-# Database files
-*.db
-*.sqlite
-*.sqlite3
-
-# Temporary files
-tmp/
-temp/
-*.tmp
-*.bak
-*.swp
-*.swo
-*~
-
-# Local configuration
-local.ini
-local.conf
-
-# Node modules (if using any Node tools)
-node_modules/
-
-# Docker
-docker-compose.override.yml
-
-# Mutation testing
-.mutmut-cache
-
-# MyPy
-.mypy_cache/
-
-# Virtual environments
-.venv
-env/
-venv/
-ENV/
-
-# IDE and Editor files
-.vscode
-.idea
-.sublime-project
-.sublime-workspace
-*.code-workspace
-*.swp
-*.swo
-*~
-
-# OS-specific
-.DS_Store
 .Spotlight-V100
 .Trashes
-ehthumbs.db
 Thumbs.db
+ehthumbs.db
 
-# Pytest
-.pytest_cache/
-pytest-html-report/
+# -----------------------------------------------------------------------------
+# Docs, notebooks, misc tooling
+# -----------------------------------------------------------------------------
+/site
+/docs/_build/
+.ipynb_checkpoints/
+*.ipynb
+/profile_default/
+ipython_config.py
+celerybeat-schedule
+celerybeat.pid
+*.sage.py
+*.mo
+*.pot
+/instance/
+.webassets-cache
+.scrapy
+/target/
+/node_modules/
+/.cache/huggingface/
+/huggingface_cache/
+/.modal/
 
-# Build and dist
-build/
-dist/
-*.egg-info/
+# Git worktrees live inside the project (see CLAUDE.md)
+/.worktrees/
 
-# SBOM (Software Bill of Materials)
+# Temporary and reference files
+/tmp/
+/temp/
+*.tmp
+*.bak
+/tmp_cleanup/.tmp-*
+!/tmp_cleanup/.gitkeep
+
+# Logs
+/logs/
+*.log
+
+# SBOM output (generated in CI)
 sbom-*.json
 sbom-*.xml
 *.cdx.json
 *.spdx.json
 reuse-spdx.json
 
-# Credentials and secrets
-*.pem
-*.key
-*.cert
-credentials.json
-secrets.json
-.aws/
-.ssh/
+# Generic data and model outputs (template defaults)
+/models/
+/weights/
+/results/
+/output/
+/notebooks/.ipynb_checkpoints/
 
-# Logs
-logs/
-*.log
-
-# Data and models (customize as needed)
-data/raw/
-data/processed/
-models/
-weights/
-
-# Notebooks
-.ipynb_checkpoints/
-notebooks/.ipynb_checkpoints/
-
-# Project-specific ignores
-results/
-output/
-
-# Temporary reference files (anti-compaction strategy)
-# Keep the directory, but ignore .tmp-* files inside it
-tmp_cleanup/.tmp-*
-!tmp_cleanup/.gitkeep
-
-# SonarCloud
-.scannerwork/
-.sonar/
-
-# Local-only template feedback buffer (see CLAUDE.md)
-docs/template_feedback.md
+# Template feedback buffer: kept untracked here, so entries are shared with the
+# template team out of band (see CLAUDE.md)
+/docs/template_feedback.md
 
 # =============================================================================
 # Family Logistics: real household data stays local (this repository is public)
 # =============================================================================
-# Runtime database, WAL/SHM side files and backups
+# Runtime database and WAL/SHM side files. The *.db and *.sqlite globs match at
+# any depth; /data/ is root-anchored on purpose (the tracked data/.gitkeep
+# placeholder lives there and a package data directory below src/ must stay
+# trackable). Backups match at any depth.
 /data/
+*.db
 *.db-wal
 *.db-shm
+*.sqlite
+*.sqlite3
 *.sqlite-wal
 *.sqlite-shm
+db.sqlite3-journal
 backups/
+
 # Registry seed data and site configuration (people, locations, addresses,
-# calendar IDs, school assignments). Commit only the *.example.* templates.
-config/local/
+# calendar IDs, school assignments). Commit only *.example.* templates. The
+# globs and their example exceptions have no slash, so both apply at any depth;
+# config/local/ is written with a leading **/ for the same reason (a bare
+# config/local/ contains a slash, so git would root it at the repository root).
+**/config/local/
 registry*.yaml
 registry*.yml
 registry*.json
-!**/*.example.yaml
-!**/*.example.yml
-!**/*.example.json
+!registry*.example.yaml
+!registry*.example.yml
+!registry*.example.json
 site*.env
 stack.env
-# Calendar exports and fixtures pulled from real calendars. Synthetic fixtures
-# live under tests/fixtures/synthetic/ and are the only .ics files tracked.
+
+# Calendar exports pulled from real calendars (any depth). Synthetic fixtures
+# under tests/fixtures/synthetic/ are the only .ics files that may be tracked.
 *.ics
-!tests/fixtures/synthetic/**/*.ics
-fixtures/real/
-tests/fixtures/real/
+!/tests/fixtures/synthetic/**/*.ics
+**/fixtures/real/
+
 # M0 discovery output (filled results, inventories, probe logs)
-tools/m0/results/
-tools/m0/*-results.md
-tools/m0/RESULTS.md
-# Pseudonym mappings and the private-terms deny-list (never in Git)
+/tools/m0/results/
+/tools/m0/*-results.md
+/tools/m0/RESULTS.md
+
+# Pseudonym mappings and the private-terms deny-list (any depth; ignore rules do
+# not untrack a file that was already added, so also keep them out of the tree)
 pseudonyms*.yaml
 pseudonyms*.json
 private-terms*.txt
 denylist*.txt
+
 # Reports, assessments and LLM transcripts generated from real schedules
 reports/
 assessments/

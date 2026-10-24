@@ -1,46 +1,139 @@
 ---
+# Private Data Guard
 # Blocks household data from reaching this PUBLIC repository.
 #
-# gitleaks runs on every push and pull request. The private-terms check needs
-# the FL_PRIVATE_TERMS secret (newline-separated real names and places), which
-# GitHub withholds from pull requests opened from forks; those runs skip it
-# and a maintainer must not merge them until a same-repository run passes.
+# gitleaks  Scans the FULL git history (every commit, not just the working
+#           tree) with .gitleaks.toml: default secret rules plus private IPs,
+#           personal e-mail, phone numbers and street addresses. Runs the
+#           pinned release binary, verified by SHA-256 (gitleaks-action needs
+#           an organization license).
+#
+# private-terms
+#           Scans tracked files, file paths, and every commit message and diff
+#           in the pushed or PR range against FL_PRIVATE_TERMS (a repository
+#           secret holding real names and places, one per line). Fails closed
+#           on pushes and same-repository PRs when the secret is missing. Fork
+#           PRs never receive secrets, so for them the job fails with a notice:
+#           a maintainer must re-run the check from a same-repository branch
+#           before merging. The checker prints file, line and term number,
+#           never a term: a path that contains a term is printed with that
+#           segment masked, and the summary carries counts only. It also scans
+#           author and committer identities, and files that are not UTF-8
+#           text (UTF-16, Latin-1, binary), instead of skipping them.
+#
+# Not enforced by this file: making both jobs required checks is a repository
+# ruleset setting (a repository admin action). Pushes to main are never cancelled by a
+# later push (each push has its own concurrency group), so every pushed range
+# is scanned.
 name: Private Data Guard
 
-on:
+"on":
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  # Pull requests: a newer push to the same PR supersedes the older run. Pushes
+  # and manual runs get a per-commit group, so one can never cancel another and
+  # leave its commit range unscanned.
+  group: private-data-guard-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Bump GITLEAKS_VERSION and GITLEAKS_SHA256 together, taking the checksum from
+  # the release's checksums file, and keep the gitleaks rev in
+  # .pre-commit-config.yaml on the same release. Renovate does not manage these.
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"  # pragma: allowlist secret (published release checksum)
 
 jobs:
   gitleaks:
     name: gitleaks
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Harden the runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-      - name: Scan full history with gitleaks
-        run: uvx pre-commit run gitleaks --all-files
+
+      - name: Install gitleaks (pinned, checksum verified)
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" version
+
+      - name: Scan full history
+        run: |
+          "$RUNNER_TEMP/gitleaks" git --redact --verbose --no-banner \
+            --config .gitleaks.toml .
 
   private-terms:
     name: Private household terms
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Harden the runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
+          egress-policy: audit
+
+      - name: Fork pull requests cannot be checked
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork
+        run: |
+          echo "::error::Fork PRs receive no secrets, so the private-terms check cannot run."
+          echo "::error::A maintainer must push this branch to the repository and let the check pass before merging."
+          exit 1
+
+      - name: Checkout repository (full history)
+        if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
           persist-credentials: false
-      - name: Scan tracked files
+
+      - name: Scan tracked files and commit history
+        if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) }}
         env:
           FL_PRIVATE_TERMS: ${{ secrets.FL_PRIVATE_TERMS }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
         run: |
-          if [ -z "${FL_PRIVATE_TERMS}" ]; then
-            echo "::warning::FL_PRIVATE_TERMS is unavailable (fork PR or secret not set); private-terms check skipped."
-            exit 0
-          fi
-          git ls-files -z | xargs -0 python3 scripts/check_private_terms.py --require-list
+          set -euo pipefail
+          zero="0000000000000000000000000000000000000000"
+          case "$EVENT_NAME" in
+            pull_request) range="${PR_BASE_SHA}..${PR_HEAD_SHA}" ;;
+            push)
+              if [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != "$zero" ]; then
+                range="${PUSH_BEFORE}..${PUSH_AFTER}"
+              else
+                range="${PUSH_AFTER}"
+              fi
+              ;;
+            *) range="HEAD" ;;
+          esac
+          # One invocation: the file list arrives on stdin, so a large tree never
+          # splits into several runs that would each repeat the history scan.
+          git ls-files -z | python3 scripts/check_private_terms.py \
+            --require-list --files-from - --git-range "$range"

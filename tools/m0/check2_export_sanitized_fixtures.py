@@ -113,6 +113,80 @@ class WriteAttemptBlockedError(RuntimeError):
     """Raised when code tries to send a method outside the read-only allow-list."""
 
 
+class InsecureRequestError(RuntimeError):
+    """Raised when a request would leave HTTPS or go outside the CalDAV site."""
+
+
+def _site(host: str) -> str:
+    """Return the last two DNS labels of ``host`` (``icloud.com`` for a partition host)."""
+    return ".".join(host.lower().split(".")[-2:])
+
+
+def check_request(request: httpx.Request, home_host: str) -> None:
+    """Refuse a request that is not HTTPS or that leaves the CalDAV site.
+
+    httpx calls this for every request, including each redirect hop, so a
+    redirect (or a server-supplied href) cannot move the Basic credentials to
+    plain HTTP or to an unrelated host. iCloud answers from per-account
+    partition hosts under the same registrable domain, so those stay allowed.
+
+    Args:
+        request: The outgoing request or redirect hop.
+        home_host: Host of the ``--url`` the run started from.
+
+    Raises:
+        InsecureRequestError: If the scheme is not https, the URL embeds
+            credentials, or the host is outside the home host's site.
+    """
+    url = request.url
+    if url.scheme != "https" or not url.host:
+        msg = "refusing a non-HTTPS CalDAV request"
+        raise InsecureRequestError(msg)
+    if url.userinfo:
+        msg = "refusing a CalDAV URL with embedded credentials"
+        raise InsecureRequestError(msg)
+    if _site(url.host) != _site(home_host):
+        msg = f"refusing a CalDAV request to a different site ({url.host})"
+        raise InsecureRequestError(msg)
+
+
+def build_client(
+    url: str,
+    username: str,
+    password: str,
+    transport: httpx.BaseTransport | None = None,
+) -> httpx.Client:
+    """Build the CalDAV client: HTTPS only and no redirect off the CalDAV site.
+
+    Args:
+        url: CalDAV root URL; must be https with a host.
+        username: Apple ID for Basic authentication.
+        password: App-specific password; held only in memory.
+        transport: Optional transport, for tests.
+
+    Returns:
+        A client that checks every request and redirect hop.
+
+    Raises:
+        InsecureRequestError: If ``url`` is not an https URL with a host.
+    """
+    home = httpx.URL(url)
+    if home.scheme != "https" or not home.host:
+        msg = "the CalDAV --url must be an https URL with a host"
+        raise InsecureRequestError(msg)
+
+    def guard(request: httpx.Request) -> None:
+        check_request(request, home.host)
+
+    return httpx.Client(
+        auth=(username, password),
+        timeout=30.0,
+        follow_redirects=True,
+        transport=transport,
+        event_hooks={"request": [guard]},
+    )
+
+
 @dataclass
 class SanitizeStats:
     """Counts of changes made to one event, for the human review summary."""
@@ -266,9 +340,7 @@ def _fetch_caldav(args: argparse.Namespace) -> list[Calendar]:
     if not args.username or not password:
         msg = "CalDAV mode needs --username (or FL_CALDAV_USERNAME) and a password"
         raise ValueError(msg)
-    client = httpx.Client(
-        auth=(args.username, password), timeout=30.0, follow_redirects=True
-    )
+    client = build_client(args.url, args.username, password)
 
     def request(method: str, url: str, body: str, depth: str) -> ET.Element:
         if method not in ALLOWED_METHODS:
@@ -414,7 +486,13 @@ def main(argv: list[str] | None = None) -> int:
             if args.caldav
             else [Calendar.from_ical(p.read_bytes()) for p in args.from_ics]
         )
-    except (OSError, ValueError, ConnectionError, httpx.HTTPError) as exc:
+    except (
+        OSError,
+        ValueError,
+        ConnectionError,
+        httpx.HTTPError,
+        InsecureRequestError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERROR
 

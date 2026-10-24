@@ -49,7 +49,7 @@ send more than a channel needs, and treat other families' data as on loan.
 | Trip and trip passenger | trip_id, type, status, driver, origin, destinations, constraints, sequence | C (R where an external passenger or external address is involved) | Destinations stored as location IDs, not free-text addresses. |
 | Finding | issue_id, rule_id, severity, affected IDs, first/last seen, resolved_at, evidence | C | Evidence references IDs, not raw notes text. |
 | Analysis run | run_id, trigger, window, freshness, rules version, state, counts, output | I (output C) | Report HTML stored as an artifact with run-log retention. |
-| Audit | timestamp, actor, object, prior hash, new hash, action, correlation ID | I | Hashes only, never content. |
+| Audit | timestamp, actor, object, prior hash, new hash, action, correlation ID | I | Hashes only, never content. The hashes are unkeyed SHA-256 of a canonical state, so they are pseudonymous, not anonymous: anyone who can guess a state can confirm it. Whether to key them is an open decision. The table is append-only: the database rejects updates, overwrites and deletes of rows younger than 365 days. |
 | HA snapshot | school/district events, zones, fetched_at | C | Only the configured school calendars and zones; no person-tracker or device-location entities are ever accepted. |
 | Route cache | endpoints (location IDs), bucket, duration, source, age | C | Keyed by location ID, not address. |
 
@@ -123,7 +123,7 @@ Before any call to the local inference server:
 |------|-----------|-----------|
 | Raw VEVENT snapshots | 30 days | daily purge job |
 | Analysis run logs and report artifacts | 90 days | daily purge job |
-| Audit hashes | 365 days | daily purge job |
+| Audit hashes | at least 365 days | the database refuses to delete a row younger than 365 days; the purge job for older rows arrives with the scheduler (M3), and until then rows are kept |
 | Confirmed passenger legs after event deletion | 90 days after the trip date | supports change-impact comparison |
 | Resolved findings | 90 days after resolution | |
 | Inactive external passenger and household | removed or anonymised 90 days after the carpool ends (last trip, or a recorded carpool end date), or on request; audit hashes keep their own retention | registry review prompt at 75 days |
@@ -198,4 +198,5 @@ Rules:
 - Tests and fixtures use synthetic data.
 - Real calendar exports, even after M0 check 2 sanitisation, stay local or in
   the private deployment repository; they are never committed here.
-- Secret scanning (TruffleHog pre-commit, CI) is mandatory.
+- Secret scanning (gitleaks at pre-commit, and over the full history in the
+  Private Data Guard CI workflow) is mandatory.

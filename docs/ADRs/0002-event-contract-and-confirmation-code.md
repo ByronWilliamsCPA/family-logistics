@@ -147,4 +147,4 @@ different occurrence never matches.
 ## References
 
 - Site-specific requirements and the defaults register are kept in the private deployment repository.
-- [tools/m0/check4_shortcuts_protocol.md](../../tools/m0/check4_shortcuts_protocol.md)
+- [tools/m0/check4_shortcuts_protocol.md](https://github.com/ByronWilliamsCPA/family-logistics/blob/main/tools/m0/check4_shortcuts_protocol.md)
