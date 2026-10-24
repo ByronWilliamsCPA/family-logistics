@@ -454,3 +454,29 @@ class TestHostAllowlist:
             with pytest.raises(DisallowedHostError):
                 await client.request("PROPFIND", "https://icloud.com.evil.net/a")
         assert recorder.seen == ["PROPFIND"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "location",
+        ["https://192.0.2.10/admin", "https://icloud.com.evil.example/b"],
+    )
+    async def test_async_redirect_to_a_disallowed_host_is_refused_before_io(
+        self, location
+    ):
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            return httpx.Response(302, headers={"Location": location})
+
+        transport = AsyncReadOnlyTransport(
+            httpx.MockTransport(handler), allowed_hosts=["icloud.com"]
+        )
+        async with httpx.AsyncClient(
+            base_url="https://caldav.icloud.com",
+            transport=transport,
+            follow_redirects=True,
+        ) as client:
+            with pytest.raises(DisallowedHostError):
+                await client.request("PROPFIND", "/a")
+        assert calls == ["https://caldav.icloud.com/a"]
