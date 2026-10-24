@@ -413,7 +413,7 @@ Set these in Repository Settings > Secrets and variables > Actions:
 | `CODECOV_TOKEN` | Codecov uploads | codecov.io > Settings > Upload Token |
 | `SONAR_TOKEN` | SonarCloud analysis | sonarcloud.io > Account > Security |
 | `SCORECARD_TOKEN` | Scorecard (optional) | GitHub PAT with repo scope |
-| `QLTY_COVERAGE_TOKEN` | Qlty coverage upload | qlty.sh > project Settings > Coverage token |
+| `QLTY_TOKEN` | Qlty coverage upload (the workflow maps it to the reusable workflow's `QLTY_COVERAGE_TOKEN` input) | qlty.sh > project Settings > Coverage token |
 
 ### Container Image Publishing
 
@@ -432,8 +432,8 @@ consumes their output to build trend data.
 **Setup**:
 
 1. Create a project at [qlty.sh](https://qlty.sh) and link your GitHub repository.
-2. Copy the `QLTY_COVERAGE_TOKEN` from the Qlty project Settings page.
-3. Add it as a repository secret named `QLTY_COVERAGE_TOKEN` (see [Required GitHub Secrets](#required-github-secrets)).
+2. Copy the coverage token from the Qlty project Settings page.
+3. Add it as a secret named `QLTY_TOKEN`; `qlty.yml` maps it to the reusable workflow's `QLTY_COVERAGE_TOKEN` input (see [Required GitHub Secrets](#required-github-secrets)).
 
 The `.qlty/qlty.toml` configuration file is already generated. No manual tool
 configuration is required beyond the token.

@@ -32,10 +32,11 @@ jobs:
       coverage-file-path: coverage.xml
       coverage-format: cobertura
       workflow-run-id: ${{ github.event.workflow_run.id }}
-    # #ASSUME: external resources: a QLTY_COVERAGE_TOKEN secret exists for this
-    # repository. The org currently lists QLTY_TOKEN only, so the callee's
-    # skip-if-no-token default (true) skips the upload with a warning.
-    # #VERIFY: after the token is created, a main CI run shows 'QLTY_COVERAGE_TOKEN
-    # is configured' in this job's log.
+    # #ASSUME: external resources: the org secret QLTY_TOKEN is mapped to the
+    # callee's QLTY_COVERAGE_TOKEN input and is a token Qlty accepts for
+    # coverage upload. Without a usable token the callee's skip-if-no-token
+    # default (true) skips the upload with a warning.
+    # #VERIFY: on the first main run, the coverage upload step in this job
+    # succeeds (the log shows 'QLTY_COVERAGE_TOKEN is configured').
     secrets:
-      QLTY_COVERAGE_TOKEN: ${{ secrets.QLTY_COVERAGE_TOKEN }}
+      QLTY_COVERAGE_TOKEN: ${{ secrets.QLTY_TOKEN }}
