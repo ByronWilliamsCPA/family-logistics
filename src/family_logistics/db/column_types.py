@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class UtcDateTime(TypeDecorator[datetime]):
-    """A timezone-aware UTC timestamp column.
+    """A timezone-aware UTC timestamp column, wrapping ``DateTime(timezone=True)``.
 
     SQLite has no timestamp type and keeps no offset: ``DateTime(timezone=True)``
     stores the wall-clock text and returns a naive ``datetime``, so a value
@@ -38,7 +38,6 @@ class UtcDateTime(TypeDecorator[datetime]):
     cache_ok = True
 
     def __init__(self) -> None:
-        """Wrap ``DateTime(timezone=True)``."""
         super().__init__(timezone=True)
 
     def process_bind_param(

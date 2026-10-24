@@ -65,6 +65,11 @@ def to_occurrence_key(key: SourceEventKey) -> OccurrenceKey:
     return (key.calendar_id, key.uid, key.recurrence_id or "")
 
 
+def _message(owner: str, name: str, rule: str) -> str:
+    """Return the error text for a broken rule, naming the field and never its value."""
+    return f"{owner}.{name} {rule}"
+
+
 def _invalid(owner: str, name: str, rule: str) -> ValidationError:
     """Build a ValidationError that names the field and never its value.
 
@@ -79,7 +84,7 @@ def _invalid(owner: str, name: str, rule: str) -> ValidationError:
     Returns:
         The error to raise.
     """
-    return ValidationError(f"{owner}.{name} {rule}", field=name)
+    return ValidationError(_message(owner, name, rule), field=name)
 
 
 def _require_text(owner: str, name: str, value: str) -> None:
@@ -240,7 +245,9 @@ class SourceEvent:
         _require_aware(owner, "last_seen", self.last_seen)
         _require_not_before(owner, "end", self.start, self.end)
         if self.status not in _EVENT_STATUSES:
-            raise _invalid(owner, "status", "is not a valid wire value")
+            raise ValidationError(
+                _message(owner, "status", "is not a valid wire value"), field="status"
+            )
 
     @property
     def occurrence_key(self) -> OccurrenceKey:
@@ -285,8 +292,8 @@ class CalendarSource:
     def __post_init__(self) -> None:
         """Validate the contract invariants and normalize ``kind``.
 
-        Raises:
-            ValidationError: On an empty id, a naive datetime or an unknown kind.
+        Invalid input raises ``ValidationError``: an empty id, a naive datetime
+        or an unknown kind.
         """
         owner = "CalendarSource"
         _require_text(owner, "calendar_id", self.calendar_id)
@@ -342,7 +349,10 @@ class CollectionResult:
         # #VERIFY: complete is True exactly when error is None; no other
         # combination can be constructed.
         if self.complete != (self.error is None):
-            raise _invalid(owner, "complete", "must be True exactly when error is None")
+            raise ValidationError(
+                _message(owner, "complete", "must be True exactly when error is None"),
+                field="complete",
+            )
         _require_aware(owner, "window_start", self.window_start)
         _require_aware(owner, "window_end", self.window_end)
         _require_aware(owner, "fetched_at", self.fetched_at)
@@ -384,10 +394,9 @@ class Activity:
     def __post_init__(self) -> None:
         """Validate the contract invariants and normalize fields.
 
-        Raises:
-            ValidationError: On an empty id, a naive datetime, ``end`` before
-                ``start``, a non-tuple ``participant_ids`` or an unknown
-                classification.
+        Invalid input raises ``ValidationError``: an empty id, a naive
+        datetime, ``end`` before ``start``, a non-tuple ``participant_ids`` or
+        an unknown classification.
         """
         owner = "Activity"
         _require_text(owner, "activity_id", self.activity_id)
@@ -453,7 +462,10 @@ class TransportDefault:
         _require_text(owner, "destination_location_id", self.destination_location_id)
         _require_optional_text(owner, "driver_id", self.driver_id)
         if any(not 0 <= day <= 6 for day in self.weekdays):
-            raise _invalid(owner, "weekdays", "must only hold 0 (Monday) to 6 (Sunday)")
+            raise ValidationError(
+                _message(owner, "weekdays", "must only hold 0 (Monday) to 6 (Sunday)"),
+                field="weekdays",
+            )
         if self.effective_from is not None and self.effective_to is not None:
             _require_not_before(
                 owner, "effective_to", self.effective_from, self.effective_to
@@ -508,9 +520,8 @@ class SchoolDay:
     def __post_init__(self) -> None:
         """Validate the contract invariants and normalize ``kind``.
 
-        Raises:
-            ValidationError: On an empty id, a naive datetime, ``end`` before
-                ``start`` or an unknown kind.
+        Invalid input raises ``ValidationError``: an empty id, a naive
+        datetime, ``end`` before ``start`` or an unknown kind.
         """
         owner = "SchoolDay"
         _require_text(owner, "person_id", self.person_id)
@@ -563,9 +574,8 @@ class AssessmentInput:
     def __post_init__(self) -> None:
         """Validate the contract invariants.
 
-        Raises:
-            ValidationError: On a naive datetime, an inverted window or an
-                unknown IANA timezone name.
+        Invalid input raises ``ValidationError``: a naive datetime, an
+        inverted window or an unknown IANA timezone name.
         """
         owner = "AssessmentInput"
         _require_aware(owner, "window_start", self.window_start)
