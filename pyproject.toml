@@ -260,9 +260,6 @@ known-first-party = ["family_logistics"]
 # Exception classes legitimately require multiple context parameters in __init__
 "**/core/exceptions.py" = ["PLR0913"]
 
-# Security middleware uses keyword-only args for a rich configuration surface
-"**/middleware/security.py" = ["PLR0913"]
-
 # Test files (relaxed rules for test code)
 "tests/**/*.py" = [
     "ANN",    # Type annotations not required in tests
@@ -338,18 +335,6 @@ known-first-party = ["family_logistics"]
 ]
 
 # API health checks - Example code with template patterns
-
-# Security middleware - SSRF protection with intentional patterns
-"src/*/middleware/security.py" = [
-    "S104",    # 0.0.0.0 in BLOCKED_HOSTS list is intentional
-    "BLE001",  # Blind except for URL parsing resilience
-    "PLC0415", # Local imports to avoid circular dependencies
-    "TRY300",  # Return in try block is clearer for simple cases
-    "ANN001",  # call_next typing is complex (Starlette middleware)
-    "RUF012",  # ClassVar not needed for constants
-    "C416",    # Dict comprehension is clearer than dict()
-    "SIM102",  # Nested if is more readable for security checks
-]
 
 # Logging utilities - Structlog processor interface
 "src/*/utils/logging.py" = [

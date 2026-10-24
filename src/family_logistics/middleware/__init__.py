@@ -21,9 +21,7 @@ from family_logistics.middleware.correlation import (
     set_correlation_id,
 )
 from family_logistics.middleware.security import (
-    RateLimitMiddleware,
     SecurityHeadersMiddleware,
-    SSRFPreventionMiddleware,
     add_security_middleware,
 )
 
@@ -33,8 +31,6 @@ __all__ = [
     "SPAN_ID_HEADER",
     "TRACE_ID_HEADER",
     "CorrelationMiddleware",
-    "RateLimitMiddleware",
-    "SSRFPreventionMiddleware",
     "SecurityHeadersMiddleware",
     "add_security_middleware",
     "correlation_context_processor",

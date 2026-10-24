@@ -1,102 +1,79 @@
-"""SSRF blocklist and rate-limit behaviour of the (not yet wired) middleware."""
+"""Behaviour of the security headers middleware and its wiring helper."""
 
 from __future__ import annotations
-
-import ipaddress
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from starlette.requests import Request
-from starlette.responses import PlainTextResponse
 
+from family_logistics.middleware import security
 from family_logistics.middleware.security import (
-    ALL_INTERFACES,
-    RateLimitMiddleware,
-    SSRFPreventionMiddleware,
+    SecurityHeadersMiddleware,
+    add_security_middleware,
 )
 
 
-def ssrf() -> SSRFPreventionMiddleware:
-    return SSRFPreventionMiddleware(app=FastAPI())
+def build_app() -> FastAPI:
+    app = FastAPI()
+
+    @app.get("/")
+    def root() -> dict[str, str]:
+        return {}
+
+    return app
 
 
 @pytest.mark.unit
-class TestSsrfBlocklist:
-    def test_all_interfaces_constant_is_the_unspecified_address(self):
-        assert ipaddress.ip_address(ALL_INTERFACES).is_unspecified
-        assert ALL_INTERFACES in SSRFPreventionMiddleware.BLOCKED_HOSTS
+class TestSecurityHeaders:
+    def test_headers_are_added_to_every_response(self):
+        app = build_app()
+        app.add_middleware(SecurityHeadersMiddleware)
+        response = TestClient(app).get("/")
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert response.headers["X-Frame-Options"] == "DENY"
+        assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+        assert "Strict-Transport-Security" not in response.headers
 
-    @pytest.mark.parametrize(
-        "url",
-        [
-            "http://localhost/x",
-            "http://LOCALHOST/x",
-            "http://127.0.0.1/x",
-            "http://0.0.0.0/x",
-            "http://0/x",
-            "http://[::1]/x",
-            "http://[::ffff:127.0.0.1]/x",
-            "http://169.254.169.254/latest/meta-data",
-            "http://10.0.0.1/x",
-            "http://[fd00::1]/x",
-            "http://2130706433/x",
-            "http://metadata.google.internal/x",
-            "http://user@127.0.0.1/x",
-            "file:///etc/passwd",
-            "gopher://example.invalid/",
-        ],
-    )
-    def test_internal_destinations_are_blocked(self, url):
-        assert ssrf()._is_blocked_url(url) is True
+    def test_hsts_is_sent_only_over_https(self):
+        app = build_app()
+        app.add_middleware(SecurityHeadersMiddleware)
+        response = TestClient(app, base_url="https://testserver").get("/")
+        assert "max-age=31536000" in response.headers["Strict-Transport-Security"]
 
-    @pytest.mark.parametrize(
-        "url",
-        ["https://example.com/x", "https://caldav.icloud.com/", "http://8.8.8.8/"],
-    )
-    def test_public_destinations_are_allowed(self, url):
-        assert ssrf()._is_blocked_url(url) is False
 
-    def test_middleware_rejects_a_blocked_url_in_a_query_parameter(self):
-        app = FastAPI()
-        app.add_middleware(SSRFPreventionMiddleware)
+@pytest.mark.unit
+class TestAddSecurityMiddleware:
+    def test_default_wiring_adds_headers_without_redirect(self):
+        app = build_app()
+        add_security_middleware(app)
+        response = TestClient(app, follow_redirects=False).get("/")
+        assert response.status_code == 200
+        assert response.headers["X-Frame-Options"] == "DENY"
 
-        @app.get("/")
-        def root() -> dict[str, str]:
-            return {}
+    def test_https_redirect_is_opt_in(self):
+        app = build_app()
+        add_security_middleware(app, enable_https_redirect=True)
+        response = TestClient(app, follow_redirects=False).get("/")
+        assert response.status_code == 307
+        assert response.headers["location"].startswith("https://")
 
-        client = TestClient(app)
-        blocked = client.get("/", params={"u": "http://0.0.0.0/x"})
-        allowed = client.get("/", params={"u": "https://example.com/x"})
-        assert blocked.status_code == 400
+    def test_trusted_hosts_reject_other_hosts(self):
+        app = build_app()
+        add_security_middleware(app, allowed_hosts=["allowed.test"])
+        allowed = TestClient(app, base_url="http://allowed.test").get("/")
+        rejected = TestClient(app, base_url="http://other.test").get("/")
         assert allowed.status_code == 200
+        assert rejected.status_code == 400
 
+    def test_cors_allows_only_configured_origins(self):
+        app = build_app()
+        add_security_middleware(app, allowed_origins=["https://ok.test"])
+        client = TestClient(app)
+        ok = client.get("/", headers={"Origin": "https://ok.test"})
+        other = client.get("/", headers={"Origin": "https://evil.test"})
+        assert ok.headers["access-control-allow-origin"] == "https://ok.test"
+        assert "access-control-allow-origin" not in other.headers
 
-def request_without_client() -> Request:
-    return Request(
-        {
-            "type": "http",
-            "method": "GET",
-            "path": "/",
-            "headers": [],
-            "query_string": b"",
-            "client": None,
-        }
-    )
-
-
-@pytest.mark.unit
-class TestRateLimit:
-    @pytest.mark.asyncio
-    async def test_missing_client_is_limited_under_the_unknown_bucket(self, caplog):
-        middleware = RateLimitMiddleware(app=FastAPI(), requests_per_minute=1)
-
-        async def call_next(_request: Request) -> PlainTextResponse:
-            return PlainTextResponse("ok")
-
-        with caplog.at_level("WARNING"):
-            first = await middleware.dispatch(request_without_client(), call_next)
-            second = await middleware.dispatch(request_without_client(), call_next)
-        assert (first.status_code, second.status_code) == (200, 429)
-        assert "request.client is None" in caplog.text
-        assert list(middleware.requests) == ["unknown"]
+    def test_removed_middleware_is_not_exported(self):
+        assert not hasattr(security, "RateLimitMiddleware")
+        assert not hasattr(security, "SSRFPreventionMiddleware")
