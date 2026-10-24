@@ -54,10 +54,10 @@ class TestSettings:
 
     def test_short_ha_token_rejected(self):
         with pytest.raises(ValidationError):
-            Settings(ha_token="short")  # type: ignore[arg-type]
+            Settings.model_validate({"ha_token": "short"})
 
     def test_secret_not_in_repr(self):
-        settings = Settings(ha_token=GOOD_TOKEN)  # type: ignore[arg-type]
+        settings = Settings.model_validate({"ha_token": GOOD_TOKEN})
         assert GOOD_TOKEN not in repr(settings)
 
     def test_proxy_and_ui_defaults(self):
@@ -90,7 +90,7 @@ class TestSettings:
 
     def test_invalid_notification_mode(self):
         with pytest.raises(ValidationError):
-            Settings(notification_mode="loud")  # type: ignore[arg-type]
+            Settings.model_validate({"notification_mode": "loud"})
 
 
 @pytest.mark.unit
@@ -145,9 +145,12 @@ class TestCli:
         monkeypatch.setattr(uvicorn, "run", lambda app, **kw: calls.update(kw))
         monkeypatch.setenv("FL_BIND_HOST", ALL_INTERFACES)
         monkeypatch.setenv("FL_PORT", "8081")
-        result = CliRunner().invoke(cli, ["serve"])
+        result = CliRunner().invoke(cli, ["serve", "--upgrade-db"])
         assert result.exit_code == 0, result.output
         assert calls["workers"] == 1
+        assert calls["log_config"] is None
+        # uvicorn would otherwise rewrite request.client from X-Forwarded-For.
+        assert calls["proxy_headers"] is False
         assert (calls["host"], calls["port"]) == (ALL_INTERFACES, 8081)
 
     def test_healthcheck_fails_when_nothing_listens(self, monkeypatch, fresh_settings):

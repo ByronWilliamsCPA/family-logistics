@@ -1,19 +1,29 @@
 name: Qlty
 
 on:
+  # zizmor: ignore[dangerous-triggers] -- only consumes coverage artifacts from
+  # same-repository CI runs (job condition); never checks out or runs PR code.
   workflow_run:
     workflows: ["CI"]
     types:
       - completed
+    # Only main: the upload job holds a secret, so branch runs (any user with
+    # write access) must not trigger it. Matches codecov.yml.
+    branches: [main]
 
 concurrency:
   group: qlty-coverage-${{ github.event.workflow_run.head_branch }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   qlty:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-qlty-coverage.yml@961eb17d8e9b7fe0d8bfc5dbe9d23c824484fb11  # main
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-qlty-coverage.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
     permissions:
       contents: read
       actions: read
@@ -22,5 +32,11 @@ jobs:
       coverage-file-path: coverage.xml
       coverage-format: cobertura
       workflow-run-id: ${{ github.event.workflow_run.id }}
+    # #ASSUME: external resources: the org secret QLTY_TOKEN is mapped to the
+    # callee's QLTY_COVERAGE_TOKEN input and is a token Qlty accepts for
+    # coverage upload. Without a usable token the callee's skip-if-no-token
+    # default (true) skips the upload with a warning.
+    # #VERIFY: on the first main run, the coverage upload step in this job
+    # succeeds (the log shows 'QLTY_COVERAGE_TOKEN is configured').
     secrets:
-      QLTY_COVERAGE_TOKEN: ${{ secrets.QLTY_COVERAGE_TOKEN }}
+      QLTY_COVERAGE_TOKEN: ${{ secrets.QLTY_TOKEN }}

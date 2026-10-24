@@ -67,5 +67,5 @@ any alert.
 
 ## References
 
-- [Acceptance scenario matrix](../../tests/scenarios/test_acceptance_matrix.py)
+- [Acceptance scenario matrix](https://github.com/ByronWilliamsCPA/family-logistics/blob/main/tests/scenarios/test_acceptance_matrix.py)
 - [ADR-002](0002-event-contract-and-confirmation-code.md)

@@ -45,9 +45,9 @@ def test_storing_without_key_is_refused():
 @pytest.mark.unit
 def test_settings_validate_data_key():
     with pytest.raises(ValidationError):
-        Settings(data_key="not-a-fernet-key")  # type: ignore[arg-type]
+        Settings.model_validate({"data_key": "not-a-fernet-key"})
     key = generate_key()
-    settings = Settings(data_key=key)  # type: ignore[arg-type]
+    settings = Settings.model_validate({"data_key": key})
     assert key not in repr(settings)
 
 

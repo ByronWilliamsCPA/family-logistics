@@ -3,8 +3,7 @@
   "extends": [
     "config:recommended",
     ":dependencyDashboard",
-    ":semanticCommits",
-    ":preserveSemverRanges"
+    ":semanticCommits"
   ],
   "timezone": "America/New_York",
   "schedule": [
@@ -25,82 +24,140 @@
   "packageRules": [
     {
       "description": "Group Python dependencies by type",
-      "matchManagers": ["pep621"],
-      "matchDepTypes": ["dependencies"],
+      "matchManagers": [
+        "pep621"
+      ],
+      "matchDepTypes": [
+        "dependencies"
+      ],
       "groupName": "Python dependencies",
       "automerge": false,
-      "schedule": ["every weekend"]
+      "schedule": [
+        "every weekend"
+      ]
     },
     {
       "description": "Group Python dev dependencies",
-      "matchManagers": ["pep621"],
-      "matchDepTypes": ["dev"],
+      "matchManagers": [
+        "pep621"
+      ],
+      "matchDepTypes": [
+        "dev"
+      ],
       "groupName": "Python dev dependencies",
       "automerge": false,
-      "schedule": ["every weekend"]
+      "schedule": [
+        "every weekend"
+      ]
     },
     {
-      "description": "Auto-merge GitHub Actions minor/patch updates",
-      "matchManagers": ["github-actions"],
-      "matchUpdateTypes": ["minor", "patch"],
+      "description": "Auto-merge GitHub Actions minor/patch updates, but only after a 7 day soak so a compromised release is caught before it merges unreviewed",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
       "automerge": true,
       "automergeType": "pr",
-      "automergeStrategy": "squash"
+      "automergeStrategy": "squash",
+      "minimumReleaseAge": "7 days"
     },
     {
       "description": "Group GitHub Actions updates",
-      "matchManagers": ["github-actions"],
+      "matchManagers": [
+        "github-actions"
+      ],
       "groupName": "GitHub Actions",
       "commitMessageTopic": "GitHub Actions"
     },
     {
-      "description": "Security updates - high priority",
-      "matchDatasources": ["pypi", "github-actions"],
-      "vulnerabilityAlerts": {
-        "enabled": true
-      },
-      "labels": ["security", "dependencies"],
-      "automerge": false,
-      "schedule": ["at any time"]
-    },
-    {
-      "description": "Critical security updates - immediate",
-      "matchDatasources": ["pypi"],
-      "matchCurrentVersion": "!/^0/",
-      "vulnerabilityAlerts": {
-        "enabled": true
-      },
-      "matchSeverity": ["CRITICAL", "HIGH"],
-      "labels": ["security", "critical", "dependencies"],
-      "automerge": false,
-      "prPriority": 10,
-      "schedule": ["at any time"]
-    },
-    {
       "description": "Pin GitHub Actions to commit SHA",
-      "matchManagers": ["github-actions"],
+      "matchManagers": [
+        "github-actions"
+      ],
       "pinDigests": true
     },
     {
       "description": "Pydantic v2 - maintain major version",
-      "matchPackageNames": ["pydantic", "pydantic-settings"],
-      "matchUpdateTypes": ["major"],
+      "matchPackageNames": [
+        "pydantic",
+        "pydantic-settings"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
       "enabled": false,
-      "labels": ["dependencies", "breaking-change"]
+      "labels": [
+        "dependencies",
+        "breaking-change"
+      ]
     },
     {
-      "description": "Python version updates - manual review required",
-      "matchDepTypes": ["python"],
+      "description": "requires-python bumps are manual, reviewed decisions",
+      "matchManagers": [
+        "pep621"
+      ],
+      "matchDepTypes": [
+        "requires-python"
+      ],
       "enabled": false,
-      "labels": ["dependencies", "python-version", "breaking-change"]
+      "labels": [
+        "dependencies",
+        "python-version",
+        "breaking-change"
+      ]
+    },
+    {
+      "description": "Pre-commit hook revs are SHA-pinned with a version comment; update both together and group them",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchFileNames": [
+        ".pre-commit-config.yaml"
+      ],
+      "groupName": "pre-commit hooks",
+      "automerge": false,
+      "schedule": [
+        "every weekend"
+      ]
+    },
+    {
+      "description": "Container base image digests: never automerge. The Dockerfile pins are tag plus digest, so review each proposed tag or digest and confirm it is still the intended DHI python variant before merging",
+      "matchManagers": [
+        "dockerfile",
+        "docker-compose"
+      ],
+      "groupName": "container base images",
+      "automerge": false,
+      "labels": [
+        "dependencies",
+        "container"
+      ]
+    },
+    {
+      "description": "The built-in pre-commit manager cannot update SHA-pinned revs; the custom.regex manager owns every github.com hook repo, so disable the built-in lookup for them (it still handles additional_dependencies on local hooks)",
+      "matchManagers": [
+        "pre-commit"
+      ],
+      "matchDatasources": [
+        "github-tags"
+      ],
+      "enabled": false
     }
   ],
   "lockFileMaintenance": {
     "enabled": true,
-    "schedule": ["before 5am on monday"],
+    "schedule": [
+      "before 5am on monday"
+    ],
     "commitMessageAction": "Update",
     "automerge": false,
-    "labels": ["dependencies", "lock-file-maintenance"]
+    "labels": [
+      "dependencies",
+      "lock-file-maintenance"
+    ]
   },
   "separateMajorMinor": true,
   "separateMinorPatch": false,
@@ -112,24 +169,60 @@
   "rangeStrategy": "bump",
   "vulnerabilityAlerts": {
     "enabled": true,
-    "labels": ["security"],
-    "assignees": ["ByronWilliamsCPA"],
-    "reviewers": ["ByronWilliamsCPA"]
+    "labels": [
+      "security"
+    ],
+    "assignees": [
+      "ByronWilliamsCPA"
+    ],
+    "reviewers": [
+      "ByronWilliamsCPA"
+    ],
+    "schedule": [
+      "at any time"
+    ],
+    "automerge": false
   },
   "osvVulnerabilityAlerts": true,
-  "transitiveRemediation": true,
   "customManagers": [
     {
       "customType": "regex",
-      "managerFilePatterns": ["^\\.github/workflows/.*\\.ya?ml$"],
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.*\\.ya?ml$/"
+      ],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*?)\\s+.*?_VERSION:\\s*[\"']?(?<currentValue>.*?)[\"']?\\s"
       ]
+    },
+    {
+      "customType": "regex",
+      "description": "SHA-pinned pre-commit hook revs: `rev: <sha>  # <tag>`. Renovate's built-in pre-commit manager parses YAML (dropping comments) and cannot update a SHA pin, so this manager reads the tag from the comment and rewrites the digest and comment together.",
+      "managerFilePatterns": [
+        "/(^|/)\\.pre-commit-config\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "repo: https://github\\.com/(?<depName>[\\w.-]+/[\\w.-]+?)(?:\\.git)?\\s*\\n\\s+rev: (?<currentDigest>[0-9a-f]{40})\\s+#\\s*(?<currentValue>v?[0-9][\\w.+-]*)"
+      ],
+      "datasourceTemplate": "github-tags"
     }
   ],
   "enabledManagers": [
     "pep621",
     "github-actions",
-    "npm"
-  ]
+    "dockerfile",
+    "docker-compose",
+    "pre-commit",
+    "pip-compile",
+    "custom.regex"
+  ],
+  "minimumReleaseAge": "3 days",
+  "internalChecksFilter": "strict",
+  "pip-compile": {
+    "managerFilePatterns": [
+      "/^\\.github/requirements/.+\\.txt$/"
+    ]
+  },
+  "pre-commit": {
+    "enabled": true
+  }
 }

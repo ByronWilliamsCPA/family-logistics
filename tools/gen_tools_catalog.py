@@ -29,8 +29,10 @@ This page provides an overview of the development tools configured for this proj
 | Tool | Purpose | Configuration |
 |------|---------|---------------|
 | **Bandit** | Security scanning | `pyproject.toml` |
-| **Safety** | Dependency vulnerability check | CLI |
-| **Gitleaks** | Secret detection | `.gitleaks.toml` |
+| **pip-audit** | Dependency vulnerability check | CLI |
+| **OSV-Scanner** | Lockfile vulnerability scan | `osv-scanner.toml` |
+| **Gitleaks** | Secret and household-data detection | `.gitleaks.toml` |
+| **Private terms** | Out-of-tree deny-list of real names and places | `scripts/check_private_terms.py` |
 
 ## Testing Tools
 
@@ -88,5 +90,6 @@ def main() -> None:
     mkdocs_gen_files.set_edit_path("tools/catalog.md", Path(__file__).name)
 
 
-if __name__ == "__main__":
-    main()
+# mkdocs-gen-files executes this file with runpy (``__name__`` is not
+# ``"__main__"``), so generate unconditionally on import.
+main()

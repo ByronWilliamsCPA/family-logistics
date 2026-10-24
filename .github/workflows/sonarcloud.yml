@@ -1,13 +1,13 @@
 # Family Logistics - SonarCloud Analysis
 # Thin caller for the organization's reusable SonarCloud workflow.
 #
-# The reusable workflow uses sonarqube-scan-action v7.2.0, which resolves
-# the /analysis/analyses 404 bug encountered with v4.x on new projects.
+# The reusable workflow (pinned below) uses sonarqube-scan-action v8.2, which
+# resolves the /analysis/analyses 404 bug encountered with v4.x on new projects.
 #
-# SonarCloud Dashboard: https://sonarcloud.io/dashboard?id=ByronWilliamsCPA_family_logistics
+# SonarCloud Dashboard: https://sonarcloud.io/dashboard?id=ByronWilliamsCPA_family-logistics
 #
-# Note: This workflow requires SONAR_TOKEN secret to be configured.
-# If not configured, the reusable workflow will skip gracefully.
+# Note: This workflow requires the SONAR_TOKEN secret. It fails when the token
+# is missing, except on fork pull requests, which never receive secrets.
 name: SonarCloud
 
 on:
@@ -31,15 +31,22 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-sonarcloud.yml@961eb17d8e9b7fe0d8bfc5dbe9d23c824484fb11  # main
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-sonarcloud.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
     with:
       sonar-organization: 'byronwilliamscpa'
-      sonar-project-key: 'ByronWilliamsCPA_family_logistics'
+      sonar-project-key: 'ByronWilliamsCPA_family-logistics'
       python-version: '3.12'
       source-directory: 'src'
       coverage-paths: 'coverage.xml'
-      fail-on-quality-gate: ${{ github.event_name != 'pull_request' }}
-      skip-if-no-token: true
-      no-build: false  # generated project ships as an installable package; upstream default of true would block 'uv sync' from installing the editable project for coverage
+      # Enforce the quality gate on pull requests too, so a failing gate blocks
+      # before merge rather than after.
+      fail-on-quality-gate: true
+      # #ASSUME: external resources: SONAR_TOKEN is available to this repository.
+      # #VERIFY: a same-repository pull request run fails, not skips, when it is
+      # missing; only fork pull requests (no secrets) are allowed to skip.
+      skip-if-no-token: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+      # The project installs as an editable package for coverage; the
+      # upstream default (true) would stop 'uv sync' from installing it.
+      no-build: false
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

@@ -73,7 +73,7 @@ uv run basedpyright src/
 
 ### 5. Generate Project Planning Documents
 
-Use Claude Code to generate comprehensive planning documents for your project:
+Use Claude Code to generate planning documents for your project:
 
 ```bash
 # Open Claude Code and describe your project, then run:
@@ -90,7 +90,7 @@ This template includes an integrated AI-assisted project planning workflow that 
 
 ### Overview
 
-The planning workflow generates 4 core documents, then synthesizes them into a comprehensive project plan:
+The planning workflow generates 4 core documents, then synthesizes them into a single project plan:
 
 ```text
 Project Description
@@ -163,6 +163,7 @@ existing PostgreSQL database and support OAuth2 authentication.
 | Architecture Decision Records | `docs/planning/adr/adr-001-*.md` | Key technical decisions with rationale |
 
 **The project-planning skill will:**
+
 1. Analyze your project description
 2. Generate each document using templates
 3. Validate each document with AI consensus review
@@ -179,6 +180,7 @@ After the 4 documents are generated, synthesize them into an actionable plan:
 ```
 
 **The project-plan-synthesizer agent will:**
+
 1. Read and validate all 4 source documents
 2. Extract key information from each document
 3. Lookup best practices via Context7 for your tech stack
@@ -188,6 +190,7 @@ After the 4 documents are generated, synthesize them into an actionable plan:
 7. Create initial TodoWrite checklist for Phase 0
 
 **Output:** `docs/planning/PROJECT-PLAN.md` containing:
+
 - Git branch strategy for each phase
 - Consolidated risk register
 - Cross-referenced architecture decisions
@@ -229,6 +232,7 @@ cat docs/planning/PROJECT-PLAN.md
 ```
 
 **This will:**
+
 - Create the feature branch from main
 - Set up git worktree if parallel development is needed
 - Show semantic release impact for this branch type
@@ -325,7 +329,7 @@ The OpenSSF Best Practices badge requires manual project registration:
 
 1. **Sign up/Login**: Visit [https://sonarcloud.io](https://sonarcloud.io) and authenticate with GitHub
 2. **Import your repository**
-3. **Get your project key**: Should be `ByronWilliamsCPA_family_logistics`
+3. **Get your project key**: it must match `sonar.projectKey` in `sonar-project.properties`
 4. **Create a token**: Account > Security > Generate Token
 5. **Add as GitHub secret**: Repository Settings > Secrets > `SONAR_TOKEN`
 
@@ -390,13 +394,12 @@ Your project includes several GitHub Actions workflows:
 | Workflow | File | Purpose |
 |----------|------|---------|
 | CI Pipeline | `ci.yml` | Tests, linting, type checking |
-| Security Analysis | `security-analysis.yml` | Dependency scanning, CodeQL |
-| PR Validation | `pr-validation.yml` | Lock file and requirements sync validation |
+| Security Analysis | `security-analysis.yml` | Bandit and OSV-Scanner (CodeQL was retired upstream) |
+| PR Validation | `pr-validation.yml` | Conventional Commits PR title check and an advisory documentation link check |
 | OpenSSF Scorecard | `scorecard.yml` | Supply chain security assessment |
 | SBOM & Security Scan | `sbom.yml` | Software Bill of Materials generation |
-| Release | `release.yml` | Automated semantic versioning and releases |
-| Publish to PyPI | `publish-pypi.yml` | Package publishing to PyPI |
-| Documentation | `docs.yml` | Build and deploy MkDocs |
+| Release | `release.yml` | Semantic versioning, changelog and the GHCR container image |
+| Documentation | `docs.yml` | Build MkDocs (deploy to GitHub Pages stays off until Pages is enabled) |
 | REUSE Compliance | `reuse.yml` | License compliance checking |
 | SonarCloud | `sonarcloud.yml` | Code quality analysis |
 
@@ -406,24 +409,29 @@ Set these in Repository Settings > Secrets and variables > Actions:
 
 | Secret | Required For | How to Get |
 |--------|--------------|------------|
-| `PYPI_API_TOKEN` | PyPI publishing | pypi.org > Account > API tokens (or use Trusted Publishing) |
+| `FL_PRIVATE_TERMS` | Private-terms check | Newline-separated terms that must never be committed (kept only as a secret): children's names, school names and street names. Never include anything that appears in a maintainer's own commit name or e-mail (such as the family surname): identity scanning would fail every commit |
 | `CODECOV_TOKEN` | Codecov uploads | codecov.io > Settings > Upload Token |
 | `SONAR_TOKEN` | SonarCloud analysis | sonarcloud.io > Account > Security |
 | `SCORECARD_TOKEN` | Scorecard (optional) | GitHub PAT with repo scope |
-| `QLTY_COVERAGE_TOKEN` | Qlty coverage upload | qlty.sh > project Settings > Coverage token |
+| `QLTY_TOKEN` | Qlty coverage upload (the workflow maps it to the reusable workflow's `QLTY_COVERAGE_TOKEN` input) | qlty.sh > project Settings > Coverage token |
 
-### PyPI Trusted Publishing (Recommended)
+### Runtime Keys (deployment secret store, not GitHub)
 
-Instead of using API tokens, configure trusted publishing for enhanced security:
+The running service takes two independent keys from its secret store through the
+environment. They are not GitHub Actions secrets, and each must be a different
+value; `serve` refuses to start in production mode without both.
 
-1. Go to pypi.org and create or manage your project
-2. Navigate to "Publishing" settings
-3. Add a new trusted publisher with:
-   - **Owner**: `ByronWilliamsCPA`
-   - **Repository**: `family-logistics`
-   - **Workflow**: `publish-pypi.yml`
-   - **Environment**: `pypi`
-4. No `PYPI_API_TOKEN` secret is needed with trusted publishing
+| Variable | Purpose | How to Generate |
+|----------|---------|-----------------|
+| `FL_DATA_KEY` | Fernet key encrypting protected addresses at rest | `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `FL_AUDIT_KEY` | HMAC-SHA256 key for the audit-log state hashes (32 random bytes, url-safe base64) | `python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"` |
+
+### Container Image Publishing
+
+The application is not published to PyPI. The release workflow builds the
+`Dockerfile` and pushes `ghcr.io/byronwilliamscpa/family-logistics` with
+`sha-<7>` and version tags, using the workflow's `GITHUB_TOKEN` with
+`packages: write`. No registry secret is required.
 
 ### Qlty Code Quality
 
@@ -435,8 +443,8 @@ consumes their output to build trend data.
 **Setup**:
 
 1. Create a project at [qlty.sh](https://qlty.sh) and link your GitHub repository.
-2. Copy the `QLTY_COVERAGE_TOKEN` from the Qlty project Settings page.
-3. Add it as a repository secret named `QLTY_COVERAGE_TOKEN` (see [Required GitHub Secrets](#required-github-secrets)).
+2. Copy the coverage token from the Qlty project Settings page.
+3. Add it as a secret named `QLTY_TOKEN`; `qlty.yml` maps it to the reusable workflow's `QLTY_COVERAGE_TOKEN` input (see [Required GitHub Secrets](#required-github-secrets)).
 
 The `.qlty/qlty.toml` configuration file is already generated. No manual tool
 configuration is required beyond the token.
@@ -480,7 +488,7 @@ You can configure branch protection either via script (recommended) or manually 
 
 #### Option 1: Automated Setup (Recommended)
 
-Use the included script to configure comprehensive branch protection:
+Use the included script to configure branch protection:
 
 ```bash
 # Set up branch protection with default settings
@@ -491,6 +499,7 @@ uv run python scripts/setup_github_protection.py --enforce-admins --require-code
 ```
 
 The script configures:
+
 - Required pull request reviews before merging
 - Required status checks to pass
 - Enforce rules for administrators
@@ -571,17 +580,20 @@ with the exact command to recover. No `GITHUB_TOKEN` value is ever echoed back.
 ### Required Status Checks
 
 Add these as required checks:
+
 - `CI / Test` (from CI workflow)
 - `CI / Lint` (from CI workflow)
 - `codecov/patch`
 - `SonarCloud Code Analysis`
 
 ### Security Policy
+
 Your `SECURITY.md` file is already configured. Update these sections:
 
 1. **Supported Versions**: Update as you release new versions
-2. **Security Contact**: Change `security@byronwilliams.dev` if needed
-3. **PGP Key**: Add your security team's PGP key for encrypted reports
+2. **Security Contact**: Reports go only through GitHub private vulnerability
+   reporting (the security advisory link); do not add an e-mail address or a
+   PGP key
 
 ### REUSE Compliance
 
@@ -601,16 +613,13 @@ reuse addheader --license MIT --copyright "Byron Williams" <file>
 
 ### Release Process
 
-1. **Update version** in `pyproject.toml`
-2. **Update CHANGELOG.md** with release notes
-3. **Create a tag**:
-   ```bash
-   git tag -a v1.0.0 -m "Release v1.0.0"
-   git push origin v1.0.0
-   ```
-4. **Create GitHub Release** from the tag
+Releases are automated. python-semantic-release reads Conventional Commit
+messages on `main`, bumps the version, updates `CHANGELOG.md`, tags the release
+and triggers the container image build. Do not edit the version or changelog
+by hand.
 
 ### Dependency Updates
+
 Renovate is configured to automatically create PRs for dependency updates. Review and merge these regularly.
 
 ### Code Quality Standards
@@ -624,18 +633,7 @@ This project enforces:
 
 ### Project Structure
 
-```text
-family_logistics/
-├── src/family_logistics/    # Main package
-│   ├── core/                               # Core functionality
-│   ├── utils/                              # Utility functions
-│   └── cli.py                              # CLI entrypoint
-├── tests/                                  # Test suite
-├── docs/                                   # Documentation
-├── .github/workflows/                      # CI/CD workflows
-├── pyproject.toml                          # Project configuration
-└── README.md                               # Project readme
-```
+See the project layout in the [README](https://github.com/ByronWilliamsCPA/family-logistics#project-layout).
 
 ---
 

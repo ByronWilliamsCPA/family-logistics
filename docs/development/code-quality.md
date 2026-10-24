@@ -72,6 +72,7 @@ uv run pre-commit run --all-files
 ## Quality Gates
 
 All PRs must pass:
+
 - [ ] All tests passing
 - [ ] 80%+ coverage
 - [ ] No type errors

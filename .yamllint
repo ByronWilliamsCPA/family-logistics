@@ -31,3 +31,7 @@ rules:
 
   # Disable document start requirement (---)
   document-start: disable
+
+  # GitHub Actions uses the bare key `on:`; only check values, not keys.
+  truthy:
+    check-keys: false

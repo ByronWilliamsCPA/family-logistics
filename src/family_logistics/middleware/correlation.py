@@ -11,9 +11,14 @@ Features:
 - Structlog integration for log correlation
 
 Standard Headers Supported:
-- X-Request-ID: Primary correlation header
-- X-Correlation-ID: Alternative correlation header
-- X-Trace-ID: Distributed tracing header
+- X-Correlation-ID: Primary correlation header
+- X-Request-ID: Fallback correlation header; also the request ID
+- X-Trace-ID and X-Span-ID: Distributed tracing headers, forwarded as-is
+  (never used as a correlation fallback)
+
+Inbound IDs are attacker-controlled: each one is accepted only when it is a
+short plain token (see ``sanitize_id``); an unsafe correlation or request ID is
+replaced by a generated UUID, and an unsafe trace or span ID is dropped.
 
 Usage:
     from fastapi import FastAPI
@@ -45,6 +50,7 @@ Integration with Logging:
 
 from __future__ import annotations
 
+import re
 import uuid
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
@@ -55,7 +61,7 @@ if TYPE_CHECKING:
     from fastapi import Request
     from starlette.middleware.base import RequestResponseEndpoint
     from starlette.responses import Response
-    from structlog.types import EventDict, WrappedLogger
+    from structlog.types import EventDict
 
 # Context variables for request correlation (async-safe)
 _correlation_id_ctx: ContextVar[str | None] = ContextVar("correlation_id", default=None)
@@ -68,6 +74,27 @@ CORRELATION_ID_HEADER = "X-Correlation-ID"
 REQUEST_ID_HEADER = "X-Request-ID"
 TRACE_ID_HEADER = "X-Trace-ID"
 SPAN_ID_HEADER = "X-Span-ID"
+
+# #CRITICAL: Security: inbound IDs are attacker-controlled. They are logged and
+# echoed back, so only short, plain tokens are accepted; anything else
+# (oversized, control characters, spaces) is replaced or dropped.
+# #VERIFY: tests/unit/test_correlation_sanitize.py rejects each unsafe shape
+# from sanitize_id and through every inbound header of the middleware.
+_SAFE_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+def sanitize_id(value: str | None) -> str | None:
+    """Return an inbound ID only when it is a short, plain token.
+
+    Args:
+        value: Raw header value, or None when absent.
+
+    Returns:
+        The value when it matches ``[A-Za-z0-9._-]{1,64}``, else None.
+    """
+    if value is not None and _SAFE_ID.fullmatch(value):
+        return value
+    return None
 
 
 def get_correlation_id() -> str | None:
@@ -132,7 +159,7 @@ def generate_correlation_id() -> str:
 
 
 def correlation_context_processor(
-    _logger: WrappedLogger,
+    _logger: object,
     _method_name: str,
     event_dict: EventDict,
 ) -> EventDict:
@@ -180,14 +207,18 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
     Extracts or generates correlation IDs for each request and stores them
     in context variables for access throughout the request lifecycle.
 
-    Header Priority:
-    1. X-Correlation-ID (primary)
-    2. X-Request-ID (fallback)
-    3. X-Trace-ID (for distributed tracing)
-    4. Generate new UUID if none provided
+    Correlation ID priority:
+    1. X-Correlation-ID, when it is a safe token
+    2. X-Request-ID, when it is a safe token
+    3. A newly generated UUID4
+
+    The request ID is the safe X-Request-ID, else a generated UUID4.
+    X-Trace-ID and X-Span-ID are separate: each is forwarded only when it is a
+    safe token, otherwise dropped; neither is a correlation fallback.
 
     Features:
-    - Extracts existing correlation IDs from incoming requests
+    - Extracts safe correlation IDs from incoming requests
+    - Replaces unsafe correlation and request IDs, drops unsafe trace IDs
     - Generates new IDs for requests without correlation headers
     - Stores IDs in async-safe context variables
     - Adds correlation headers to responses
@@ -211,19 +242,18 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
         Returns:
             The HTTP response with correlation headers added.
         """
-        # Extract or generate correlation ID
+        # Accept inbound IDs only when they are safe tokens; otherwise generate.
+        inbound_request_id = sanitize_id(request.headers.get(REQUEST_ID_HEADER))
         correlation_id = (
-            request.headers.get(CORRELATION_ID_HEADER)
-            or request.headers.get(REQUEST_ID_HEADER)
+            sanitize_id(request.headers.get(CORRELATION_ID_HEADER))
+            or inbound_request_id
             or generate_correlation_id()
         )
+        request_id = inbound_request_id or generate_correlation_id()
 
-        # Generate unique request ID for this specific request
-        request_id = request.headers.get(REQUEST_ID_HEADER) or generate_correlation_id()
-
-        # Extract distributed tracing headers
-        trace_id = request.headers.get(TRACE_ID_HEADER)
-        span_id = request.headers.get(SPAN_ID_HEADER)
+        # Tracing headers are forwarded only when safe; otherwise dropped.
+        trace_id = sanitize_id(request.headers.get(TRACE_ID_HEADER))
+        span_id = sanitize_id(request.headers.get(SPAN_ID_HEADER))
 
         # Set context variables
         correlation_token = _correlation_id_ctx.set(correlation_id)
@@ -269,5 +299,6 @@ __all__ = [
     "get_request_id",
     "get_span_id",
     "get_trace_id",
+    "sanitize_id",
     "set_correlation_id",
 ]

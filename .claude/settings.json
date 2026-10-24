@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(uv run pytest:*)",
+      "Bash(uv run ruff:*)",
+      "Bash(uv run basedpyright:*)",
+      "Bash(uv run bandit:*)",
+      "Bash(uv run pip-audit:*)",
+      "Bash(uv run pre-commit run:*)",
+      "Bash(uv run mkdocs build:*)",
+      "Bash(uv run family-logistics --help:*)",
+      "Bash(uv run family-logistics verify-db:*)",
+      "Bash(uv sync:*)",
+      "Bash(git status:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(~/.config/family-logistics/**)",
+      "Read(./data/**)",
+      "Read(./backups/**)",
+      "Read(./config/local/**)",
+      "Read(~/.ssh/**)",
+      "Read(./.secrets*)",
+      "Read(./.infisical.json)",
+      "Read(./**/*.pem)",
+      "Bash(git diff --no-index:*)"
+    ],
+    "ask": [
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(uv run family-logistics migrate:*)",
+      "Bash(git push:*)",
+      "Bash(gh pr create:*)",
+      "Bash(rm:*)"
+    ]
+  }
+}
