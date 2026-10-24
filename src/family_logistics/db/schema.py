@@ -2,9 +2,17 @@
 
 The schema itself is owned by the Alembic migrations in
 ``family_logistics/db/migrations``. These definitions mirror the head
-revision's columns for query building; triggers, CHECK constraints and indexes
-exist only in the migrations, so ``metadata.create_all`` does not build a
-production schema. Always create databases with ``migrations_api.upgrade``.
+revision's columns for query building. The pilot-core tables (revision 0002)
+also declare their indexes, unique constraints and named CHECK constraints
+here, with the same names and SQL text as the migration, so metadata and
+migration stay in parity. ``audit_log`` is the exception: its CHECK constraints
+and its append-only triggers exist only in migration 0001, so
+``metadata.create_all`` does not build a production schema. Always create
+databases with ``migrations_api.upgrade``.
+
+Pilot-core timestamp columns use ``UtcDateTime`` (ORM and Core layer only; the
+DDL type is still ``DateTime(timezone=True)``). SQLite stores naive text, so a
+raw SQL writer is not protected by it.
 """
 
 from __future__ import annotations
@@ -12,6 +20,7 @@ from __future__ import annotations
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Column,
     Date,
     DateTime,
@@ -27,7 +36,12 @@ from sqlalchemy import (
     func,
 )
 
+from family_logistics.db.column_types import UtcDateTime
+
 metadata = MetaData()
+
+_PERSON_ID_FK = "person.person_id"
+_LOCATION_ID_FK = "location.location_id"
 
 audit_log = Table(
     "audit_log",
@@ -62,10 +76,23 @@ calendar_source = Table(
     Column("calendar_id", String(128), primary_key=True),
     Column("display_name", String(200), nullable=False),
     Column("kind", String(32), nullable=False),
-    Column("person_id", String(64), ForeignKey("person.person_id"), nullable=True),
+    Column("person_id", String(64), ForeignKey(_PERSON_ID_FK), nullable=True),
     Column("enabled", Boolean, nullable=False, default=True),
-    Column("last_success", DateTime(timezone=True), nullable=True),
+    Column("last_success", UtcDateTime(), nullable=True),
     Column("last_error", String(500), nullable=True),
+    CheckConstraint(
+        "kind IN ('transport', 'person', 'school_district', 'school_bell')",
+        name="ck_calendar_source_kind",
+    ),
+    # Owner rule from events.CalendarSource: person_id is the owner of an
+    # individual calendar and None otherwise.
+    CheckConstraint(
+        (
+            "(kind = 'person' AND person_id IS NOT NULL) "
+            "OR (kind <> 'person' AND person_id IS NULL)"
+        ),
+        name="ck_calendar_source_person_owner",
+    ),
 )
 """Calendars the collector reads; ``calendar_id`` is an href hash."""
 
@@ -81,8 +108,8 @@ source_event = Table(
     ),
     Column("uid", String(255), nullable=False),
     Column("recurrence_id", String(64), nullable=False, default=""),
-    Column("start_utc", DateTime(timezone=True), nullable=False),
-    Column("end_utc", DateTime(timezone=True), nullable=False),
+    Column("start_utc", UtcDateTime(), nullable=False),
+    Column("end_utc", UtcDateTime(), nullable=False),
     Column("all_day", Boolean, nullable=False, default=False),
     Column("summary", Text, nullable=False, default=""),
     Column("location", Text, nullable=True),
@@ -92,9 +119,17 @@ source_event = Table(
     Column("raw_hash", String(64), nullable=False),
     Column("is_override", Boolean, nullable=False, default=False),
     Column("series_uid_has_rrule", Boolean, nullable=False, default=False),
-    Column("first_seen", DateTime(timezone=True), nullable=False),
-    Column("last_seen", DateTime(timezone=True), nullable=False),
-    Column("deleted_at", DateTime(timezone=True), nullable=True),
+    Column("first_seen", UtcDateTime(), nullable=False),
+    Column("last_seen", UtcDateTime(), nullable=False),
+    Column("deleted_at", UtcDateTime(), nullable=True),
+    CheckConstraint(
+        "status IN ('confirmed', 'tentative', 'cancelled')",
+        name="ck_source_event_status",
+    ),
+    CheckConstraint(
+        "julianday(end_utc) >= julianday(start_utc)",
+        name="ck_source_event_end_after_start",
+    ),
     UniqueConstraint(
         "calendar_id", "uid", "recurrence_id", name="uq_source_event_occurrence"
     ),
@@ -117,7 +152,7 @@ sync_state = Table(
     ),
     Column("sync_token", Text, nullable=True),
     Column("ctag", String(255), nullable=True),
-    Column("last_full_sync", DateTime(timezone=True), nullable=True),
+    Column("last_full_sync", UtcDateTime(), nullable=True),
 )
 """Per-calendar CalDAV sync token and collection tag."""
 
@@ -171,8 +206,16 @@ person = Table(
     Column(
         "home_location_id",
         String(64),
-        ForeignKey("location.location_id"),
+        ForeignKey(_LOCATION_ID_FK),
         nullable=True,
+    ),
+    CheckConstraint("role IN ('parent', 'child', 'contact')", name="ck_person_role"),
+    CheckConstraint(
+        (
+            "monitoring_start IS NULL OR monitoring_end IS NULL "
+            "OR monitoring_end >= monitoring_start"
+        ),
+        name="ck_person_monitoring_range",
     ),
 )
 """Family members and registered contacts (external drivers)."""
@@ -188,22 +231,29 @@ external_passenger = Table(
         ForeignKey("household.household_id"),
         nullable=False,
     ),
-    Column("contact_id", String(64), ForeignKey("person.person_id"), nullable=True),
+    Column("contact_id", String(64), ForeignKey(_PERSON_ID_FK), nullable=True),
     Column(
         "default_pickup_location_id",
         String(64),
-        ForeignKey("location.location_id"),
+        ForeignKey(_LOCATION_ID_FK),
         nullable=True,
     ),
     Column(
         "default_dropoff_location_id",
         String(64),
-        ForeignKey("location.location_id"),
+        ForeignKey(_LOCATION_ID_FK),
         nullable=True,
     ),
     Column("alternate_destination_ids", JSON, nullable=False, default=list),
     Column("active", Boolean, nullable=False, default=True),
     Column("inactive_since", Date, nullable=True),
+    # The privacy spec requires a first name or nickname but defines no stricter
+    # shape, so only non-empty (after trim) and the declared maximum length are
+    # enforced; surnames cannot be detected by a CHECK.
+    CheckConstraint(
+        "length(trim(display_first_name)) >= 1 AND length(display_first_name) <= 60",
+        name="ck_external_passenger_first_name",
+    ),
 )
 """Children of other families; ``inactive_since`` drives 90-day removal."""
 
@@ -214,6 +264,9 @@ alias = Table(
     Column("kind", String(16), nullable=False),
     Column("alias", String(120), nullable=False),
     Column("target_id", String(64), nullable=False),
+    CheckConstraint(
+        "kind IN ('person', 'passenger', 'location')", name="ck_alias_kind"
+    ),
 )
 """Alternative names. ``kind`` is ``person``, ``passenger`` or ``location``;
 uniqueness is case-insensitive per kind."""
@@ -229,24 +282,39 @@ transport_default = Table(
     "transport_default",
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("person_id", String(64), ForeignKey("person.person_id"), nullable=False),
+    Column("person_id", String(64), ForeignKey(_PERSON_ID_FK), nullable=False),
     Column("weekdays", JSON, nullable=False),
     Column("direction", String(16), nullable=False),
     Column("mode", String(16), nullable=False),
-    Column("driver_id", String(64), ForeignKey("person.person_id"), nullable=True),
+    Column("driver_id", String(64), ForeignKey(_PERSON_ID_FK), nullable=True),
     Column("effective_from", Date, nullable=True),
     Column("effective_to", Date, nullable=True),
     Column(
         "origin_location_id",
         String(64),
-        ForeignKey("location.location_id"),
+        ForeignKey(_LOCATION_ID_FK),
         nullable=False,
     ),
     Column(
         "destination_location_id",
         String(64),
-        ForeignKey("location.location_id"),
+        ForeignKey(_LOCATION_ID_FK),
         nullable=False,
+    ),
+    CheckConstraint(
+        "direction IN ('to_school', 'from_school')",
+        name="ck_transport_default_direction",
+    ),
+    CheckConstraint(
+        "mode IN ('bike', 'bus', 'walk', 'parent', 'carpool')",
+        name="ck_transport_default_mode",
+    ),
+    CheckConstraint(
+        (
+            "effective_from IS NULL OR effective_to IS NULL "
+            "OR effective_to >= effective_from"
+        ),
+        name="ck_transport_default_effective_range",
     ),
 )
 """Effective-dated school transport defaults; ``weekdays`` is a list of
@@ -257,14 +325,22 @@ analysis_run = Table(
     metadata,
     Column("run_id", String(36), primary_key=True),
     Column("trigger", String(16), nullable=False),
-    Column("window_start", DateTime(timezone=True), nullable=False),
-    Column("window_end", DateTime(timezone=True), nullable=False),
-    Column("started_at", DateTime(timezone=True), nullable=False),
-    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("window_start", UtcDateTime(), nullable=False),
+    Column("window_end", UtcDateTime(), nullable=False),
+    Column("started_at", UtcDateTime(), nullable=False),
+    Column("finished_at", UtcDateTime(), nullable=True),
     Column("status", String(24), nullable=False),
     Column("counts", JSON, nullable=False, default=dict),
     Column("rules_version", String(32), nullable=False),
     Column("error", String(500), nullable=True),
+    CheckConstraint(
+        "status IN ('clear', 'attention_required', 'incomplete', 'failed')",
+        name="ck_analysis_run_status",
+    ),
+    CheckConstraint(
+        "julianday(window_end) >= julianday(window_start)",
+        name="ck_analysis_run_window",
+    ),
 )
 """One assessment run (hourly, daily, weekly or on demand)."""
 
@@ -278,10 +354,18 @@ finding = Table(
     Column("entity_keys", JSON, nullable=False, default=list),
     Column("suggestion", Text, nullable=True),
     Column("lifecycle", String(16), nullable=False),
-    Column("first_seen", DateTime(timezone=True), nullable=False),
-    Column("last_seen", DateTime(timezone=True), nullable=False),
-    Column("resolved_at", DateTime(timezone=True), nullable=True),
+    Column("first_seen", UtcDateTime(), nullable=False),
+    Column("last_seen", UtcDateTime(), nullable=False),
+    Column("resolved_at", UtcDateTime(), nullable=True),
     Column("run_id", String(36), ForeignKey("analysis_run.run_id"), nullable=True),
+    CheckConstraint(
+        "severity IN ('critical', 'warning', 'incomplete')",
+        name="ck_finding_severity",
+    ),
+    CheckConstraint(
+        "lifecycle IN ('new', 'ongoing', 'resolved', 'regressed')",
+        name="ck_finding_lifecycle",
+    ),
     Index("ix_finding_lifecycle", "lifecycle"),
     Index("ix_finding_rule", "rule_id"),
 )

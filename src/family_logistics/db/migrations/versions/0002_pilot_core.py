@@ -15,7 +15,18 @@ down_revision = "0001_baseline"
 branch_labels = None
 depends_on = None
 
+# The DDL type stays DateTime(timezone=True). Offset-preserving behaviour is
+# the ORM-layer ``UtcDateTime`` type in ``db.schema``; migrations must not
+# import app code.
+# #ASSUME: Data integrity: SQLite stores naive text and enforces no offset or
+# UTC rule, so raw SQL writers are NOT protected by ``UtcDateTime``.
+# #VERIFY: only ORM or Core code writes these columns; tests assert the aware
+# UTC round trip through ``db.schema``.
 _TZ = sa.DateTime(timezone=True)
+
+# Referenced by several tables; the names are kept local so the migration does
+# not depend on the mutable ``db.schema`` module.
+_PERSON_ID_FK = "person.person_id"
 
 
 def _location_fk(name: str, *, nullable: bool = True) -> sa.Column[str]:
@@ -82,6 +93,16 @@ def upgrade() -> None:
         sa.Column("monitoring_start", sa.Date, nullable=True),
         sa.Column("monitoring_end", sa.Date, nullable=True),
         _location_fk("home_location_id"),
+        sa.CheckConstraint(
+            "role IN ('parent', 'child', 'contact')", name="ck_person_role"
+        ),
+        sa.CheckConstraint(
+            (
+                "monitoring_start IS NULL OR monitoring_end IS NULL "
+                "OR monitoring_end >= monitoring_start"
+            ),
+            name="ck_person_monitoring_range",
+        ),
     )
     op.create_table(
         "calendar_source",
@@ -91,12 +112,25 @@ def upgrade() -> None:
         sa.Column(
             "person_id",
             sa.String(64),
-            sa.ForeignKey("person.person_id"),
+            sa.ForeignKey(_PERSON_ID_FK),
             nullable=True,
         ),
         sa.Column("enabled", sa.Boolean, nullable=False, server_default=sa.true()),
         sa.Column("last_success", _TZ, nullable=True),
         sa.Column("last_error", sa.String(500), nullable=True),
+        sa.CheckConstraint(
+            "kind IN ('transport', 'person', 'school_district', 'school_bell')",
+            name="ck_calendar_source_kind",
+        ),
+        # Owner rule from events.CalendarSource: person_id is the owner of an
+        # individual calendar and None otherwise.
+        sa.CheckConstraint(
+            (
+                "(kind = 'person' AND person_id IS NOT NULL) "
+                "OR (kind <> 'person' AND person_id IS NULL)"
+            ),
+            name="ck_calendar_source_person_owner",
+        ),
     )
     op.create_table(
         "source_event",
@@ -128,6 +162,14 @@ def upgrade() -> None:
         sa.Column("first_seen", _TZ, nullable=False),
         sa.Column("last_seen", _TZ, nullable=False),
         sa.Column("deleted_at", _TZ, nullable=True),
+        sa.CheckConstraint(
+            "status IN ('confirmed', 'tentative', 'cancelled')",
+            name="ck_source_event_status",
+        ),
+        sa.CheckConstraint(
+            "julianday(end_utc) >= julianday(start_utc)",
+            name="ck_source_event_end_after_start",
+        ),
         sa.UniqueConstraint(
             "calendar_id", "uid", "recurrence_id", name="uq_source_event_occurrence"
         ),
@@ -159,7 +201,7 @@ def upgrade() -> None:
         sa.Column(
             "contact_id",
             sa.String(64),
-            sa.ForeignKey("person.person_id"),
+            sa.ForeignKey(_PERSON_ID_FK),
             nullable=True,
         ),
         _location_fk("default_pickup_location_id"),
@@ -167,6 +209,13 @@ def upgrade() -> None:
         sa.Column("alternate_destination_ids", sa.JSON, nullable=False),
         sa.Column("active", sa.Boolean, nullable=False, server_default=sa.true()),
         sa.Column("inactive_since", sa.Date, nullable=True),
+        # The privacy spec requires a first name or nickname but defines no
+        # stricter shape, so only non-empty (after trim) and the declared
+        # maximum length are enforced.
+        sa.CheckConstraint(
+            "length(trim(display_first_name)) >= 1 AND length(display_first_name) <= 60",
+            name="ck_external_passenger_first_name",
+        ),
     )
     op.create_table(
         "alias",
@@ -174,6 +223,9 @@ def upgrade() -> None:
         sa.Column("kind", sa.String(16), nullable=False),
         sa.Column("alias", sa.String(120), nullable=False),
         sa.Column("target_id", sa.String(64), nullable=False),
+        sa.CheckConstraint(
+            "kind IN ('person', 'passenger', 'location')", name="ck_alias_kind"
+        ),
     )
     op.create_index(
         "ux_alias_kind_alias",
@@ -187,7 +239,7 @@ def upgrade() -> None:
         sa.Column(
             "person_id",
             sa.String(64),
-            sa.ForeignKey("person.person_id"),
+            sa.ForeignKey(_PERSON_ID_FK),
             nullable=False,
         ),
         sa.Column("weekdays", sa.JSON, nullable=False),
@@ -196,13 +248,28 @@ def upgrade() -> None:
         sa.Column(
             "driver_id",
             sa.String(64),
-            sa.ForeignKey("person.person_id"),
+            sa.ForeignKey(_PERSON_ID_FK),
             nullable=True,
         ),
         sa.Column("effective_from", sa.Date, nullable=True),
         sa.Column("effective_to", sa.Date, nullable=True),
         _location_fk("origin_location_id", nullable=False),
         _location_fk("destination_location_id", nullable=False),
+        sa.CheckConstraint(
+            "direction IN ('to_school', 'from_school')",
+            name="ck_transport_default_direction",
+        ),
+        sa.CheckConstraint(
+            "mode IN ('bike', 'bus', 'walk', 'parent', 'carpool')",
+            name="ck_transport_default_mode",
+        ),
+        sa.CheckConstraint(
+            (
+                "effective_from IS NULL OR effective_to IS NULL "
+                "OR effective_to >= effective_from"
+            ),
+            name="ck_transport_default_effective_range",
+        ),
     )
     op.create_table(
         "analysis_run",
@@ -216,6 +283,14 @@ def upgrade() -> None:
         sa.Column("counts", sa.JSON, nullable=False),
         sa.Column("rules_version", sa.String(32), nullable=False),
         sa.Column("error", sa.String(500), nullable=True),
+        sa.CheckConstraint(
+            "status IN ('clear', 'attention_required', 'incomplete', 'failed')",
+            name="ck_analysis_run_status",
+        ),
+        sa.CheckConstraint(
+            "julianday(window_end) >= julianday(window_start)",
+            name="ck_analysis_run_window",
+        ),
     )
     op.create_table(
         "finding",
@@ -234,6 +309,14 @@ def upgrade() -> None:
             sa.String(36),
             sa.ForeignKey("analysis_run.run_id"),
             nullable=True,
+        ),
+        sa.CheckConstraint(
+            "severity IN ('critical', 'warning', 'incomplete')",
+            name="ck_finding_severity",
+        ),
+        sa.CheckConstraint(
+            "lifecycle IN ('new', 'ongoing', 'resolved', 'regressed')",
+            name="ck_finding_lifecycle",
         ),
     )
     op.create_index("ix_finding_lifecycle", "finding", ["lifecycle"])
