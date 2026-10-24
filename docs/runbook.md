@@ -121,6 +121,13 @@ key breaks comparison with older rows unless the version is raised.
 Keep each retired key until the rows recorded under its version are purged
 (365 days), or older hashes can no longer be checked.
 
+!!! warning "Databases created before `hash_key_version`"
+    Migration `0001` gained the `hash_key_version` column (and its CHECK
+    constraint) in place, with the same revision id. A local or development
+    database created before that change reports the schema as current but lacks
+    the column. Delete it and run `family-logistics migrate` again; no
+    production database predates the change.
+
 ### CalDAV app-specific password
 
 Revoke the old password in the Apple ID account, create a new one, update
