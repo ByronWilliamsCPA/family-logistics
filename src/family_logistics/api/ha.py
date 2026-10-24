@@ -43,7 +43,8 @@ FAILURE_WINDOW_SECONDS = 60.0
 """Sliding window for counting failures, and the length of a lockout."""
 
 MAX_TRACKED_CLIENTS = 1024
-"""Upper bound on throttle entries; the least recently active is evicted first."""
+"""Upper bound on throttle entries; only entries with no live lockout or in-flight
+attempt are evicted (the least recently active first)."""
 
 UNKNOWN_CLIENT = "unknown"
 """Throttle key used when the transport reports no client address."""
@@ -82,15 +83,17 @@ def verify_ha_token(authorization: str | None, expected: SecretStr | None) -> bo
 
 @dataclass
 class _ClientState:
-    """Failure history for one client.
+    """Attempt history for one client.
 
     Attributes:
         failures: Monotonic times of failures inside the current window.
         locked_until: Monotonic time the lockout ends; 0.0 when not locked.
+        in_flight: Admitted attempts whose token check has not finished.
     """
 
     failures: deque[float] = field(default_factory=deque)
     locked_until: float = 0.0
+    in_flight: int = 0
 
 
 class HaAuthThrottle:
@@ -99,12 +102,23 @@ class HaAuthThrottle:
     A client that fails ``max_failures`` times within ``window`` seconds is
     locked out for ``window`` seconds. While locked, the caller must refuse the
     request without evaluating the token. One client's state never affects
-    another's, and a successful authentication does not touch any state.
+    another's, and a successful authentication leaves no failure behind.
+
+    Admission is atomic. ``admit`` checks the lockout and reserves an attempt
+    slot under one lock acquisition, and a slot counts toward the limit while
+    its token check runs. So at most ``max_failures`` evaluations can be
+    outstanding or failed inside the window for one client, however many
+    requests arrive in parallel. The caller must settle every admitted attempt
+    exactly once: ``release`` on success, ``fail`` on failure (``fail`` also
+    when the check raised).
 
     Memory is bounded: expired entries are pruned on every call and at most
-    ``max_clients`` are tracked, evicting the least recently active first.
-    All state is guarded by a lock because sync dependencies run in a
-    threadpool.
+    ``max_clients`` are tracked. A full table makes room only by evicting an
+    entry that is not locked out and has no attempt in flight (an expired one
+    first, then the least recently active). If every slot holds a live lockout
+    or an in-flight attempt, an unknown client is refused until one frees, so
+    cycling source addresses cannot erase a lockout. All state is guarded by a
+    lock because sync dependencies run in a threadpool.
 
     Args:
         max_failures: Failures within ``window`` that trigger a lockout.
@@ -129,14 +143,14 @@ class HaAuthThrottle:
         self._clients: OrderedDict[str, _ClientState] = OrderedDict()
 
     def retry_after(self, client: str) -> int:
-        """Report whether a client is locked out.
+        """Report whether a client is locked out, without reserving anything.
 
         Args:
             client: Client key.
 
         Returns:
             Whole seconds (at least 1) until the lockout ends, or 0 when the
-            client may attempt authentication.
+            client is not locked out.
         """
         with self._lock:
             now = self._clock()
@@ -146,33 +160,102 @@ class HaAuthThrottle:
                 return 0
             return max(1, math.ceil(state.locked_until - now))
 
-    def record_failure(self, client: str) -> bool:
-        """Record a failed attempt.
+    def admit(self, client: str) -> int:
+        """Check the lockout and reserve an attempt slot, atomically.
 
         Args:
             client: Client key.
+
+        Returns:
+            0 when a slot was reserved: the caller must evaluate the token and
+            then call ``release`` or ``fail`` for this client. Otherwise whole
+            seconds (at least 1) to wait; nothing was reserved and the caller
+            must refuse the request without evaluating the token.
+        """
+        with self._lock:
+            now = self._clock()
+            self._prune(now)
+            state = self._clients.get(client)
+            if state is None:
+                if len(self._clients) >= self._max_clients and not self._evict(now):
+                    return self._seconds_until_a_slot_frees(now)
+                state = self._clients.setdefault(client, _ClientState())
+            if state.locked_until > now:
+                return max(1, math.ceil(state.locked_until - now))
+            self._trim(state, now)
+            if len(state.failures) + state.in_flight >= self._max_failures:
+                # Every remaining attempt is already running; once they settle
+                # the client is either locked out or has a slot again.
+                return 1
+            state.in_flight += 1
+            return 0
+
+    def release(self, client: str) -> None:
+        """Settle an admitted attempt that authenticated successfully.
+
+        Args:
+            client: Client key passed to the matching ``admit``.
+        """
+        with self._lock:
+            state = self._clients.get(client)
+            if state is None:
+                return
+            state.in_flight = max(0, state.in_flight - 1)
+            if self._is_idle(state, self._clock()):
+                del self._clients[client]
+
+    def fail(self, client: str) -> bool:
+        """Settle an admitted attempt as a failure.
+
+        Args:
+            client: Client key passed to the matching ``admit``.
 
         Returns:
             True when this failure started a lockout.
         """
         with self._lock:
             now = self._clock()
-            self._prune(now)
             state = self._clients.setdefault(client, _ClientState())
             self._clients.move_to_end(client)
-            while state.failures and state.failures[0] <= now - self._window:
-                state.failures.popleft()
+            state.in_flight = max(0, state.in_flight - 1)
+            self._trim(state, now)
             state.failures.append(now)
             locked = len(state.failures) >= self._max_failures
             if locked:
                 state.failures.clear()
                 state.locked_until = now + self._window
-            while len(self._clients) > self._max_clients:
-                self._clients.popitem(last=False)
             return locked
 
+    def _trim(self, state: _ClientState, now: float) -> None:
+        """Drop failures that have left the window.
+
+        Args:
+            state: The client's state.
+            now: Current monotonic time.
+        """
+        while state.failures and state.failures[0] <= now - self._window:
+            state.failures.popleft()
+
+    def _is_idle(self, state: _ClientState, now: float) -> bool:
+        """Report whether an entry holds nothing worth keeping.
+
+        Args:
+            state: The client's state.
+            now: Current monotonic time.
+
+        Returns:
+            True when it has no lockout, no in-flight attempt and no failure
+            inside the window.
+        """
+        last = state.failures[-1] if state.failures else 0.0
+        return (
+            state.in_flight == 0
+            and state.locked_until <= now
+            and last <= now - self._window
+        )
+
     def _prune(self, now: float) -> None:
-        """Drop expired entries from the least recently active end.
+        """Drop idle entries from the least recently active end.
 
         Entries are ordered by last failure and expiry grows with it, so the
         first live entry ends the scan. The caller must hold the lock.
@@ -182,10 +265,47 @@ class HaAuthThrottle:
         """
         while self._clients:
             state = next(iter(self._clients.values()))
-            last = state.failures[-1] if state.failures else 0.0
-            if state.locked_until > now or last > now - self._window:
+            if not self._is_idle(state, now):
                 return
             self._clients.popitem(last=False)
+
+    def _evict(self, now: float) -> bool:
+        """Free one slot without touching a live lockout or in-flight attempt.
+
+        Prefers an expired entry, then the least recently active entry that is
+        not locked out and has nothing in flight. The caller must hold the lock.
+
+        Args:
+            now: Current monotonic time.
+
+        Returns:
+            True when a slot was freed, False when every entry is protected.
+        """
+        victim: str | None = None
+        for key, state in self._clients.items():
+            if state.locked_until > now or state.in_flight:
+                continue
+            if self._is_idle(state, now):
+                victim = key
+                break
+            if victim is None:
+                victim = key
+        if victim is None:
+            return False
+        del self._clients[victim]
+        return True
+
+    def _seconds_until_a_slot_frees(self, now: float) -> int:
+        """Estimate the wait when every tracked entry is protected.
+
+        Args:
+            now: Current monotonic time.
+
+        Returns:
+            Whole seconds (at least 1) until the earliest lockout ends.
+        """
+        ends = [s.locked_until for s in self._clients.values() if s.locked_until > now]
+        return max(1, math.ceil(min(ends) - now)) if ends else 1
 
 
 def _client_key(request: Request) -> str:
@@ -199,9 +319,14 @@ def _client_key(request: Request) -> str:
     """
     # #ASSUME: Security: Home Assistant calls this service directly, not through
     # the reverse proxy listed in FL_PROXY_TRUSTED_CIDRS, so the TCP peer is the
-    # real client. Behind a proxy every client would share one throttle bucket.
-    # #VERIFY: if HA is ever routed through the proxy, key on the trusted-proxy
-    # client IP (as the security middleware does) instead of request.client.host.
+    # real client. ``serve`` starts uvicorn with proxy_headers=False, so
+    # request.client is always the TCP peer and a client cannot choose its own
+    # throttle key with X-Forwarded-For (FORWARDED_ALLOW_IPS is ignored). Behind
+    # a proxy every client would share one throttle bucket.
+    # #VERIFY: tests/unit/test_app_cli_config.py asserts serve passes
+    # proxy_headers=False; if HA is ever routed through the proxy, key on the
+    # trusted-proxy client IP (as the security middleware does) instead of
+    # request.client.host, and do not re-enable uvicorn proxy headers for it.
     client = request.client
     return client.host if client is not None else UNKNOWN_CLIENT
 
@@ -219,6 +344,26 @@ def _unauthorized() -> HTTPException:
     )
 
 
+def _token_is_valid(settings: Settings, authorization: str | None, client: str) -> bool:
+    """Evaluate the presented token and log a failure without its value.
+
+    Args:
+        settings: Application settings carrying ``ha_token``.
+        authorization: Raw ``Authorization`` header value, or None.
+        client: Throttle key, for the log line.
+
+    Returns:
+        True when the token is valid; an unset ``ha_token`` is never valid.
+    """
+    if settings.ha_token is None:
+        logger.error("ha_auth.token_unconfigured", client=client)
+        return False
+    if verify_ha_token(authorization, settings.ha_token):
+        return True
+    logger.warning("ha_auth.failed", client=client)
+    return False
+
+
 def require_ha_token(
     settings: Settings, throttle: HaAuthThrottle
 ) -> Callable[..., None]:
@@ -230,8 +375,9 @@ def require_ha_token(
 
     Returns:
         A FastAPI dependency that returns None on success, raises 429 with
-        ``Retry-After`` while the client is locked out (without evaluating the
-        token), and raises a uniform 401 on any authentication failure.
+        ``Retry-After`` while the client is locked out or has no attempt slot
+        free (without evaluating the token), and raises a uniform 401 on any
+        authentication failure.
     """
 
     # #CRITICAL: Security: this dependency must be attached to the HA router
@@ -240,25 +386,40 @@ def require_ha_token(
     # closed with 401.
     # #VERIFY: tests/unit/test_ha_router.py::TestRouterLevelGuarantee asserts a
     # route added to the router after creation still requires the token.
+    #
+    # #CRITICAL: Concurrency: the dependency runs in a threadpool, so the
+    # lockout check and the failure record must be one atomic step; a separate
+    # check-then-record lets a parallel burst all pass the check before any
+    # failure lands and evaluate far more than ``max_failures`` tokens. Every
+    # admitted attempt must be settled exactly once, even when the check raises,
+    # or the client leaks an in-flight slot and is eventually locked out.
+    # #VERIFY: tests/unit/test_ha_router.py::TestAtomicAdmission asserts a
+    # threaded burst evaluates at most MAX_FAILURES tokens and that a raising
+    # check still settles its slot.
     def dependency(
         request: Request,
         authorization: Annotated[str | None, Header()] = None,
     ) -> None:
         client = _client_key(request)
-        wait = throttle.retry_after(client)
+        wait = throttle.admit(client)
         if wait:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Too many failed attempts",
                 headers={"Retry-After": str(wait)},
             )
-        if settings.ha_token is None:
-            logger.error("ha_auth.token_unconfigured", client=client)
-        elif verify_ha_token(authorization, settings.ha_token):
+        authenticated = False
+        locked = False
+        try:
+            authenticated = _token_is_valid(settings, authorization, client)
+        finally:
+            if authenticated:
+                throttle.release(client)
+            else:
+                locked = throttle.fail(client)
+        if authenticated:
             return
-        else:
-            logger.warning("ha_auth.failed", client=client)
-        if throttle.record_failure(client):
+        if locked:
             logger.warning(
                 "ha_auth.locked_out",
                 client=client,
