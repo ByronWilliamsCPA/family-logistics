@@ -86,7 +86,8 @@ carry children's schedules. Signal and SMS are future options only.
 ## 5. Address protection
 
 - External household addresses and home coordinates are stored as Fernet
-  ciphertext (application-level encryption, Fernet/AES-GCM) in the
+  ciphertext (application-level encryption; Fernet is AES-128-CBC with an
+  HMAC-SHA256 authentication tag, not AES-GCM) in the
   `address_ciphertext` and `latlon_ciphertext` columns of the `location` table,
   using a key supplied at runtime from the secret store (`FL_DATA_KEY`, from the
   deployment's secret store). The other columns on `location` (name,

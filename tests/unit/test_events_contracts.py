@@ -30,6 +30,18 @@ START = datetime(2026, 10, 23, 22, 0, tzinfo=UTC)
 NAIVE = START.replace(tzinfo=None)
 BEFORE_START = START - timedelta(seconds=1)
 RECURRENCE_ID = "2026-10-23T22:00:00+00:00"
+SEQUENCE_FIELDS = (
+    "people",
+    "external_passengers",
+    "locations",
+    "vehicles",
+    "transport_defaults",
+    "activities",
+    "trips",
+    "school_days",
+    "source_freshness",
+    "previous_findings",
+)
 
 
 def source_event(recurrence_id: str = "", **overrides: object) -> SourceEvent:
@@ -358,6 +370,37 @@ class TestTransportDefault:
             assert_rejects(transport_default, "weekdays", weekdays=weekdays)
 
     @pytest.mark.parametrize(
+        "weekdays",
+        [{0, 2, 4}, [0, 2, 4], (0, 2, 4), [4, 2, 0, 2], frozenset({0, 2, 4})],
+    )
+    def test_weekdays_are_stored_as_frozenset(self, weekdays):
+        rule = transport_default(weekdays=weekdays)
+        assert type(rule.weekdays) is frozenset
+        assert rule.weekdays == frozenset({0, 2, 4})
+
+    def test_weekdays_are_copied_not_aliased(self):
+        days = {4}
+        rule = transport_default(weekdays=days)
+        days.add(0)  # the caller changes its own set afterwards
+        assert rule.weekdays == frozenset({4})
+        assert rule.applies_on(date(2026, 10, 26)) is False  # Monday
+
+    def test_weekdays_cannot_be_mutated(self):
+        rule = transport_default(weekdays=[0, 1])
+        with pytest.raises(AttributeError):
+            cast("Any", rule.weekdays).add(2)
+
+    @pytest.mark.parametrize("weekdays", [{0, 1}, [0, 1], (0, 1)])
+    def test_default_is_hashable_whatever_the_input_container(self, weekdays):
+        rule = transport_default(weekdays=weekdays)
+        assert hash(rule) == hash(transport_default(weekdays=frozenset({0, 1})))
+        assert len({rule, transport_default(weekdays=[1, 0])}) == 1
+
+    @pytest.mark.parametrize("weekdays", ["012", None, 3, {"mon"}, [1.5], {None}])
+    def test_rejects_weekdays_that_are_not_integer_collections(self, weekdays):
+        assert_rejects(transport_default, "weekdays", weekdays=weekdays)
+
+    @pytest.mark.parametrize(
         ("overrides", "field_name"),
         [
             ({"person_id": ""}, "person_id"),
@@ -473,6 +516,53 @@ class TestAssessmentInput:
         assert data.timezone == "America/Los_Angeles"
         assert hash(data) == hash(dataclasses.replace(data))
 
+    @pytest.mark.parametrize("field_name", SEQUENCE_FIELDS)
+    def test_empty_list_is_converted_to_tuple(self, field_name):
+        data = assessment_input(**{field_name: []})
+        assert getattr(data, field_name) == ()
+        assert type(getattr(data, field_name)) is tuple
+
+    @pytest.mark.parametrize(
+        ("field_name", "item"),
+        [
+            ("activities", activity()),
+            ("transport_defaults", transport_default()),
+            ("school_days", school_day()),
+        ],
+    )
+    def test_list_is_converted_to_tuple_and_copied(self, field_name, item):
+        items = [item]
+        data = assessment_input(**{field_name: items})
+        items.append(item)  # the caller changes its own list afterwards
+        assert getattr(data, field_name) == (item,)
+        assert type(getattr(data, field_name)) is tuple
+        assert hash(data) == hash(assessment_input(**{field_name: (item,)}))
+
+    @pytest.mark.parametrize("field_name", SEQUENCE_FIELDS)
+    def test_tuple_is_kept(self, field_name):
+        data = assessment_input(**{field_name: ()})
+        assert getattr(data, field_name) == ()
+
+    @pytest.mark.parametrize("field_name", SEQUENCE_FIELDS)
+    @pytest.mark.parametrize("value", ["abc", None, frozenset(), iter(())])
+    def test_rejects_other_containers(self, field_name, value):
+        assert_rejects(assessment_input, field_name, **{field_name: value})
+
+    def test_freshness_pairs_given_as_lists_are_frozen(self):
+        pairs = [["cal-transport", START], ["cal-sam", None]]
+        data = assessment_input(source_freshness=pairs)
+        pairs[0][1] = None  # the caller changes its own pair afterwards
+        assert data.source_freshness == (("cal-transport", START), ("cal-sam", None))
+        assert all(type(pair) is tuple for pair in data.source_freshness)
+        assert data.freshness("cal-transport") == START
+        assert hash(data) == hash(dataclasses.replace(data))
+
+    @pytest.mark.parametrize(
+        "pair", [("cal-sam",), ("cal-sam", START, START), "ab", None, ()]
+    )
+    def test_rejects_malformed_freshness_pairs(self, pair):
+        assert_rejects(assessment_input, "source_freshness", source_freshness=(pair,))
+
     def test_repr_omits_source_ids(self):
         data = assessment_input(source_freshness=(("cal-transport", START),))
         assert "cal-transport" not in repr(data)
@@ -516,6 +606,7 @@ class TestImmutability:
             (collection_result, "complete", False),
             (calendar_source, "enabled", False),
             (transport_default, "mode", TransportMode.BUS),
+            (transport_default, "weekdays", frozenset({2})),
             (activity, "stays_until_end", False),
             (school_day, "kind", SchoolDayKind.UNKNOWN),
             (assessment_input, "timezone", "UTC"),

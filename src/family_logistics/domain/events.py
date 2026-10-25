@@ -30,6 +30,7 @@ from family_logistics.core.exceptions import ValidationError
 from family_logistics.domain.models import SourceEventKey
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from datetime import date, datetime
 
     from family_logistics.domain.models import (
@@ -135,6 +136,29 @@ def _freeze_sequence(owner: str, name: str, value: object) -> tuple[object, ...]
     if isinstance(value, list):
         return tuple(cast("list[object]", value))
     raise _invalid(owner, name, "must be a tuple")
+
+
+def _freeze_weekdays(owner: str, name: str, value: object) -> frozenset[int]:
+    """Return ``value`` as a frozenset of integers, copying a set, list or tuple.
+
+    A string is rejected explicitly: iterating one would yield characters.
+    """
+    if not isinstance(value, set | frozenset | list | tuple):
+        raise _invalid(owner, name, "must be a set of weekday numbers")
+    days: set[int] = set()
+    for item in cast("Iterable[object]", value):
+        if not isinstance(item, int):
+            raise _invalid(owner, name, "must only hold integers")
+        days.add(item)
+    return frozenset(days)
+
+
+def _freeze_freshness_pair(owner: str, name: str, value: object) -> tuple[object, ...]:
+    """Return one ``(source id, last success)`` pair as a two-item tuple."""
+    pair = _freeze_sequence(owner, name, value)
+    if len(pair) != 2:
+        raise _invalid(owner, name, "must hold (source id, last success) pairs")
+    return pair
 
 
 class CalendarKind(StrEnum):
@@ -449,18 +473,25 @@ class TransportDefault:
     effective_to: date | None = None
 
     def __post_init__(self) -> None:
-        """Validate the contract invariants and normalize enum fields.
+        """Validate the contract invariants and normalize fields.
+
+        ``weekdays`` is copied into a ``frozenset``, so a caller's set or list
+        can neither change the default later nor make it unhashable.
 
         Raises:
-            ValidationError: On an empty id, a weekday outside 0-6 (Python
-                numbering, Monday is 0), an inverted effective window or an
-                unknown direction or mode.
+            ValidationError: On an empty id, weekdays that are not a collection
+                of integers, a weekday outside 0-6 (Python numbering, Monday
+                is 0), an inverted effective window or an unknown direction or
+                mode.
         """
         owner = "TransportDefault"
         _require_text(owner, "person_id", self.person_id)
         _require_text(owner, "origin_location_id", self.origin_location_id)
         _require_text(owner, "destination_location_id", self.destination_location_id)
         _require_optional_text(owner, "driver_id", self.driver_id)
+        object.__setattr__(
+            self, "weekdays", _freeze_weekdays(owner, "weekdays", self.weekdays)
+        )
         if any(not 0 <= day <= 6 for day in self.weekdays):
             raise ValidationError(
                 _message(owner, "weekdays", "must only hold 0 (Monday) to 6 (Sunday)"),
@@ -534,6 +565,21 @@ class SchoolDay:
         )
 
 
+_ASSESSMENT_SEQUENCE_FIELDS: tuple[str, ...] = (
+    "people",
+    "external_passengers",
+    "locations",
+    "vehicles",
+    "transport_defaults",
+    "activities",
+    "trips",
+    "school_days",
+    "source_freshness",
+    "previous_findings",
+)
+"""``AssessmentInput`` fields that are frozen to tuples on construction."""
+
+
 @dataclass(frozen=True, slots=True)
 class AssessmentInput:
     """Everything the engine needs for one assessment run; no I/O behind it.
@@ -572,12 +618,28 @@ class AssessmentInput:
     timezone: str = "America/Los_Angeles"
 
     def __post_init__(self) -> None:
-        """Validate the contract invariants.
+        """Validate the contract invariants and freeze the collections.
+
+        Every collection field accepts a tuple or a list and is stored as a
+        tuple, so the snapshot cannot change after construction and stays
+        hashable.
 
         Invalid input raises ``ValidationError``: a naive datetime, an
-        inverted window or an unknown IANA timezone name.
+        inverted window, an unknown IANA timezone name, a collection field
+        that is neither a tuple nor a list or a malformed freshness pair.
         """
         owner = "AssessmentInput"
+        for name in _ASSESSMENT_SEQUENCE_FIELDS:
+            current = cast("object", getattr(self, name))
+            object.__setattr__(self, name, _freeze_sequence(owner, name, current))
+        object.__setattr__(
+            self,
+            "source_freshness",
+            tuple(
+                _freeze_freshness_pair(owner, "source_freshness", pair)
+                for pair in self.source_freshness
+            ),
+        )
         _require_aware(owner, "window_start", self.window_start)
         _require_aware(owner, "window_end", self.window_end)
         _require_not_before(owner, "window_end", self.window_start, self.window_end)
