@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from caldav_fakes import (
+    ALLOWED_HOSTS,
     BASE_URL,
     PARTITION,
     SAM_PATH,
@@ -18,7 +19,10 @@ from caldav_fakes import (
 
 from family_logistics.adapters.caldav.client import CalDAVClient
 from family_logistics.adapters.caldav.ids import calendar_id_for_href
-from family_logistics.adapters.caldav.readonly_transport import build_readonly_client
+from family_logistics.adapters.caldav.readonly_transport import (
+    ReadOnlyTransport,
+    build_readonly_client,
+)
 from family_logistics.core.database import create_sqlite_engine
 from family_logistics.db import migrations_api
 from family_logistics.db.sources import (
@@ -71,7 +75,8 @@ def engine(tmp_path):
 
 
 def make(engine, server, clock: Clock | None = None) -> Collector:
-    http = build_readonly_client(BASE_URL, auth=("u", "p"), inner=server.transport())
+    transport = ReadOnlyTransport(server.transport(), allowed_hosts=ALLOWED_HOSTS)
+    http = build_readonly_client(BASE_URL, transport, auth=("u", "p"))
     return Collector(
         client=CalDAVClient(http, attempts=1, sleep=lambda _s: None),
         sources=CalendarSourceRepository(engine),

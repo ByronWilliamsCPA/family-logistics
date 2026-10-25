@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
-from caldav_fakes import BASE_URL, SAM_PATH, default_server
+from caldav_fakes import ALLOWED_HOSTS, BASE_URL, SAM_PATH, default_server
 from click.testing import CliRunner
 
 from family_logistics.cli import SCHEMA_BEHIND_MESSAGE, cli
@@ -21,6 +21,7 @@ def env(tmp_path, monkeypatch):
     config_module.get_settings.cache_clear()
     monkeypatch.setenv("FL_DATABASE_PATH", str(tmp_path / "fl.db"))
     monkeypatch.setenv("FL_CALDAV_URL", BASE_URL)
+    monkeypatch.setenv("FL_CALDAV_ALLOWED_HOSTS", ",".join(ALLOWED_HOSTS))
     monkeypatch.setenv("FL_CALDAV_USERNAME", "collector@example.test")
     monkeypatch.setenv("FL_CALDAV_APP_PASSWORD", "app-password-for-tests")
     monkeypatch.setenv("FL_CALDAV_CALENDARS", "Sam")

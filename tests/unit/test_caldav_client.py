@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 from caldav_fakes import (
+    ALLOWED_HOSTS,
     BASE_URL,
     HOME_PATH,
     PARTITION,
@@ -25,16 +26,20 @@ from family_logistics.adapters.caldav.client import (
     SyncTokenInvalidError,
     UntrustedLocationError,
 )
-from family_logistics.adapters.caldav.readonly_transport import build_readonly_client
+from family_logistics.adapters.caldav.readonly_transport import (
+    ReadOnlyTransport,
+    build_readonly_client,
+)
 
 START = datetime(2026, 10, 19, 7, 0, tzinfo=UTC)
 END = datetime(2026, 11, 5, 8, 0, tzinfo=UTC)
 
 
 def client_for(handler, *, attempts: int = 3, sleeps: list[float] | None = None):
-    http = build_readonly_client(
-        BASE_URL, auth=("user", "pw"), inner=httpx.MockTransport(handler)
+    transport = ReadOnlyTransport(
+        httpx.MockTransport(handler), allowed_hosts=ALLOWED_HOSTS
     )
+    http = build_readonly_client(BASE_URL, transport, auth=("user", "pw"))
     delays = sleeps if sleeps is not None else []
     return CalDAVClient(
         http, attempts=attempts, backoff_seconds=0.5, sleep=delays.append

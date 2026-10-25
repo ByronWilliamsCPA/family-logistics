@@ -16,6 +16,8 @@ import httpx
 
 FIXTURES = Path(__file__).parent / "fixtures" / "synthetic"
 BASE_URL = "https://caldav.example.test/"
+ALLOWED_HOSTS = ["example.test"]
+"""CalDAV host allowlist of the fixtures (a stand-in for ``icloud.com``)."""
 PARTITION = "https://p01-caldav.example.test"
 PRINCIPAL_PATH = "/1000/principal/"
 HOME_PATH = "/1000/calendars/"

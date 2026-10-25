@@ -8,8 +8,13 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
+import httpx
+
 from family_logistics.adapters.caldav.client import CalDAVClient
-from family_logistics.adapters.caldav.readonly_transport import build_readonly_client
+from family_logistics.adapters.caldav.readonly_transport import (
+    ReadOnlyTransport,
+    build_readonly_client,
+)
 from family_logistics.db.sources import (
     CalendarSourceRepository,
     SourceEventRepository,
@@ -18,7 +23,6 @@ from family_logistics.db.sources import (
 from family_logistics.services.collector import Collector, CollectorConfig
 
 if TYPE_CHECKING:
-    import httpx
     from sqlalchemy.engine import Engine
 
     from family_logistics.core.config import Settings
@@ -49,7 +53,8 @@ def build_caldav_client(
     """Build the read-only CalDAV client from settings.
 
     Args:
-        settings: Application settings (CalDAV credentials required).
+        settings: Application settings (CalDAV credentials required). Every
+            request and redirect hop is limited to ``caldav_allowed_hosts``.
         inner: Transport performing I/O (tests pass a mock transport).
 
     Returns:
@@ -62,10 +67,14 @@ def build_caldav_client(
     if not settings.caldav_username or password is None:
         msg = "CalDAV credentials are not configured"
         raise ValueError(msg)
+    transport = ReadOnlyTransport(
+        inner or httpx.HTTPTransport(),
+        allowed_hosts=settings.caldav_allowed_hosts,
+    )
     http = build_readonly_client(
         settings.caldav_url,
+        transport,
         auth=(settings.caldav_username, password.get_secret_value()),
-        inner=inner,
     )
     return CalDAVClient(http), http
 
