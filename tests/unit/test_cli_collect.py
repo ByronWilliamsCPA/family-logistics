@@ -167,8 +167,9 @@ class TestWiring:
 
     def test_build_requires_credentials(self, tmp_path):
         engine = create_sqlite_engine(tmp_path / "fl.db")
+        settings = Settings()  # type: ignore[call-arg]
         try:
             with pytest.raises(ValueError, match="credentials"):
-                wiring.build_collector(Settings(), engine)  # type: ignore[call-arg]
+                wiring.build_collector(settings, engine)
         finally:
             engine.dispose()

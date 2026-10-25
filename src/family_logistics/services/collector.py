@@ -408,7 +408,8 @@ class Collector:
         self.sync_states.save(state)
         return CalendarRun(result, applied, reused=reused)
 
-    def _unchanged(  # noqa: PLR0913 - change-detection inputs, keyword-only
+    # Keyword-only change-detection inputs; each one is a distinct comparison.
+    def _unchanged(  # noqa: PLR0913
         self,
         previous: SyncState | None,
         *,

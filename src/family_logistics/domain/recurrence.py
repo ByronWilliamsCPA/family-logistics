@@ -200,7 +200,8 @@ def expand_object(  # noqa: PLR0913 - keyword-only collection context
         local_start = window_start.astimezone(zone)
         local_end = window_end.astimezone(zone)
         occurrences = recurring_ical_events.of(calendar).between(local_start, local_end)
-    except (ValueError, KeyError, TypeError, AttributeError, RecurrenceError) as exc:
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        # RecurrenceError subclasses ValueError, so it is re-wrapped here too.
         msg = f"calendar object could not be expanded: {type(exc).__name__}"
         raise RecurrenceError(msg) from exc
     events = [

@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 
 DAV = "DAV:"
 CALDAV = "urn:ietf:params:xml:ns:caldav"
-CALSERVER = "http://calendarserver.org/ns/"
+CALSERVER = "http://calendarserver.org/ns/"  # NOSONAR: XML namespace id, never fetched
 
 MULTISTATUS = 207
 HTTP_UNAUTHORIZED = 401

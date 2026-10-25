@@ -237,5 +237,6 @@ class TestPropertyHelpers:
             recurrence._temporal(event, "DTEND")
 
     def test_missing_required_value(self):
+        event = self.event()
         with pytest.raises(RecurrenceError, match="DTSTART is missing"):
-            recurrence._required_temporal(self.event(), "DTSTART")
+            recurrence._required_temporal(event, "DTSTART")
