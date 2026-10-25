@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from fl_engine import LOCATIONS, PEOPLE, at
 from fl_factories import CALENDAR, REGISTRY
 
+from family_logistics.core.config import Settings
 from family_logistics.db.registry import Household, RegistryStore
 from family_logistics.db.sources import CalendarSourceRepository, SourceEventRepository
 from family_logistics.domain.events import (
@@ -21,9 +22,29 @@ from family_logistics.domain.events import (
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
+    from family_logistics.domain.events import EventStatus
+
 PERSON_CALENDAR = "cal-person-sam"
 WINDOW_START = at(0, 0)
 WINDOW_END = at(23, 59)
+
+
+def make_settings(**overrides: object) -> Settings:
+    """Build ``Settings`` for service tests without reading the environment.
+
+    The person calendar is selected by default (``FL_CALDAV_CALENDARS``), so
+    the assessment service judges and reads it like the transport calendar.
+    Pass ``caldav_calendars=""`` to leave it unselected.
+
+    Args:
+        overrides: Setting values by field name.
+
+    Returns:
+        Validated settings (the unit-test conftest isolates ``FL_*`` and
+        ``.env``).
+    """
+    values: dict[str, object] = {"caldav_calendars": PERSON_CALENDAR}
+    return Settings.model_validate(values | overrides)
 
 
 def seed_registry(engine: Engine) -> None:
@@ -57,7 +78,7 @@ def event(
     summary: str = "Event",
     location: str | None = None,
     description: str | None = None,
-    status: str = "confirmed",
+    status: EventStatus = "confirmed",
     all_day: bool = False,
     recurrence_id: str = "",
     is_override: bool = False,
@@ -74,7 +95,7 @@ def event(
         summary=summary,
         location=location,
         description=description,
-        status=status,  # type: ignore[arg-type]
+        status=status,
         etag=None,
         raw_hash=f"{uid}-{recurrence_id}-{description}-{start.isoformat()}",
         is_override=is_override,
@@ -109,4 +130,4 @@ def collect(
         sources.record_success(calendar_id, at_time)
 
 
-__all__ = ["PERSON_CALENDAR", "UTC", "collect", "event", "seed_registry"]
+__all__ = ["PERSON_CALENDAR", "collect", "event", "make_settings", "seed_registry"]

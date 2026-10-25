@@ -4,13 +4,28 @@ One run reads the registry and the collected calendar occurrences, parses the
 transportation events, runs the deterministic engine and stores the outcome.
 
 #CRITICAL: Data integrity: a run that raises is stored as failed and keeps the
-previous findings open; it is never reported as clear (ADR 0001, rule 4).
-#VERIFY: tests/unit/test_assessment_service.py injects a failing route provider
-and a failing repository read.
-#ASSUME: External resources: the collector keeps ``source_event`` current; a
-calendar that failed to collect makes the run incomplete through DATA-011, not
-empty, because the freshness pair reports its last complete collection.
+previous findings open; it is never reported as clear (design rule 4 in
+CLAUDE.md; ADR 0001 applies it to notifications and reports). That includes a
+history read that raises (for example a corrupt trip snapshot row).
+#VERIFY: tests/unit/test_assessment_service.py::TestFailedRuns injects a failing
+route provider and a corrupt snapshot row; each must store a failed run.
+#ASSUME: External resources: the collector keeps ``source_event`` current. The
+freshness pair carries each calendar's last complete collection only, and
+``SourceFreshness.is_usable`` (domain/run_status.py) deliberately tolerates a
+failed latest attempt while that last success is within the staleness limit
+(the stored events are still the last good read, not an empty calendar). A
+calendar that was never collected, or whose last success is older than the
+limit, is unusable and makes the run incomplete through DATA-011. Only enabled
+calendars the collector selects (``FL_CALDAV_CALENDARS`` plus the transport
+calendar) are judged; an enabled but unselected calendar is never collected and
+is left out of the freshness pair.
 #VERIFY: tests/unit/test_assessment_service.py::TestFreshness.
+#ASSUME: External resources: until the Home Assistant school snapshot is
+delivered (ADR 0007, implementation target M2), a run has no school-day data
+and can still end CLEAR (no Home Assistant freshness pair is added). Whether
+that should read INCOMPLETE is an open design question (see the run-status
+rules); this module documents the current behavior only.
+#VERIFY: tests/unit/test_assessment_service.py::TestFreshness pins this.
 """
 
 from __future__ import annotations
@@ -43,14 +58,13 @@ from family_logistics.domain.events import (
     CalendarKind,
 )
 from family_logistics.domain.locations import LocationResolver
-from family_logistics.domain.models import (
-    Finding,
-    OccurrenceKind,
-    SourceEventKey,
-    Trip,
-)
 from family_logistics.domain.parser import parse_trip
-from family_logistics.services.collector import collection_window
+from family_logistics.domain.recurrence import occurrence_kind
+from family_logistics.services.collector import (
+    collection_window,
+    enabled_selected_sources,
+)
+from family_logistics.services.wiring import collector_config
 from family_logistics.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -64,6 +78,7 @@ if TYPE_CHECKING:
     from family_logistics.db.assessments import StoredHistory
     from family_logistics.db.registry import RegistrySnapshot
     from family_logistics.domain.events import CalendarSource, SchoolDay, SourceEvent
+    from family_logistics.domain.models import Finding, SourceEventKey, Trip
 
 logger = get_logger(__name__)
 
@@ -90,7 +105,7 @@ class RunOutcome:
 
 @dataclass(frozen=True, slots=True)
 class SchoolSnapshot:
-    """School schedules supplied by Home Assistant (M4).
+    """School schedules supplied by Home Assistant (ADR 0007, target M2).
 
     Attributes:
         days: School days inside the window.
@@ -130,22 +145,6 @@ def activity_id(event: SourceEvent) -> str:
     """
     material = "\x1f".join(event.occurrence_key).encode("utf-8")
     return f"act-{hashlib.sha256(material).hexdigest()[:16]}"
-
-
-def occurrence_kind(event: SourceEvent) -> OccurrenceKind:
-    """Classify how an occurrence relates to a recurring series.
-
-    Args:
-        event: Source occurrence.
-
-    Returns:
-        Override, series instance or single.
-    """
-    if event.is_override:
-        return OccurrenceKind.OVERRIDE
-    if event.series_uid_has_rrule:
-        return OccurrenceKind.SERIES_INSTANCE
-    return OccurrenceKind.SINGLE
 
 
 def icloud_freshness(
@@ -195,6 +194,7 @@ class AssessmentService:
         self._repo = AssessmentRepository(engine)
         self._events = SourceEventRepository(engine)
         self._engine_settings = engine_settings(settings)
+        self._collector_config = collector_config(settings)
 
     @property
     def repository(self) -> AssessmentRepository:
@@ -215,24 +215,54 @@ class AssessmentService:
         Returns:
             The stored run and its result. A run that raised is failed, keeps
             the previous findings open and never reads as clear.
+
+        Raises:
+            ValueError: ``trigger`` is not one of ``TRIGGERS`` (no run is
+                written).
         """
+        # #CRITICAL: Concurrency: ``begin_run``, ``load_history`` and
+        # ``complete_run`` are three separate transactions and runs are not
+        # serialized. Two overlapping runs (scheduler plus on-demand) can each
+        # read the same history, and the one that finishes last overwrites the
+        # findings and trip snapshot with its own, possibly older, data even if
+        # the other run started later. The serialization or ordering policy is
+        # an open design decision deferred to the scheduler milestone (M3,
+        # docs/project/roadmap.md); no locking exists today.
+        # #VERIFY: no test pins this behavior. The scheduler (M3) work must add
+        # a test for overlapping runs together with the chosen policy.
+        if trigger not in TRIGGERS:
+            msg = f"unknown trigger {trigger!r}; allowed: {', '.join(TRIGGERS)}"
+            raise ValueError(msg)
         now = self._clock()
         zone = ZoneInfo(self._settings.timezone)
         start, end = collection_window(now, zone, 0, self._settings.collect_days_ahead)
+        # #CRITICAL: Data integrity: ``begin_run`` stays outside the try. If the
+        # placeholder row cannot be written there is no run to mark failed, so
+        # the error must propagate loudly instead of being swallowed.
+        # #VERIFY: tests/unit/test_assessment_service.py::TestFailedRuns.
         run_id = self._repo.begin_run(
             trigger, start, end, now, rules_version=RULES_VERSION
         )
-        history = self._repo.load_history()
+        history: StoredHistory | None = None
         trips: tuple[Trip, ...] = ()
+        # #EDGE: Data integrity: a permanently corrupt trip snapshot row makes
+        # every run fail here, so runs stay FAILED (never clear) until a human
+        # decides the snapshot healing policy; undecodable rows are not skipped.
+        # #VERIFY: tests/unit/test_assessment_service.py::TestFailedRuns.
         try:
+            history = self._repo.load_history()
             result, trips = self._assess(now, (start, end), history, school)
         except Exception as exc:  # noqa: BLE001 - any failure must be recorded as failed
             # Only the class name is kept: messages can carry addresses.
             logger.error(  # noqa: TRY400 - a traceback can carry addresses
                 "assessment_failed", run_id=run_id, error=type(exc).__name__
             )
+            # The failed result carries the previous open findings on purpose,
+            # so a failed run's counts show what is still open, not a clear
+            # board. With no readable history there are none to carry.
+            previous = history.open_findings if history is not None else ()
             result = failed_result(
-                now, f"assessment raised {type(exc).__name__}", history.open_findings
+                now, f"assessment raised {type(exc).__name__}", previous
             )
         self._repo.complete_run(run_id, result, self._clock(), trips)
         logger.info(
@@ -251,9 +281,19 @@ class AssessmentService:
         history: StoredHistory,
         school: SchoolSnapshot | None,
     ) -> tuple[AssessmentResult, tuple[Trip, ...]]:
+        # #EDGE: Timing: the assessment window is [today, today + N days] while
+        # the collector window starts ``collect_days_back`` days earlier, so
+        # events from the previous days are collected but not assessed; intended.
+        # #VERIFY: optional; no test pins the days-back gap.
         start, end = window
         snapshot = load_snapshot(self._engine, self._cipher)
-        enabled = [s for s in snapshot.calendar_sources if s.enabled]
+        # #ASSUME: External resources: only enabled calendars the collector
+        # selects are collected, so only those can have a freshness; an enabled
+        # but unselected calendar would otherwise raise DATA-011 on every run.
+        # #VERIFY: tests/unit/test_assessment_service.py::TestFreshness.
+        enabled = enabled_selected_sources(
+            snapshot.calendar_sources, self._collector_config
+        )
         events = self._events.active(start, end, [s.calendar_id for s in enabled])
         by_calendar = {s.calendar_id: s for s in enabled}
         trips, parse_findings, unparsed = self._parse_rides(
@@ -261,6 +301,18 @@ class AssessmentService:
         )
         activities = self._activities(events, by_calendar, snapshot)
         freshness = [icloud_freshness(enabled)]
+        # #ASSUME: External resources: until the Home Assistant school snapshot
+        # is delivered (ADR 0007, target M2) there is no school-day data and no
+        # HA freshness pair, and a run can still end CLEAR. Status semantics are
+        # unchanged here.
+        # #VERIFY: tests/unit/test_assessment_service.py::TestFreshness pins
+        # the current behavior.
+        # #EDGE: Data integrity: a naive ``SchoolSnapshot.received_at`` makes
+        # ``AssessmentInput.__post_init__`` (domain/events.py) raise a
+        # ``ValidationError`` when ``inp`` is built below, before ``assess`` is
+        # called. The exception escapes ``_assess`` and ``run`` records a failed
+        # run, never a clear one.
+        # #VERIFY: tests/unit/test_assessment_service.py::TestFailedRuns.
         if school is not None:
             freshness.append((HA_SNAPSHOT_SOURCE, school.received_at))
         inp = AssessmentInput(
@@ -341,6 +393,11 @@ class AssessmentService:
             # #ASSUME: Data integrity: an all-day person event has no time of
             # day, so it places nobody anywhere and is not an activity.
             # #VERIFY: tests/unit/test_assessment_service.py::TestActivities.
+            # #EDGE: Data integrity: an enabled PERSON calendar with no
+            # person_id is skipped silently; unreachable because the database
+            # CHECK ``ck_calendar_source_person_owner`` (db/schema.py) requires
+            # an owner for kind person.
+            # #VERIFY: optional; fail loudly here if the CHECK is ever relaxed.
             if (
                 source is None
                 or source.kind is not CalendarKind.PERSON
@@ -372,5 +429,4 @@ __all__ = [
     "activity_id",
     "engine_settings",
     "icloud_freshness",
-    "occurrence_kind",
 ]

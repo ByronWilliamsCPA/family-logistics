@@ -10,17 +10,26 @@ starts and is only upgraded when the whole outcome is stored in one
 transaction, so a process that dies mid-run can never leave a clear result.
 #VERIFY: tests/unit/test_assessments_repo.py pins the placeholder status and
 that a failed result leaves findings and the trip snapshot untouched.
+
+#CRITICAL: Concurrency: ``begin_run``, ``load_history`` and ``complete_run``
+are separate transactions and runs are not serialized, so overlapping runs can
+overwrite a newer run's findings and snapshot with older data. The ordering
+policy is an open decision for the scheduler milestone (M3); see the marker on
+``services.assessments.AssessmentService.run``.
+#VERIFY: no test pins this; the scheduler work must add one.
 """
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import Integer, delete, insert, literal_column, select, update
 
 from family_logistics.db.schema import analysis_run, finding, trip_snapshot
+from family_logistics.db.sources import MAX_ERROR_LENGTH
 from family_logistics.domain.models import Finding, RunStatus, Severity
 from family_logistics.domain.trip_codec import trip_from_json, trip_to_json
 
@@ -33,7 +42,12 @@ if TYPE_CHECKING:
     from family_logistics.domain.engine import AssessmentResult
     from family_logistics.domain.models import Trip
 
-MAX_ERROR_LENGTH = 500
+_RESOLVED = "resolved"
+"""``finding.lifecycle`` of a finding that stopped being raised.
+
+``domain.lifecycle.Lifecycle`` has no member for it (it describes open
+findings only), so the stored value is named once here.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +77,7 @@ class RunRecord:
         started_at: Start time (UTC).
         finished_at: Finish time (UTC), None while running or after a crash.
         status: Run status.
-        counts: Open findings per severity.
+        counts: Open findings per severity (read-only).
         rules_version: Version of the rules that judged the run.
         error: Why the run failed, if it did.
     """
@@ -75,7 +89,7 @@ class RunRecord:
     started_at: datetime
     finished_at: datetime | None
     status: RunStatus
-    counts: Mapping[str, int]
+    counts: MappingProxyType[str, int]
     rules_version: str
     error: str | None
 
@@ -108,7 +122,7 @@ def _record_from_row(row: Mapping[str, object]) -> RunRecord:
         started_at=cast("datetime", row["started_at"]),
         finished_at=cast("datetime | None", row["finished_at"]),
         status=RunStatus(str(row["status"])),
-        counts=dict(counts),
+        counts=MappingProxyType(dict(counts)),
         rules_version=str(row["rules_version"]),
         error=str(error) if error is not None else None,
     )
@@ -168,6 +182,10 @@ class AssessmentRepository:
 
         Returns:
             Open findings, resolved issue IDs and the stored trips.
+
+        Raises:
+            ValidationError: A stored trip snapshot row is corrupt or has an
+                unknown version (rows are never skipped).
         """
         with self._engine.connect() as connection:
             rows = [
@@ -179,10 +197,10 @@ class AssessmentRepository:
                 for row in connection.execute(select(trip_snapshot.c.payload))
             ]
         open_findings = tuple(
-            _finding_from_row(r) for r in rows if r["lifecycle"] != "resolved"
+            _finding_from_row(r) for r in rows if r["lifecycle"] != _RESOLVED
         )
         resolved = frozenset(
-            str(r["issue_id"]) for r in rows if r["lifecycle"] == "resolved"
+            str(r["issue_id"]) for r in rows if r["lifecycle"] == _RESOLVED
         )
         trips = tuple(trip_from_json(payload) for payload in snapshots)
         return StoredHistory(open_findings, resolved, trips)
@@ -192,7 +210,7 @@ class AssessmentRepository:
         run_id: str,
         result: AssessmentResult,
         finished_at: datetime,
-        trips: Sequence[Trip] = (),
+        trips: Sequence[Trip],
     ) -> None:
         """Store a run's outcome atomically.
 
@@ -203,7 +221,9 @@ class AssessmentRepository:
             run_id: Run returned by ``begin_run``.
             result: The engine result.
             finished_at: Finish time (UTC).
-            trips: Rides accepted this run (ignored for a failed result).
+            trips: Rides accepted this run (ignored for a failed result). There
+                is no default: a caller that forgets them would wipe the
+                snapshot of a completed run.
         """
         error = result.error[:MAX_ERROR_LENGTH] if result.error else None
         with self._engine.begin() as connection:
@@ -272,12 +292,12 @@ class AssessmentRepository:
                 )
         for gone in result.resolved:
             row = existing.get(gone.issue_id)
-            if row is None or row["lifecycle"] == "resolved":
+            if row is None or row["lifecycle"] == _RESOLVED:
                 continue
             connection.execute(
                 update(finding)
                 .where(finding.c.issue_id == gone.issue_id)
-                .values(lifecycle="resolved", resolved_at=finished_at, run_id=run_id)
+                .values(lifecycle=_RESOLVED, resolved_at=finished_at, run_id=run_id)
             )
 
     def latest_run(self) -> RunRecord | None:
@@ -321,7 +341,13 @@ class AssessmentRepository:
             rows = (
                 connection.execute(
                     select(analysis_run)
-                    .order_by(analysis_run.c.started_at.desc(), analysis_run.c.run_id)
+                    .order_by(
+                        analysis_run.c.started_at.desc(),
+                        # rowid grows with insertion (analysis_run is a rowid
+                        # table), so equal started_at still orders newest first.
+                        literal_column("analysis_run.rowid", Integer).desc(),
+                        analysis_run.c.run_id,
+                    )
                     .limit(limit)
                 )
                 .mappings()
@@ -342,7 +368,7 @@ class AssessmentRepository:
             rows = (
                 connection.execute(
                     select(finding).where(
-                        finding.c.run_id == run_id, finding.c.lifecycle != "resolved"
+                        finding.c.run_id == run_id, finding.c.lifecycle != _RESOLVED
                     )
                 )
                 .mappings()
