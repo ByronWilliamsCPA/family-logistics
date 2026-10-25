@@ -23,6 +23,7 @@ from family_logistics.domain.models import OccurrenceKind, RunStatus
 from family_logistics.domain.recurrence import occurrence_kind
 from family_logistics.services.assessments import (
     AssessmentService,
+    RunOutcome,
     SchoolSnapshot,
     activity_id,
     engine_settings,
@@ -62,7 +63,11 @@ class SnapshotAssessmentService(AssessmentService):
     Pass ``school=None`` to run without a snapshot; any other value replaces it.
     """
 
-    def run(self, trigger="on_demand", school=FRESH_SCHOOL):
+    def run(
+        self,
+        trigger: str = "on_demand",
+        school: SchoolSnapshot | None = FRESH_SCHOOL,
+    ) -> RunOutcome:
         return super().run(trigger, school)
 
 
@@ -150,9 +155,9 @@ class TestRun:
         record = AssessmentRepository(engine).get_run(outcome.run_id)
         assert record is not None
         zone = ZoneInfo("America/Los_Angeles")
-        assert (record.window_start, record.window_end) == collection_window(
-            NOW, zone, 0, 14
-        )
+        expected_start, expected_end = collection_window(NOW, zone, 0, 14)
+        assert record.window_start == expected_start
+        assert record.window_end == expected_end
         assert record.window_start == at(0, 0)
 
     def test_findings_are_persisted_and_carried_to_the_next_run(self, engine):
@@ -450,14 +455,44 @@ class TestFreshness:
             (t.finding.rule_id, t.finding.entity_keys) for t in outcome.result.findings
         ] == [("DATA-011", ("source:ha_snapshot",))]
 
+    def test_a_missing_snapshot_and_a_never_collected_calendar_are_both_flagged(
+        self, engine
+    ):
+        # Two distinct sources are unusable, so there are two DATA-011 findings
+        # (one per source key); neither hides the other. No event is collected, so
+        # no critical finding can lift the status above incomplete.
+        outcome = make_service(engine).run(school=None)
+        assert outcome.result.run_status is RunStatus.INCOMPLETE
+        assert sorted(
+            (t.finding.rule_id, t.finding.entity_keys) for t in outcome.result.findings
+        ) == [
+            ("DATA-011", ("source:ha_snapshot",)),
+            ("DATA-011", ("source:icloud",)),
+        ]
+
     def test_the_service_default_is_no_snapshot_and_so_incomplete(self, engine):
-        # The unwrapped service, called as production code calls it with the
-        # school argument omitted.
+        # The unwrapped service is what a future production caller gets when it
+        # omits ``school``: the default is ``None``, which means no snapshot.
         collect_all(engine, at_time=NOW - timedelta(minutes=20))
         service = AssessmentService(
             engine, make_settings(), routes(), clock=lambda: NOW
         )
-        assert service.run().result.run_status is RunStatus.INCOMPLETE
+        outcome = service.run()
+        assert outcome.result.run_status is RunStatus.INCOMPLETE
+        assert [
+            (t.finding.rule_id, t.finding.entity_keys) for t in outcome.result.findings
+        ] == [("DATA-011", ("source:ha_snapshot",))]
+
+    def test_a_stale_school_snapshot_makes_the_run_incomplete_never_clear(self, engine):
+        # The Home Assistant limit is 26 hours (domain/context.py); a snapshot
+        # three days old is far past it, while the calendars are fresh.
+        collect_all(engine, at_time=NOW - timedelta(minutes=20))
+        stale = SchoolSnapshot((), NOW - timedelta(days=3))
+        outcome = make_service(engine).run(school=stale)
+        assert outcome.result.run_status is RunStatus.INCOMPLETE
+        assert [
+            (t.finding.rule_id, t.finding.entity_keys) for t in outcome.result.findings
+        ] == [("DATA-011", ("source:ha_snapshot",))]
 
     def test_with_a_fresh_school_snapshot_a_finding_free_run_is_clear(self, engine):
         collect_all(engine, at_time=NOW - timedelta(minutes=20))
