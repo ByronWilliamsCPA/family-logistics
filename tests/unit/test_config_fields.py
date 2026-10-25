@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import inspect
+import textwrap
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -37,6 +39,34 @@ def stale_entries(model: type[BaseModel], status: dict[str, str]) -> set[str]:
     return set(status) - set(model.model_fields)
 
 
+def fields_read_via_properties(model: type[BaseModel], read: set[str]) -> set[str]:
+    """Return fields a model property reads, for each property that is itself read.
+
+    A property such as ``Settings.calendar_list`` reads ``caldav_calendars``
+    inside config.py; production code reading the property consumes the field.
+
+    Args:
+        model: The settings model.
+        read: Attribute names read from a settings object outside config.py.
+
+    Returns:
+        Names of ``self.<field>`` attributes read by the properties in ``read``.
+    """
+    fields: set[str] = set()
+    for name, prop in vars(model).items():
+        if not isinstance(prop, property) or prop.fget is None or name not in read:
+            continue
+        tree = ast.parse(textwrap.dedent(inspect.getsource(prop.fget)))
+        fields.update(
+            node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+        )
+    return fields
+
+
 def fields_read_in_src() -> set[str]:
     """Return attribute names read from a settings object outside config.py."""
     read: set[str] = set()
@@ -49,7 +79,7 @@ def fields_read_in_src() -> set[str]:
                 and ast.unparse(node.value) in SETTINGS_EXPRESSIONS
             ):
                 read.add(node.attr)
-    return read
+    return read | fields_read_via_properties(Settings, read)
 
 
 @pytest.mark.unit
@@ -79,6 +109,13 @@ class TestFieldStatus:
 
     def test_the_scan_sees_real_reads(self):
         assert {"port", "ha_token", "database_path"} <= fields_read_in_src()
+
+    def test_a_field_read_through_a_property_is_consumed(self):
+        assert "caldav_calendars" in fields_read_in_src()
+        assert fields_read_via_properties(Settings, {"calendar_list"}) == {
+            "caldav_calendars"
+        }
+        assert fields_read_via_properties(Settings, set()) == set()
 
     def test_the_scan_does_not_credit_unread_fields(self):
         # llm_model has no reader yet; it must be labelled with a milestone.

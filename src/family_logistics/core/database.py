@@ -108,7 +108,13 @@ def create_sqlite_engine(path: Path) -> Engine:
     """
     # URL.create passes the path through verbatim; an f-string URL would treat
     # "?" or "#" in the path as URL syntax.
-    engine = create_engine(URL.create("sqlite", database=str(path)), future=True)
+    # #CRITICAL: security: a rejected or failed statement raises an error that
+    # lists its bound parameters by default, which would put a plaintext address
+    # or calendar note into logs and tracebacks.
+    # #VERIFY: tests assert the offending value is absent from the error text.
+    engine = create_engine(
+        URL.create("sqlite", database=str(path)), future=True, hide_parameters=True
+    )
     event.listen(engine, "connect", _set_pragmas)
     return engine
 
@@ -133,7 +139,7 @@ def create_readonly_engine(path: Path) -> Engine:
         database=path.resolve().as_uri(),
         query={"mode": "ro", "uri": "true"},
     )
-    return create_engine(url, future=True)
+    return create_engine(url, future=True, hide_parameters=True)
 
 
 def check_database(engine: Engine) -> bool:
