@@ -6,6 +6,7 @@ across the application. All project-specific exceptions inherit from ProjectBase
 Exception Hierarchy:
     ProjectBaseError (base for all project exceptions)
     ├── ConfigurationError (configuration/settings issues)
+    │   └── RouteProviderNotImplementedError (configured routing provider unavailable)
     ├── ValidationError (input/data validation failures)
     ├── ResourceNotFoundError (missing resources/entities)
     ├── AuthenticationError (authentication failures)
@@ -144,6 +145,41 @@ class ConfigurationError(ProjectBaseError):
         ...     details={"missing_keys": ["DATABASE_URL", "SECRET_KEY"]},
         ... )
     """
+
+
+class RouteProviderNotImplementedError(ConfigurationError):
+    """The configured route provider cannot be built.
+
+    Raised by the route provider factory when ``FL_ROUTE_PROVIDER`` names a
+    provider that is not implemented yet or lacks required input. The factory
+    never falls back to another provider silently.
+
+    Args:
+        message: Why the provider cannot be built.
+        provider: The configured provider name.
+        details: Additional context.
+        error_code: Machine-readable error code.
+
+    Example:
+        >>> raise RouteProviderNotImplementedError(
+        ...     "FL_ROUTE_PROVIDER=google_routes is not implemented yet",
+        ...     provider="google_routes",
+        ... )
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str,
+        details: dict[str, object] | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            details={**(details or {}), "provider": provider},
+            error_code=error_code or "ROUTE_PROVIDER_NOT_IMPLEMENTED",
+        )
 
 
 class ValidationError(ProjectBaseError):
@@ -480,5 +516,6 @@ __all__ = [
     "ExternalServiceError",
     "ProjectBaseError",
     "ResourceNotFoundError",
+    "RouteProviderNotImplementedError",
     "ValidationError",
 ]
