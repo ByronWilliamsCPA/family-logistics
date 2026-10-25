@@ -19,10 +19,11 @@ EXAMPLE_ADDRESSES = ("100 Example Lane", "200 Sample Road")
 
 
 @pytest.fixture
-def env(tmp_path, monkeypatch):
+def env(tmp_path, monkeypatch, audit_key_text):
     config_module.get_settings.cache_clear()
     monkeypatch.setenv("FL_DATABASE_PATH", str(tmp_path / "fl.db"))
     monkeypatch.setenv("FL_DATA_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("FL_AUDIT_KEY", audit_key_text)
     monkeypatch.delenv("FL_REGISTRY_SEED", raising=False)
     yield tmp_path
     config_module.get_settings.cache_clear()
@@ -110,6 +111,22 @@ class TestRegistryLoad:
         result = run("registry", "load", str(EXAMPLE), "--allow-repo-path")
         assert result.exit_code == 2
         assert "FL_DATA_KEY is required" in result.output
+
+    def test_load_needs_an_audit_key(self, env, monkeypatch):
+        migrated()
+        monkeypatch.delenv("FL_AUDIT_KEY")
+        config_module.get_settings.cache_clear()
+        result = run("registry", "load", str(EXAMPLE), "--allow-repo-path")
+        assert result.exit_code == 2
+        assert "FL_AUDIT_KEY is required" in result.output
+
+    def test_overlong_actor_is_a_clean_error(self, env):
+        migrated()
+        result = run(
+            "registry", "load", str(EXAMPLE), "--allow-repo-path", "--actor", "a" * 65
+        )
+        assert result.exit_code == 2
+        assert "audit actor must be 1-64 characters" in result.output
 
 
 @pytest.mark.unit

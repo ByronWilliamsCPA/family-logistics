@@ -86,8 +86,13 @@ Every later run reuses that same stored value. A different or lost key
 cannot read addresses that are already stored, and they cannot be
 recovered; never regenerate the key for an existing database.
 
+Every change the loader makes also writes an audit row, and those rows are
+keyed with `FL_AUDIT_KEY` (see the [configuration guide](configuration.md));
+without it a real load stops and rolls back, while `--dry-run` still works.
+
 ```bash
 export FL_DATA_KEY="<the key from your secret store>"
+export FL_AUDIT_KEY="<the audit key from your secret store>"
 uv run family-logistics registry load --dry-run
 uv run family-logistics registry load
 uv run family-logistics registry show
@@ -96,7 +101,7 @@ uv run family-logistics registry show
 Rules the loader enforces:
 
 - Loading the same seed twice changes nothing; each change writes one audit
-  row holding hashes only.
+  row holding keyed hashes only, in the same transaction as the change.
 - People, passengers and calendars removed from the seed are deactivated,
   never deleted. Places, vehicles and households are kept.
 - Addresses and coordinates are stored encrypted with `FL_DATA_KEY`; a seed
