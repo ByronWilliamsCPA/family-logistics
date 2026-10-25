@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from caldav_fakes import (
@@ -22,6 +22,11 @@ from family_logistics.core.config import Settings
 from family_logistics.core.database import create_sqlite_engine
 from family_logistics.db import migrations_api
 from family_logistics.services import wiring
+
+# The fixture events are dated in October 2026 and the collection window is
+# relative to "now", so the CLI runs against the same fixed clock as
+# test_collector.py; otherwise the occurrence counts drift as real time passes.
+NOW = datetime(2026, 10, 21, 18, 0, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -54,7 +59,9 @@ def fake_server(monkeypatch):
     real = wiring.build_collector
 
     def build(settings, engine, inner=None):
-        return real(settings, engine, inner=inner or server.transport())
+        collector, http = real(settings, engine, inner=inner or server.transport())
+        collector.clock = lambda: NOW
+        return collector, http
 
     real_client = wiring.build_caldav_client
 
