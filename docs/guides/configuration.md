@@ -32,6 +32,7 @@ shows non-secret values only.
 | `FL_PORT` | `8080` | Listen port |
 | `FL_TIMEZONE` | `America/Los_Angeles` | IANA zone for human-facing times; storage is UTC |
 | `FL_DATABASE_PATH` | `/data/family_logistics.db` | SQLite database (WAL mode, single writer) |
+| `FL_REGISTRY_SEED` | unset | Private registry seed YAML, kept outside the repository; `registry load` reads it when no path is given |
 
 ## Calendars (read-only)
 
@@ -41,7 +42,11 @@ shows non-secret values only.
 | `FL_CALDAV_ALLOWED_HOSTS` | `icloud.com` | Comma-separated registrable domains the collector may reach, for the first request and every redirect hop; a host matches the domain or any subdomain (`p42-caldav.icloud.com`), never a lookalike (`evil-icloud.com`). Entries are bare domains: no scheme, path, port or wildcard. `FL_CALDAV_URL` must be inside it |
 | `FL_CALDAV_USERNAME` | unset | Dedicated Apple ID holding View Only calendar shares |
 | `FL_CALDAV_APP_PASSWORD` | unset | **Secret.** App-specific password for that Apple ID |
-| `FL_CALDAV_CALENDARS` | empty | Comma-separated calendar hrefs to collect |
+| `FL_CALDAV_CALENDARS` | empty | Calendars to collect, by display name or calendar ID (comma-separated); unlisted calendars are never read, and a calendar removed from the list stops being collected without raising DATA-011. An individual's calendar must also be in the registry seed with its owner, or it raises DATA-011 as unregistered |
+| `FL_CALDAV_TRANSPORT_CALENDAR` | `Family Transportation` | Display name of the shared ride calendar (registered as the transport calendar) |
+| `FL_COLLECT_DAYS_BACK` | `2` | Local days before today in each collection window |
+| `FL_COLLECT_DAYS_AHEAD` | `14` | Local days after today in each collection window |
+| `FL_SOURCE_MAX_STALENESS_MINUTES` | `120` | A calendar not collected completely within this time raises DATA-011 (incomplete) |
 
 ## Home Assistant and the registry UI
 
@@ -69,7 +74,11 @@ shows non-secret values only.
 | `FL_NOTIFICATION_MODE` | `shadow` | `shadow` or `production`; production needs both parents' approval |
 | `FL_QUIET_HOURS_START` | `22:00` | Start of quiet hours (local time) |
 | `FL_QUIET_HOURS_END` | `06:00` | End of quiet hours (local time) |
-| `FL_IMMINENT_WINDOW_MINUTES` | `180` | Rides starting within this window may bypass quiet hours |
+| `FL_IMMINENT_WINDOW_MINUTES` | `180` | Rides starting within this window may bypass quiet hours; an unverified destination on them is critical |
+| `FL_SAME_LOCATION_GAP_MINUTES` | `60` | Largest idle gap between activities at one place that still counts as one stay (no ride needed) |
+| `FL_OVERNIGHT_GAP_HOURS` | `14` | Largest idle gap between stays at one place on consecutive days that still counts as an overnight (no return home, no morning trip) |
+| `FL_TRAVEL_BUFFER_MINUTES` | `10` | Arrive this long before a passenger's next activity |
+| `FL_STOP_BUFFER_MINUTES` | `5` | Loading or unloading time per ride stop |
 
 The client sends through one saved Apprise configuration: `POST
 /notify/{FL_APPRISE_CONFIG_KEY}` with a JSON body of `title`, `body` and the

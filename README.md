@@ -101,6 +101,8 @@ private deployment repository.
 | `family-logistics serve [--upgrade-db]` | Run the API (single process, single SQLite writer); `--upgrade-db` migrates to head first |
 | `family-logistics migrate [--revision R] [--downgrade [--yes]]` | Upgrade the schema to head (or to `R`); a downgrade needs an explicit `--revision R` and a confirmation prompt, which `--yes` skips |
 | `family-logistics verify-db PATH` | Read-only integrity and schema-revision check of a database file (for restored backups) |
+| `family-logistics collect discover` | List the collector account's calendars by opaque ID (copy IDs into the private registry seed); flags any calendar shared with write access |
+| `family-logistics collect --once` | Read the configured calendars once and store their occurrences (prints IDs and counts only) |
 | `family-logistics healthcheck` | Probe the local `/healthz`; used by the container healthcheck |
 | `family-logistics config` | Print non-secret configuration |
 

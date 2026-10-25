@@ -11,6 +11,8 @@ re-entered from the registry UI. Never log tokens or plaintext.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 from typing import TYPE_CHECKING
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -34,7 +36,28 @@ class AddressCipher:
     """
 
     def __init__(self, key: SecretStr) -> None:
-        self._fernet = Fernet(key.get_secret_value().encode("ascii"))
+        raw = key.get_secret_value().encode("ascii")
+        self._fernet = Fernet(raw)
+        self._fingerprint_key = hashlib.sha256(b"fl-fingerprint\x1f" + raw).digest()
+
+    def fingerprint(self, value: SensitiveStr) -> str:
+        """Return a keyed digest of a sensitive value for change detection.
+
+        Fernet tokens differ on every encryption, so stored ciphertext cannot be
+        compared. The keyed HMAC lets the registry detect an address change and
+        record it in the audit log without storing or hashing the plaintext
+        under a public function (a plain SHA-256 of a street address could be
+        brute-forced).
+
+        Args:
+            value: Plaintext wrapped in ``SensitiveStr``.
+
+        Returns:
+            Hex HMAC-SHA256 of the value under a key derived from FL_DATA_KEY.
+        """
+        return hmac.new(
+            self._fingerprint_key, value.reveal().encode("utf-8"), hashlib.sha256
+        ).hexdigest()
 
     def encrypt(self, value: SensitiveStr) -> str:
         """Encrypt a sensitive value for storage.

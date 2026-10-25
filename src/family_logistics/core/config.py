@@ -146,13 +146,18 @@ FIELD_STATUS: dict[str, str] = {
     "include_timestamp": CONSUMED,
     "bind_host": CONSUMED,
     "port": CONSUMED,
-    "timezone": M1,
+    "timezone": CONSUMED,
     "database_path": CONSUMED,
-    "caldav_url": M1,
-    "caldav_username": M1,
-    "caldav_app_password": M1,
-    "caldav_calendars": M1,
-    "caldav_allowed_hosts": M1,
+    "registry_seed": CONSUMED,
+    "caldav_url": CONSUMED,
+    "caldav_username": CONSUMED,
+    "caldav_app_password": CONSUMED,
+    "caldav_calendars": CONSUMED,
+    "caldav_allowed_hosts": CONSUMED,
+    "caldav_transport_calendar": CONSUMED,
+    "collect_days_back": CONSUMED,
+    "collect_days_ahead": CONSUMED,
+    "source_max_staleness_minutes": CONSUMED,
     "ha_token": CONSUMED,
     "apprise_url": CONSUMED,
     "apprise_config_key": M3,
@@ -181,7 +186,11 @@ FIELD_STATUS: dict[str, str] = {
     "notification_mode": CONSUMED,
     "quiet_hours_start": M3,
     "quiet_hours_end": M3,
-    "imminent_window_minutes": M3,
+    "imminent_window_minutes": CONSUMED,
+    "same_location_gap_minutes": CONSUMED,
+    "overnight_gap_hours": CONSUMED,
+    "travel_buffer_minutes": CONSUMED,
+    "stop_buffer_minutes": CONSUMED,
 }
 """Whether each setting is read by running code or waits for a milestone.
 
@@ -211,14 +220,23 @@ class Settings(BaseSettings):
         port: Listen port.
         timezone: IANA zone used for all human-facing times; storage is UTC.
         database_path: SQLite database file (WAL mode, single writer).
+        registry_seed: Private registry seed YAML, kept outside the repository;
+            ``registry load`` reads it when no path is given.
         caldav_url: iCloud CalDAV base URL.
         caldav_username: Apple ID used by the read-only collector.
         caldav_app_password: App-specific password for that Apple ID.
-        caldav_calendars: Calendar hrefs or IDs to collect (discovered in M0).
+        caldav_calendars: Calendars to collect, by display name or calendar
+            ID (comma-separated). Discovered calendars not listed are ignored.
         caldav_allowed_hosts: Registrable domains the CalDAV collector may reach,
             for the first request and every redirect hop (default ``icloud.com``;
             a host matches the domain itself or any subdomain). Closes
             redirect-to-LAN request forgery. ``caldav_url`` must be inside it.
+        caldav_transport_calendar: Display name of the shared transportation
+            calendar; it is registered with the TRANSPORT kind.
+        collect_days_back: Local days before today included in a collection.
+        collect_days_ahead: Local days after today included in a collection.
+        source_max_staleness_minutes: A calendar whose last complete
+            collection is older than this raises DATA-011 (incomplete).
         ha_token: Bearer token Home Assistant presents to the HA-only routes.
         apprise_url: Apprise API base URL (http or https, no embedded credentials).
         apprise_config_key: Key of the saved Apprise configuration that holds the
@@ -263,7 +281,16 @@ class Settings(BaseSettings):
         quiet_hours_start: Start of quiet hours (local time).
         quiet_hours_end: End of quiet hours (local time).
         imminent_window_minutes: Rides starting within this window are
-            imminent; their critical issues bypass quiet hours.
+            imminent; their critical issues bypass quiet hours and an
+            unverified destination on them is critical.
+        same_location_gap_minutes: Largest idle gap between two activities at
+            one place that still counts as a single stay (no ride needed).
+        overnight_gap_hours: Largest idle gap between stays at one place on
+            consecutive local days that still counts as staying overnight (no
+            return home and no morning trip).
+        travel_buffer_minutes: Arrive this long before a passenger's next
+            activity.
+        stop_buffer_minutes: Loading or unloading time per ride stop.
     """
 
     model_config = SettingsConfigDict(
@@ -297,12 +324,17 @@ class Settings(BaseSettings):
     port: int = Field(default=8080, ge=1, le=65535)
     timezone: str = "America/Los_Angeles"
     database_path: Path = Path("/data/family_logistics.db")
+    registry_seed: Path | None = None
 
     caldav_url: str = "https://caldav.icloud.com"
     caldav_username: str | None = None
     caldav_app_password: SecretStr | None = None
     caldav_calendars: str = ""
     caldav_allowed_hosts: CommaList = Field(default_factory=lambda: ["icloud.com"])
+    caldav_transport_calendar: str = "Family Transportation"
+    collect_days_back: int = Field(default=2, ge=0, le=31)
+    collect_days_ahead: int = Field(default=14, ge=1, le=62)
+    source_max_staleness_minutes: int = Field(default=120, ge=15)
 
     ha_token: SecretStr | None = None
 
@@ -350,6 +382,13 @@ class Settings(BaseSettings):
     quiet_hours_start: time = time(22, 0)
     quiet_hours_end: time = time(6, 0)
     imminent_window_minutes: int = Field(default=180, ge=0)
+
+    # #ASSUME: Timing: proposed defaults pending owner approval (defaults
+    # register); tuned during the shadow period.
+    same_location_gap_minutes: int = Field(default=60, ge=0)
+    overnight_gap_hours: int = Field(default=14, ge=0)
+    travel_buffer_minutes: int = Field(default=10, ge=0)
+    stop_buffer_minutes: int = Field(default=5, ge=0)
 
     @field_validator("ha_token", mode="before")
     @classmethod
@@ -548,6 +587,21 @@ class Settings(BaseSettings):
             msg = "the FL_APPRISE_TAG_* values must be distinct"
             raise ValueError(msg)
         return self
+
+    @field_validator("registry_seed", mode="before")
+    @classmethod
+    def _blank_seed_is_unset(cls, value: object) -> object:
+        """Treat an empty ``FL_REGISTRY_SEED`` as unset, not the current directory.
+
+        Args:
+            value: Raw value from the environment or a constructor argument.
+
+        Returns:
+            None for blank text; other values unchanged for validation.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @field_validator(
         "proxy_trusted_cidrs", "ui_allowed_users", "caldav_allowed_hosts", mode="before"

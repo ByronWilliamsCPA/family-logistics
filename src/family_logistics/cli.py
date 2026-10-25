@@ -11,6 +11,11 @@ Subcommands:
 - ``migrate``: upgrade (or, with confirmation, downgrade) the database schema.
 - ``verify-db``: integrity and schema-revision check of a database file, for
   example a restored backup.
+- ``registry load``: validate the private registry seed and apply it
+  atomically (``--dry-run`` shows the plan only).
+- ``registry show``: list the registry without addresses or coordinates.
+- ``collect --once``: read the configured iCloud calendars once and store their
+  occurrences (prints calendar IDs and counts only).
 """
 
 from __future__ import annotations
@@ -18,14 +23,17 @@ from __future__ import annotations
 import ipaddress
 import logging
 import sys
+from datetime import datetime
 from http.client import HTTPConnection, HTTPException
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
+from zoneinfo import ZoneInfo
 
 import click
 
 from family_logistics import __version__
 from family_logistics.core.config import get_settings
+from family_logistics.core.crypto import AddressCipher, ProtectedDataError
 from family_logistics.core.database import (
     check_database,
     create_readonly_engine,
@@ -33,12 +41,24 @@ from family_logistics.core.database import (
     directory_problems,
     integrity_ok,
 )
-from family_logistics.core.exceptions import ConfigurationError
+from family_logistics.core.exceptions import ConfigurationError, ValidationError
 from family_logistics.db import migrations_api
+from family_logistics.db.registry import RegistryError, RegistryStore
+from family_logistics.services.registry_seed import (
+    SeedError,
+    apply_seed,
+    load_seed_file,
+)
 from family_logistics.utils.logging import setup_logging
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    from sqlalchemy.engine import Engine
+
     from family_logistics.core.config import Settings
+    from family_logistics.domain.events import CalendarSource
+    from family_logistics.domain.models import Location, Vehicle
 
 HEALTHCHECK_TIMEOUT_SECONDS = 3
 EXIT_CONFIG = 2
@@ -334,6 +354,284 @@ def verify_db(path: Path) -> None:
         click.echo(f"Schema state: {state.value}")
     click.echo(f"Schema revision: {current or 'none'} (head: {head})")
     sys.exit(0 if intact and current == head else 1)
+
+
+def _engine_at_head(settings: Settings) -> Engine:
+    """Open the application database, exiting unless it is at the schema head."""
+    problems = directory_problems(settings.database_path)
+    if problems:
+        _fail("; ".join(problems))
+    engine = create_sqlite_engine(settings.database_path)
+    if not migrations_api.is_at_head(engine):
+        engine.dispose()
+        _fail(SCHEMA_BEHIND_MESSAGE)
+    return engine
+
+
+def _cipher(settings: Settings) -> AddressCipher | None:
+    """Return the address cipher when ``FL_DATA_KEY`` is configured."""
+    return None if settings.data_key is None else AddressCipher(settings.data_key)
+
+
+@cli.group()
+def registry() -> None:
+    """Manage the household registry (people, places, vehicles, calendars)."""
+
+
+@registry.command("load")
+@click.argument("path", required=False, type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--dry-run", is_flag=True, help="Show the plan; write nothing.")
+@click.option(
+    "--allow-repo-path",
+    is_flag=True,
+    help="Permit a seed inside a git working tree (fictional examples only).",
+)
+@click.option(
+    "--actor", default="registry-seed", show_default=True, help="Audit actor."
+)
+def registry_load(
+    path: Path | None, dry_run: bool, allow_repo_path: bool, actor: str
+) -> None:
+    """Validate the registry seed and apply it in one transaction.
+
+    PATH defaults to FL_REGISTRY_SEED. Keep the real seed outside the
+    repository; it holds names and (encrypted on load) addresses.
+    """
+    settings = _settings()
+    seed_path = path or settings.registry_seed
+    if seed_path is None:
+        _fail("no registry seed: pass PATH or set FL_REGISTRY_SEED")
+    engine = _engine_at_head(settings)
+    try:
+        seed = load_seed_file(seed_path, allow_repo_path=allow_repo_path)
+        plan = apply_seed(
+            engine,
+            seed,
+            cipher=_cipher(settings),
+            audit_key=settings.audit_key,
+            audit_key_version=settings.audit_key_version,
+            actor=actor,
+            dry_run=dry_run,
+            today=datetime.now(ZoneInfo(settings.timezone)).date(),
+        )
+    except (
+        SeedError,
+        RegistryError,
+        ConfigurationError,
+        ValidationError,
+        ProtectedDataError,
+    ) as exc:
+        _fail(str(exc))
+    finally:
+        engine.dispose()
+    summary = ", ".join(f"{name} {count}" for name, count in plan.counts().items())
+    click.echo(("Dry run: " if dry_run else "Applied: ") + summary)
+    for change in plan.changes:
+        click.echo(f"  {change.action:<10} {change.object_ref}")
+
+
+def _row(*columns: str) -> None:
+    """Print one indented listing row."""
+    click.echo("  " + " ".join(columns))
+
+
+def _yes(flag: bool) -> str:
+    """Render a flag as yes or no."""
+    return "yes" if flag else "no"
+
+
+def _print_locations(
+    locations: Sequence[Location], presence: Mapping[str, tuple[bool, bool]]
+) -> None:
+    """Print the locations section; addresses and coordinates only as flags."""
+    click.echo(f"Locations ({len(locations)}):")
+    for x in locations:
+        has_address, has_coordinates = presence.get(x.location_id, (False, False))
+        _row(
+            f"{x.location_id:<16}",
+            f"{x.name:<24}",
+            f"verified={_yes(x.verified)}",
+            f"address={'stored' if has_address else 'none'}",
+            f"coordinates={'stored' if has_coordinates else 'none'}",
+        )
+
+
+def _print_vehicles(vehicles: Sequence[Vehicle]) -> None:
+    """Print the vehicles section."""
+    click.echo(f"Vehicles ({len(vehicles)}):")
+    for v in vehicles:
+        seats = "unverified" if v.seat_capacity is None else str(v.seat_capacity)
+        _row(f"{v.vehicle_id:<16}", f"{v.display_name:<24}", f"seats={seats}")
+
+
+def _print_calendars(calendars: Sequence[CalendarSource]) -> None:
+    """Print the calendars section."""
+    click.echo(f"Calendars ({len(calendars)}):")
+    for c in calendars:
+        last = c.last_success.isoformat() if c.last_success else "never"
+        _row(
+            f"{c.calendar_id:<16}",
+            f"{c.kind.value:<10}",
+            f"owner={c.person_id or '-'}",
+            f"enabled={_yes(c.enabled)}",
+            f"last_success={last}",
+        )
+
+
+@registry.command("show")
+def registry_show() -> None:
+    """List the registry. Addresses and coordinates are never printed."""
+    settings = _settings()
+    engine = _engine_at_head(settings)
+    try:
+        with engine.connect() as connection:
+            store = RegistryStore(connection)
+            people = store.people()
+            passengers = store.external_passengers()
+            locations = store.locations()
+            presence = store.protected_presence()
+            vehicles = store.vehicles()
+            calendars = store.calendar_sources()
+            defaults = store.transport_defaults()
+    finally:
+        engine.dispose()
+    click.echo(f"People ({len(people)}):")
+    for p in people:
+        _row(
+            f"{p.person_id:<16}",
+            f"{p.display_name:<16}",
+            f"{p.role.value:<8}",
+            f"active={_yes(p.active)}",
+            f"driver={_yes(p.can_drive)}",
+            f"monitored={_yes(p.monitoring_enabled)}",
+        )
+    click.echo(f"External passengers ({len(passengers)}):")
+    for e in passengers:
+        _row(
+            f"{e.passenger_id:<16}",
+            f"{e.display_first_name:<16}",
+            f"household={e.household_id}",
+            f"active={_yes(e.active)}",
+        )
+    _print_locations(locations, presence)
+    _print_vehicles(vehicles)
+    _print_calendars(calendars)
+    per_person: dict[str, int] = {}
+    for t in defaults:
+        per_person[t.person_id] = per_person.get(t.person_id, 0) + 1
+    click.echo(f"Transport defaults ({len(defaults)}):")
+    for pid, count in sorted(per_person.items()):
+        click.echo(f"  {pid:<16} {count}")
+
+
+def _credential_problems(settings: Settings) -> list[str]:
+    """Return what prevents talking to CalDAV (no secret values)."""
+    if not settings.caldav_username or settings.caldav_app_password is None:
+        return ["FL_CALDAV_USERNAME and FL_CALDAV_APP_PASSWORD are required"]
+    return []
+
+
+@cli.group(invoke_without_command=True)
+@click.option(
+    "--once",
+    is_flag=True,
+    help="Collect once and exit (the scheduled collector arrives in M3).",
+)
+@click.option(
+    "--calendar",
+    "calendars",
+    multiple=True,
+    help="Restrict to this calendar (display name or ID); repeatable.",
+)
+@click.pass_context
+def collect(ctx: click.Context, once: bool, calendars: tuple[str, ...]) -> None:
+    """Read the configured iCloud calendars and store their occurrences.
+
+    Exit status is 0 when every calendar was read completely, 1 when any was
+    incomplete (DATA-011), and 2 for configuration problems. Prints calendar
+    IDs and counts only.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    if not once:
+        _fail("Use `collect --once` or `collect discover` (scheduling arrives in M3).")
+    settings = _settings()
+    _configure_logging(settings)
+    problems = _credential_problems(settings) + directory_problems(
+        settings.database_path
+    )
+    if problems:
+        _fail("; ".join(problems))
+    from family_logistics.services import wiring  # noqa: PLC0415
+
+    engine = create_sqlite_engine(settings.database_path)
+    try:
+        if not migrations_api.is_at_head(engine):
+            _fail(SCHEMA_BEHIND_MESSAGE)
+        collector, http = wiring.build_collector(settings, engine)
+        try:
+            run = collector.run_once(only=calendars or None)
+        finally:
+            http.close()
+    finally:
+        engine.dispose()
+    if run.discovery_error:
+        click.echo(f"Discovery failed: {run.discovery_error}")
+    for item in run.calendars:
+        result = item.result
+        state = "complete" if result.complete else "INCOMPLETE"
+        applied = item.applied
+        changes = f"+{applied.inserted} ~{applied.updated} -{applied.deleted}"
+        detail = "reused" if item.reused else changes
+        label = f"{result.source.calendar_id} {result.source.kind.value}"
+        count = len(result.events)
+        click.echo(f"{label}: {count} occurrences, {state} ({detail})")
+    click.echo(f"DATA-011 findings: {len(run.findings)}")
+    sys.exit(0 if run.complete else 1)
+
+
+def _yes_no(value: bool | None) -> str:
+    """Render an optional flag for the discovery table."""
+    if value is None:
+        return "unknown"
+    return "yes" if value else "no"
+
+
+@collect.command("discover")
+def collect_discover() -> None:
+    """List the account's calendars: ID, events, shared, writable, name.
+
+    Copy the IDs of the calendars to collect into the private registry seed.
+    URLs and account identifiers are never printed. A calendar shown as
+    writable means the collector account holds write access: share it View
+    Only instead.
+    """
+    settings = _settings()
+    problems = _credential_problems(settings)
+    if problems:
+        _fail("; ".join(problems))
+    from family_logistics.adapters.caldav.client import CalDAVError  # noqa: PLC0415
+    from family_logistics.adapters.caldav.ids import calendar_id_for_href  # noqa: PLC0415
+    from family_logistics.services import wiring  # noqa: PLC0415
+
+    client, http = wiring.build_caldav_client(settings)
+    try:
+        calendars = client.discover()
+    except CalDAVError as exc:
+        click.echo(f"Discovery failed: {exc}", err=True)
+        sys.exit(1)
+    finally:
+        http.close()
+    click.echo("calendar_id\tevents\tshared\twritable\tname")
+    for info in calendars:
+        cells = (
+            calendar_id_for_href(info.href),
+            _yes_no(info.supports_events),
+            _yes_no(info.shared),
+            _yes_no(info.writable),
+            info.display_name,
+        )
+        click.echo("\t".join(cells))
 
 
 if __name__ == "__main__":

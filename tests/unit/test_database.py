@@ -7,8 +7,16 @@ import threading
 from pathlib import Path
 
 import pytest
-from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    MetaData,
+    Table,
+    Text,
+    create_engine,
+    text,
+)
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from family_logistics.core import database
 from family_logistics.core.database import (
@@ -113,6 +121,39 @@ class TestEngines:
         finally:
             engine.dispose()
         assert recorder.events == [("journal_mode_not_wal", {"journal_mode": "memory"})]
+
+    @pytest.mark.parametrize("hidden", [True, False], ids=["factory", "default"])
+    def test_rejected_value_stays_out_of_error_text(self, tmp_path, hidden):
+        # A database-level rejection (here a CHECK violation, as a raw plaintext
+        # write to a ciphertext column would be) raises an error that lists the
+        # bound parameters by default. The default engine is the control that
+        # proves the factory engines are what keeps the value out of logs and
+        # tracebacks.
+        plaintext = "1 Example Way, Sample Town"
+        probe = Table(
+            "probe",
+            MetaData(),
+            Column("note", Text, CheckConstraint("length(note) < 5")),
+        )
+        path = tmp_path / "probe.db"
+        engine = (
+            create_sqlite_engine(path)
+            if hidden
+            else create_engine(f"sqlite:///{path}", future=True)
+        )
+        with engine.begin() as connection:
+            probe.create(connection)
+        with pytest.raises(IntegrityError) as excinfo, engine.begin() as connection:
+            connection.execute(probe.insert().values(note=plaintext))
+        assert (plaintext in str(excinfo.value)) is not hidden
+        engine.dispose()
+
+    def test_readonly_engine_hides_parameters(self, tmp_path):
+        path = tmp_path / "ro.db"
+        create_sqlite_engine(path).dispose()
+        engine = create_readonly_engine(path)
+        assert engine.hide_parameters is True
+        engine.dispose()
 
 
 @pytest.mark.unit

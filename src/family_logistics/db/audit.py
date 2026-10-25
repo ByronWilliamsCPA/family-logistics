@@ -56,7 +56,7 @@ from family_logistics.db.schema import audit_log
 
 if TYPE_CHECKING:
     from pydantic import SecretStr
-    from sqlalchemy.engine import Engine
+    from sqlalchemy.engine import Connection, Engine
 
     from family_logistics.core.config import Settings
 
@@ -225,6 +225,75 @@ def _check_fields(
             raise ValidationError(msg, field=name)
 
 
+def record_on(  # noqa: PLR0913 - keyword-only audit fields
+    connection: Connection,
+    *,
+    key: SecretStr | None,
+    key_version: int,
+    actor: str,
+    object_ref: str,
+    action: str,
+    prior_state: object | None = None,
+    new_state: object | None = None,
+    correlation_id: str | None = None,
+) -> AuditEntry:
+    """Append one audit row on an open connection (the caller's transaction).
+
+    Use this when the audited change and its audit row must commit or roll
+    back together.
+
+    Args:
+        connection: Connection inside the caller's transaction.
+        key: ``Settings.audit_key``; None raises ``ConfigurationError``.
+        key_version: ``Settings.audit_key_version``, stored with the row.
+        actor: Who made the change.
+        object_ref: Internal reference; must not contain personal data.
+        action: What happened.
+        prior_state: State before the change (hashed, not stored).
+        new_state: State after the change (hashed, not stored).
+        correlation_id: Request or run correlation ID.
+
+    Returns:
+        The recorded entry.
+
+    Raises:
+        ConfigurationError: If ``key`` is None.
+
+    Note:
+        A reference field that is empty or longer than its column, a state
+        ``state_hash`` cannot encode, or a ``key_version`` below 1 raises
+        ValidationError; a malformed audit key also raises ConfigurationError.
+        Nothing is written in any of these cases.
+    """
+    if key is None:
+        msg = "FL_AUDIT_KEY is required before recording audit entries"
+        raise ConfigurationError(msg)
+    _check_fields(actor, object_ref, action, correlation_id)
+    entry = AuditEntry(
+        recorded_at=datetime.now(UTC),
+        actor=actor,
+        object_ref=object_ref,
+        action=action,
+        prior_hash=state_hash(prior_state, key=key),
+        new_hash=state_hash(new_state, key=key),
+        correlation_id=correlation_id,
+        hash_key_version=key_version,
+    )
+    connection.execute(
+        insert(audit_log).values(
+            recorded_at=entry.recorded_at,
+            actor=entry.actor,
+            object_ref=entry.object_ref,
+            action=entry.action,
+            prior_hash=entry.prior_hash,
+            new_hash=entry.new_hash,
+            correlation_id=entry.correlation_id,
+            hash_key_version=entry.hash_key_version,
+        )
+    )
+    return entry
+
+
 class AuditRepository:
     """Writes and reads the append-only audit log.
 
@@ -286,44 +355,26 @@ class AuditRepository:
         Returns:
             The recorded entry.
 
-        Raises:
-            ConfigurationError: If the repository has no audit key.
-
         Note:
-            The row commits in its own transaction, separately from the change
-            it describes. A reference field that is empty or longer than its
-            column, or a state ``state_hash`` cannot encode, raises
-            ValidationError; a malformed audit key also raises
-            ConfigurationError. Nothing is written in any of these cases.
+            Runs ``record_on`` in its own transaction, so the row commits
+            separately from the change it describes. Without an audit key it
+            raises ConfigurationError, and an empty or over-long reference
+            field, a state ``state_hash`` cannot encode, or a malformed key
+            raises ValidationError or ConfigurationError from there. Nothing is
+            written in any of these cases.
         """
-        if self._key is None:
-            msg = "FL_AUDIT_KEY is required before recording audit entries"
-            raise ConfigurationError(msg)
-        _check_fields(actor, object_ref, action, correlation_id)
-        entry = AuditEntry(
-            recorded_at=datetime.now(UTC),
-            actor=actor,
-            object_ref=object_ref,
-            action=action,
-            prior_hash=state_hash(prior_state, key=self._key),
-            new_hash=state_hash(new_state, key=self._key),
-            correlation_id=correlation_id,
-            hash_key_version=self._key_version,
-        )
         with self._engine.begin() as connection:
-            connection.execute(
-                insert(audit_log).values(
-                    recorded_at=entry.recorded_at,
-                    actor=entry.actor,
-                    object_ref=entry.object_ref,
-                    action=entry.action,
-                    prior_hash=entry.prior_hash,
-                    new_hash=entry.new_hash,
-                    correlation_id=entry.correlation_id,
-                    hash_key_version=entry.hash_key_version,
-                )
+            return record_on(
+                connection,
+                key=self._key,
+                key_version=self._key_version,
+                actor=actor,
+                object_ref=object_ref,
+                action=action,
+                prior_state=prior_state,
+                new_state=new_state,
+                correlation_id=correlation_id,
             )
-        return entry
 
     def entries_for(self, object_ref: str) -> list[AuditEntry]:
         """Return the audit trail of one object, oldest first.
