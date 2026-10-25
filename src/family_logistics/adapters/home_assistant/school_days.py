@@ -3,14 +3,16 @@
 Pure functions: the same payload, schools, zone and window always give the
 same rows, and nothing here reads a clock, the database or the network.
 
-Each event summary is classified by :data:`SCHOOL_DAY_KEYWORDS`, then each
-school's events are grouped by local day and decided:
+Each event summary is classified by :data:`SCHOOL_DAY_KEYWORDS` and
+:data:`CONTEXT_WORDS`, then each school's events are clipped to the window,
+grouped by local day and decided:
 
-* Kind: any unrecognized event makes the day UNKNOWN; a closure beside
-  anything but regular-day events, or an early release beside a late start,
-  is UNKNOWN; otherwise the one adjusted kind wins over NORMAL.
-* Times: only a bell-calendar timed event that falls within one local day
-  supplies bell times. A NORMAL, EARLY_RELEASE or LATE_START day needs at
+* Kind: any unrecognized event makes the day UNKNOWN; a closure that does not
+  cover the whole local day, or a closure beside anything but regular-day
+  events, or an early release beside a late start, is UNKNOWN; otherwise the
+  one adjusted kind wins over NORMAL.
+* Times: only a bell-calendar timed event of positive length that falls
+  within one local day supplies bell times. A NORMAL, EARLY_RELEASE or LATE_START day needs at
   least one such event of its own kind, or it becomes UNKNOWN; the times are
   the span of those events. An UNKNOWN day spans every bell timed event of
   the day, else it is a zero-length row at local midnight. A NO_SCHOOL day is
@@ -19,7 +21,14 @@ school's events are grouped by local day and decided:
   school schedule (SCHOOL-009) rather than assuming a normal day.
 
 An event is never assumed to be a normal school day: a summary the table
-does not recognize yields UNKNOWN.
+does not recognize, or one qualified by a context word, yields UNKNOWN.
+
+#CRITICAL: Data integrity: a false NO_SCHOOL is the dangerous direction (the
+engine builds no school block and suppresses transport defaults, so a child
+drops out of the checks on a real school day); a false UNKNOWN only costs a
+SCHOOL-009 warning. Every ambiguity therefore resolves to UNKNOWN.
+#VERIFY: tests/unit/test_ha_school_days.py::TestClassifySummary pins the
+reviewed regression summaries; TestNoSchool pins the closure rules.
 """
 
 from __future__ import annotations
@@ -45,7 +54,7 @@ if TYPE_CHECKING:
     from family_logistics.core.config import HaSchool
 
 __all__ = [
-    "NEGATION_WORDS",
+    "CONTEXT_WORDS",
     "SCHOOL_DAY_KEYWORDS",
     "DayWindow",
     "SnapshotMappingError",
@@ -56,12 +65,16 @@ __all__ = [
 # #ASSUME: external resources: school and district calendars title their
 # events in English with one of these phrases. Matching is on whole words of
 # the summary after case folding and replacing every non-alphanumeric
-# character with a space ("No-School Day" reads as "no school day"). A summary
+# character with a space ("No-School Day" reads as "no school day"). The
+# words a matched phrase covers are set aside, and if any CONTEXT_WORDS entry
+# remains among the other words the summary is UNKNOWN. Otherwise a summary
 # matching exactly one adjusted kind (no school, early release, late start)
-# takes that kind; one matching several adjusted kinds is UNKNOWN; one matching
-# only the NORMAL phrases is NORMAL unless it also holds a word from
-# NEGATION_WORDS; one matching nothing is UNKNOWN. Plain "holiday" is
-# deliberately absent: "Holiday Concert" is not a closure.
+# and no NORMAL phrase takes that kind; one matching several kinds, or an
+# adjusted kind and a NORMAL phrase together ("Regular Day (no school
+# Friday)"), is UNKNOWN; one matching only NORMAL phrases is NORMAL; one
+# matching nothing is UNKNOWN. Plain "holiday" is deliberately absent:
+# "Holiday Concert" is not a closure. Bare "bell schedule" is absent too:
+# "Modified Bell Schedule" is not a regular day.
 # #VERIFY: before production, run the deployment's real calendars through
 # classify_summary and review every UNKNOWN and every NORMAL day against the
 # published school calendar; extend this table (never a fallback to NORMAL)
@@ -69,6 +82,8 @@ __all__ = [
 SCHOOL_DAY_KEYWORDS: Final[Mapping[SchoolDayKind, tuple[str, ...]]] = {
     SchoolDayKind.NO_SCHOOL: (
         "no school",
+        "no school for students",
+        "no school for all students",
         "school closed",
         "schools closed",
         "district closed",
@@ -114,34 +129,79 @@ SCHOOL_DAY_KEYWORDS: Final[Mapping[SchoolDayKind, tuple[str, ...]]] = {
         "regular bell schedule",
         "normal day",
         "normal schedule",
+        "normal bell schedule",
         "school day",
         "full day",
-        "bell schedule",
         "regular bells",
     ),
 }
 """The one classification table: summary phrases for each school-day kind."""
 
-NEGATION_WORDS: Final = frozenset(
-    {"no", "not", "non", "cancelled", "canceled", "closed", "closure", "without"}
+# #ASSUME: external resources: a summary that qualifies its phrase (negates,
+# cancels, bounds in time, limits to some students, reschedules) uses one of
+# these words or word pairs outside the matched phrase. Words inside a matched
+# phrase never count, so "No School" and "School Closed" still classify while
+# "No early release", "Winter Break Ends" and "School Closed Early" do not.
+# The list errs wide on purpose: an entry here can only turn a day UNKNOWN
+# (a SCHOOL-009 warning), never into a closure.
+# #VERIFY: with the keyword table, run the deployment's real calendars through
+# classify_summary and review every UNKNOWN; widen SCHOOL_DAY_KEYWORDS with
+# the district's exact phrase rather than removing a context word.
+CONTEXT_WORDS: Final = frozenset(
+    {
+        # negation and cancellation
+        "no",
+        "not",
+        "non",
+        "without",
+        "cancelled",
+        "canceled",
+        "closed",
+        "closure",
+        "lifted",
+        "open",
+        "except",
+        "unless",
+        "instead",
+        "rescheduled",
+        "postponed",
+        # a boundary of a period rather than a day inside it
+        "resume",
+        "resumes",
+        "resuming",
+        "end",
+        "ends",
+        "ending",
+        "before",
+        "after",
+        "back",
+        "return",
+        "returns",
+        "make up",
+        "makeup",
+        "in session",
+        # a partial day or only some students
+        "early",
+        "late",
+        "for",
+        "only",
+        "attend",
+        "attends",
+    }
 )
-"""Words that stop a summary matching only NORMAL phrases from being NORMAL
-("Not a school day", "Regular day cancelled")."""
+"""Words (or word pairs) that, outside the matched phrase, make a summary
+UNKNOWN. Entries are normalized like summaries."""
 
 _NON_ALNUM = re.compile(r"[^0-9a-z]+")
-_ADJUSTED = (
-    SchoolDayKind.NO_SCHOOL,
-    SchoolDayKind.EARLY_RELEASE,
-    SchoolDayKind.LATE_START,
-)
 _BELL = "bell"
 
 
 class SnapshotMappingError(ValidationError):
     """The payload's calendars do not match the configured schools.
 
-    The error code is ``UNKNOWN_CALENDAR``, ``MISSING_CALENDAR`` or
-    ``NO_SCHOOLS``; the message never names a calendar entity.
+    The error code is ``UNKNOWN_CALENDAR``, ``MISSING_CALENDAR``,
+    ``NO_SCHOOLS`` or ``INVALID_TIME`` (a time outside the representable
+    range); the message never names a calendar entity or echoes a value.
     """
 
 
@@ -183,6 +243,15 @@ def _normalize(text: str) -> str:
     return " ".join(_NON_ALNUM.sub(" ", text.casefold()).split())
 
 
+def _occurrences(tokens: Sequence[str], phrase: str) -> Iterator[range]:
+    """Yield the token positions of each whole-word occurrence of ``phrase``."""
+    words = phrase.split()
+    size = len(words)
+    for at in range(len(tokens) - size + 1):
+        if list(tokens[at : at + size]) == words:
+            yield range(at, at + size)
+
+
 def classify_summary(summary: str) -> SchoolDayKind:
     """Classify one event summary with :data:`SCHOOL_DAY_KEYWORDS`.
 
@@ -190,22 +259,37 @@ def classify_summary(summary: str) -> SchoolDayKind:
         summary: The event title.
 
     Returns:
-        The kind the summary names, or UNKNOWN when it names none or several.
+        The one kind the summary names, or UNKNOWN when it names none or
+        several, or when a :data:`CONTEXT_WORDS` entry qualifies it.
     """
-    padded = f" {_normalize(summary)} "
+    tokens = _normalize(summary).split()
+    found = [
+        (kind, set(positions))
+        for kind, phrases in SCHOOL_DAY_KEYWORDS.items()
+        for phrase in phrases
+        for positions in _occurrences(tokens, phrase)
+    ]
+    covered: set[int] = set()
+    adjusted: set[int] = set()
+    for kind, positions in found:
+        covered |= positions
+        if kind is not SchoolDayKind.NORMAL:
+            adjusted |= positions
+    # A NORMAL phrase sharing a word with an adjusted phrase is part of it, not
+    # a second reading: "No-School Day" reads "no school" + "school day".
     matched = {
         kind
-        for kind, phrases in SCHOOL_DAY_KEYWORDS.items()
-        if any(f" {phrase} " in padded for phrase in phrases)
+        for kind, positions in found
+        if kind is not SchoolDayKind.NORMAL or adjusted.isdisjoint(positions)
     }
-    adjusted = matched.intersection(_ADJUSTED)
-    if len(adjusted) == 1:
-        return adjusted.pop()
-    if adjusted or SchoolDayKind.NORMAL not in matched:
+    qualified = any(
+        not covered.issuperset(positions)
+        for word in CONTEXT_WORDS
+        for positions in _occurrences(tokens, word)
+    )
+    if qualified or len(matched) != 1:
         return SchoolDayKind.UNKNOWN
-    if NEGATION_WORDS.intersection(padded.split()):
-        return SchoolDayKind.UNKNOWN
-    return SchoolDayKind.NORMAL
+    return matched.pop()
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,54 +298,112 @@ class _Mark:
 
     kind: SchoolDayKind
     bell_span: tuple[datetime, datetime] | None
+    full_day: bool
 
 
 def _as_day(value: date) -> date:
     return value.date() if isinstance(value, datetime) else value
 
 
-def _local_days(event: HaCalendarEvent, tz: ZoneInfo) -> list[date]:
-    """Return the local days an event covers (end exclusive)."""
+def _utc_midnight(day: date, tz: ZoneInfo) -> datetime:
+    return datetime.combine(day, time(0), tzinfo=tz).astimezone(UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class _Bounds:
+    """The window as local days and as UTC instants (end exclusive)."""
+
+    window: DayWindow
+    tz: ZoneInfo
+    start: datetime
+    end: datetime
+
+    @classmethod
+    def of(cls, window: DayWindow, tz: ZoneInfo) -> _Bounds:
+        """Compute the UTC bounds; raises OverflowError at the edge of time."""
+        return cls(
+            window,
+            tz,
+            _utc_midnight(window.first, tz),
+            _utc_midnight(window.last + timedelta(days=1), tz),
+        )
+
+
+def _days_between(first: date, last: date) -> Iterator[date]:
+    for offset in range((last - first).days + 1):
+        yield first + timedelta(days=offset)
+
+
+def _event_marks(
+    event: HaCalendarEvent, role: str, bounds: _Bounds
+) -> Iterator[tuple[date, _Mark]]:
+    """Yield the event's mark for each local day it covers inside the window.
+
+    The event is clipped to the window before any day is listed, so the work
+    is bounded by the window, never by the event's length.
+    """
+    # #CRITICAL: security: event bounds are untrusted. Clipping first (by
+    # comparison, which cannot overflow) keeps a 0001 to 9999 event to the
+    # window's few days and keeps every time zone conversion inside it.
+    # #VERIFY: tests/unit/test_ha_school_days.py::TestExtremeEvents.
+    kind = classify_summary(event.summary)
     start, end = event.start, event.end
+    window = bounds.window
     if not isinstance(start, datetime) or not isinstance(end, datetime):
-        first_day = _as_day(start)
-        count = (_as_day(end) - first_day).days
-        return [first_day + timedelta(days=n) for n in range(count)]
-    first = start.astimezone(tz).date()
+        first = max(_as_day(start), window.first)
+        last = min(_as_day(end) - timedelta(days=1), window.last)
+        for day in _days_between(first, last) if first <= last else ():
+            yield day, _Mark(kind, None, full_day=True)
+        return
     if end == start:
-        return [first]
+        overlaps = bounds.start <= start < bounds.end
+    else:
+        overlaps = start < bounds.end and end > bounds.start
+    if not overlaps:
+        return
+    clipped_start, clipped_end = max(start, bounds.start), min(end, bounds.end)
+    tz = bounds.tz
+    first = clipped_start.astimezone(tz).date()
     # #EDGE: timing: the end is exclusive, so an event ending exactly at local
     # midnight does not touch the next day. Subtracting a microsecond from the
     # UTC instant (not the wall clock) keeps this right across DST changes.
     # #VERIFY: TestMultiDayAndDst covers midnight ends and the fall-back day.
-    last = (end.astimezone(UTC) - timedelta(microseconds=1)).astimezone(tz).date()
-    return [first + timedelta(days=n) for n in range((last - first).days + 1)]
+    last = first
+    if clipped_end > clipped_start:
+        last_instant = clipped_end.astimezone(UTC) - timedelta(microseconds=1)
+        last = last_instant.astimezone(tz).date()
+    span: tuple[datetime, datetime] | None = None
+    if (
+        role == _BELL
+        and end > start
+        and first == last
+        and (clipped_start, clipped_end) == (start, end)
+    ):
+        span = (start.astimezone(UTC), end.astimezone(UTC))
+    for day in _days_between(first, last):
+        full_day = start <= _utc_midnight(day, tz) and end >= _utc_midnight(
+            day + timedelta(days=1), tz
+        )
+        yield day, _Mark(kind, span, full_day=full_day)
 
 
-def _marks(
-    events: Sequence[HaCalendarEvent], role: str, tz: ZoneInfo
-) -> Iterator[tuple[date, _Mark]]:
-    for event in events:
-        kind = classify_summary(event.summary)
-        days = _local_days(event, tz)
-        span: tuple[datetime, datetime] | None = None
-        if (
-            role == _BELL
-            and len(days) == 1
-            and isinstance(event.start, datetime)
-            and isinstance(event.end, datetime)
-        ):
-            span = (event.start.astimezone(UTC), event.end.astimezone(UTC))
-        for day in days:
-            yield day, _Mark(kind, span)
-
-
-def _decide_kind(kinds: set[SchoolDayKind]) -> SchoolDayKind:
+def _decide_kind(marks: Sequence[_Mark]) -> SchoolDayKind:
+    kinds = {mark.kind for mark in marks}
     if SchoolDayKind.UNKNOWN in kinds:
         return SchoolDayKind.UNKNOWN
     if SchoolDayKind.NO_SCHOOL in kinds:
+        # #ASSUME: data integrity: only a closure covering the whole local day
+        # (an all-day event, or a timed one from midnight to midnight)
+        # overrides a regular bell event; a timed closure is a partial day
+        # ("School Closed" 12:00 to 15:00) and is UNKNOWN, not NO_SCHOOL.
+        # #VERIFY: TestNoSchool covers both, beside a bell day and alone.
         others = kinds - {SchoolDayKind.NO_SCHOOL, SchoolDayKind.NORMAL}
-        return SchoolDayKind.UNKNOWN if others else SchoolDayKind.NO_SCHOOL
+        partial = any(
+            not mark.full_day for mark in marks if mark.kind is SchoolDayKind.NO_SCHOOL
+        )
+        if others or partial:
+            return SchoolDayKind.UNKNOWN
+        return SchoolDayKind.NO_SCHOOL
     if {SchoolDayKind.EARLY_RELEASE, SchoolDayKind.LATE_START} <= kinds:
         return SchoolDayKind.UNKNOWN
     for kind in (SchoolDayKind.EARLY_RELEASE, SchoolDayKind.LATE_START):
@@ -278,8 +420,8 @@ def _decide_day(
     day: date, marks: list[_Mark], tz: ZoneInfo
 ) -> tuple[SchoolDayKind, datetime, datetime]:
     """Decide one school's kind and bell times for one local day."""
-    kind = _decide_kind({mark.kind for mark in marks})
-    midnight = datetime.combine(day, time(0), tzinfo=tz).astimezone(UTC)
+    kind = _decide_kind(marks)
+    midnight = _utc_midnight(day, tz)
     if kind is SchoolDayKind.NO_SCHOOL:
         return kind, midnight, midnight
     if kind is not SchoolDayKind.UNKNOWN:
@@ -338,8 +480,9 @@ def map_school_days(
         The school days, sorted by day then person.
 
     Raises:
-        SnapshotMappingError: If no school is configured, or the payload's
-            calendars are not exactly the configured ones.
+        SnapshotMappingError: If no school is configured, the payload's
+            calendars are not exactly the configured ones, or a time falls
+            outside the representable range (``INVALID_TIME``).
     """
     # #CRITICAL: security: only calendars named in FL_HA_SCHOOLS may enter;
     # anything else (a personal calendar exposed by mistake) is refused, and
@@ -349,15 +492,26 @@ def map_school_days(
     if problem is not None:
         code, msg = problem
         raise SnapshotMappingError(msg, error_code=code)
+    try:
+        rows = _map_rows(snapshot, schools, _Bounds.of(window, tz))
+    except OverflowError as exc:
+        msg = "a snapshot time is outside the representable range"
+        raise SnapshotMappingError(msg, error_code="INVALID_TIME") from exc
+    return tuple(sorted(rows, key=lambda row: (row.date, row.person_id)))
+
+
+def _map_rows(
+    snapshot: HaSnapshotPayload, schools: Sequence[HaSchool], bounds: _Bounds
+) -> list[SchoolDay]:
     rows: list[SchoolDay] = []
     for school in schools:
         by_day: defaultdict[date, list[_Mark]] = defaultdict(list)
         for entity, role in school.entities().items():
-            for day, mark in _marks(snapshot.calendars[entity].events, role, tz):
-                if day in window:
+            for event in snapshot.calendars[entity].events:
+                for day, mark in _event_marks(event, role, bounds):
                     by_day[day].append(mark)
         for day, marks in by_day.items():
-            kind, start, end = _decide_day(day, marks, tz)
+            kind, start, end = _decide_day(day, marks, bounds.tz)
             rows.extend(
                 SchoolDay(
                     person_id=person,
@@ -370,4 +524,4 @@ def map_school_days(
                 )
                 for person in school.person_ids
             )
-    return tuple(sorted(rows, key=lambda row: (row.date, row.person_id)))
+    return rows

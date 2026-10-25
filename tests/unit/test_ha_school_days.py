@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from family_logistics.adapters.home_assistant.schemas import HaSnapshotPayload
+from family_logistics.adapters.home_assistant.schemas import (
+    MAX_EVENTS_PER_CALENDAR,
+    HaCalendar,
+    HaCalendarEvent,
+    HaSnapshotPayload,
+)
 from family_logistics.adapters.home_assistant.school_days import (
+    CONTEXT_WORDS,
     SCHOOL_DAY_KEYWORDS,
     DayWindow,
     SnapshotMappingError,
@@ -24,6 +31,7 @@ from family_logistics.domain.events import SchoolDay, SchoolDayKind
 pytestmark = pytest.mark.unit
 
 PACIFIC = ZoneInfo("America/Los_Angeles")
+TOKYO = ZoneInfo("Asia/Tokyo")
 BELL = "calendar.middle_school_bell"
 HIGH_BELL = "calendar.high_school_bell"
 DISTRICT = "calendar.district"
@@ -119,6 +127,89 @@ class TestClassifySummary:
     )
     def test_summary_kind(self, summary, kind):
         assert classify_summary(summary) is kind
+
+    @pytest.mark.parametrize(
+        "summary",
+        [
+            "Last Day Before Winter Break",
+            "Winter Break Ends",
+            "Welcome back from Spring Break",
+            "Spring Break ends",
+            "Classes resume after spring break",
+            "Snow Day Make-Up Day",
+            "Snow day makeup (school in session)",
+            "School Closed Early",
+            "Normal day, no snow day",
+            "Teacher work day cancelled",
+            "No School - CANCELLED",
+            "No school for seniors",
+            "No school closure",
+            "Professional development day for staff only; students attend",
+            "Regular Day (no school Friday)",
+            "School closed? No - open as normal",
+            "No early release",
+            "Not an early release day",
+            "Early release cancelled",
+            "Late start cancelled",
+            "Early out cancelled",
+            "School day (no early release)",
+            "Modified Bell Schedule",
+            "Assembly Bell Schedule",
+            "Exam bell schedule",
+            "Minimum Bell Schedule",
+            "Snow day lifted",
+            "Late start rescheduled",
+            "Spring break postponed",
+            "Regular day except grade 8",
+            "No school unless weather improves",
+            "Early release instead of late start",
+        ],
+    )
+    def test_a_qualified_summary_is_unknown(self, summary):
+        assert classify_summary(summary) is SchoolDayKind.UNKNOWN
+
+    @pytest.mark.parametrize(
+        ("summary", "kind"),
+        [
+            ("No School", SchoolDayKind.NO_SCHOOL),
+            ("Winter Break", SchoolDayKind.NO_SCHOOL),
+            ("Snow Day", SchoolDayKind.NO_SCHOOL),
+            ("School Closed", SchoolDayKind.NO_SCHOOL),
+            ("Student Free Day", SchoolDayKind.NO_SCHOOL),
+            ("Teacher Work Day", SchoolDayKind.NO_SCHOOL),
+            ("Non-Student Day", SchoolDayKind.NO_SCHOOL),
+            ("Emergency Closure", SchoolDayKind.NO_SCHOOL),
+            ("No School for Students", SchoolDayKind.NO_SCHOOL),
+            ("Early Release", SchoolDayKind.EARLY_RELEASE),
+            ("Early Dismissal", SchoolDayKind.EARLY_RELEASE),
+            ("Two Hour Delay", SchoolDayKind.LATE_START),
+            ("Late Arrival", SchoolDayKind.LATE_START),
+            ("Regular Day", SchoolDayKind.NORMAL),
+            ("Normal Bell Schedule", SchoolDayKind.NORMAL),
+        ],
+    )
+    def test_a_plain_summary_still_classifies(self, summary, kind):
+        assert classify_summary(summary) is kind
+
+    def test_bare_bell_schedule_is_not_a_phrase(self):
+        assert "bell schedule" not in SCHOOL_DAY_KEYWORDS[SchoolDayKind.NORMAL]
+        assert classify_summary("Bell Schedule") is SchoolDayKind.UNKNOWN
+
+    def test_the_context_table_holds_the_reviewed_words(self):
+        required = {
+            "no", "not", "non", "cancelled", "canceled", "closed", "closure",
+            "without", "resume", "resumes", "resuming", "ends", "end", "ending",
+            "before", "after", "back", "return", "returns", "make up", "makeup",
+            "only", "attend", "attends", "in session", "open", "lifted",
+            "except", "unless", "instead", "rescheduled", "postponed",
+        }  # fmt: skip
+        assert required <= CONTEXT_WORDS
+
+    def test_context_words_are_already_normalized(self):
+        for word in CONTEXT_WORDS:
+            assert word == " ".join(word.split())
+            assert word.replace(" ", "").isalnum()
+            assert word == word.casefold()
 
     def test_the_table_covers_every_kind_but_unknown(self):
         assert set(SCHOOL_DAY_KEYWORDS) == set(SchoolDayKind) - {SchoolDayKind.UNKNOWN}
@@ -332,6 +423,44 @@ class TestNoSchool:
         )
         assert day.kind is SchoolDayKind.NO_SCHOOL
 
+    def test_a_timed_closure_beside_a_regular_bell_day_is_unknown(self):
+        day = only(
+            run(
+                {
+                    BELL: [timed("2026-10-26", "08:00", "15:00", "Regular Day")],
+                    DISTRICT: [timed("2026-10-26", "08:00", "12:00", "No School")],
+                }
+            )
+        )
+        assert day.kind is SchoolDayKind.UNKNOWN
+
+    def test_a_partial_day_closure_alone_is_unknown(self):
+        day = only(
+            run(
+                {
+                    BELL: [],
+                    DISTRICT: [timed("2026-10-26", "12:00", "15:00", "School Closed")],
+                }
+            )
+        )
+        assert day.kind is SchoolDayKind.UNKNOWN
+
+    def test_a_timed_closure_covering_the_whole_day_is_a_closure(self):
+        closure = {
+            "start": "2026-10-26T00:00:00-07:00",
+            "end": "2026-10-27T00:00:00-07:00",
+            "summary": "Snow Day",
+        }
+        day = only(
+            run(
+                {
+                    BELL: [timed("2026-10-26", "08:00", "15:00", "Regular Day")],
+                    DISTRICT: [closure],
+                }
+            )
+        )
+        assert day.kind is SchoolDayKind.NO_SCHOOL
+
     def test_shared_district_calendar_closes_every_school(self):
         days = run(
             {
@@ -405,11 +534,19 @@ class TestMultiDayAndDst:
             (date(2026, 10, 24), SchoolDayKind.UNKNOWN),
         ]
 
-    def test_an_instantaneous_event_belongs_to_its_day(self):
+    def test_an_instantaneous_event_gives_no_bell_times(self):
+        # A zero-length bell event carries no usable dismissal time, so the
+        # classified day is downgraded rather than given a zero-length school
+        # block (local midnight, 07:00 UTC in daylight time).
         moment = timed("2026-10-23", "12:00", "12:00", "Early Release")
         day = only(run({BELL: [moment], DISTRICT: []}))
-        assert day.kind is SchoolDayKind.EARLY_RELEASE
-        assert day.start == day.end == utc(2026, 10, 23, 19)
+        assert day.kind is SchoolDayKind.UNKNOWN
+        assert day.start == day.end == utc(2026, 10, 23, 7)
+
+    def test_an_instantaneous_regular_event_is_unknown(self):
+        moment = timed("2026-10-23", "08:00", "08:00", "Regular Day")
+        day = only(run({BELL: [moment], DISTRICT: []}))
+        assert day.kind is SchoolDayKind.UNKNOWN
 
 
 class TestHorizon:
@@ -450,6 +587,84 @@ class TestHorizon:
         assert date(2026, 10, 24) in window
         assert date(2026, 10, 25) not in window
         assert "2026-10-23" not in window
+
+
+def constructed(
+    bell_events: tuple[HaCalendarEvent, ...],
+) -> HaSnapshotPayload:
+    """Build a payload without validation (times the schema would refuse)."""
+    return HaSnapshotPayload.model_construct(
+        fetched_at=utc(2026, 10, 23, 13),
+        calendars={
+            BELL: HaCalendar.model_construct(events=bell_events),
+            DISTRICT: HaCalendar.model_construct(events=()),
+        },
+        zones=(),
+    )
+
+
+EXTREME_ALL_DAY = HaCalendarEvent.model_construct(
+    start=date(1, 1, 1), end=date(9999, 12, 31), summary="Winter Break"
+)
+EXTREME_TIMED = HaCalendarEvent.model_construct(
+    start=datetime(1, 1, 1, tzinfo=UTC),
+    end=datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC),
+    summary="Winter Break",
+)
+
+
+class TestExtremeEvents:
+    WINDOW = DayWindow(FRIDAY, date(2026, 11, 8))
+
+    @pytest.mark.parametrize("tz", [PACIFIC, TOKYO], ids=["west", "east"])
+    @pytest.mark.parametrize(
+        "event", [EXTREME_ALL_DAY, EXTREME_TIMED], ids=["all_day", "timed"]
+    )
+    def test_an_event_spanning_every_year_maps_only_the_window(self, tz, event):
+        started = time.perf_counter()
+        days = map_school_days(
+            constructed((event,)), (MIDDLE,), tz=tz, window=self.WINDOW
+        )
+        assert time.perf_counter() - started < 1.0
+        assert [d.date for d in days] == [
+            date.fromordinal(n)
+            for n in range(FRIDAY.toordinal(), date(2026, 11, 8).toordinal() + 1)
+        ]
+        assert {d.kind for d in days} == {SchoolDayKind.NO_SCHOOL}
+
+    @pytest.mark.parametrize("tz", [PACIFIC, TOKYO], ids=["west", "east"])
+    def test_a_full_calendar_of_extreme_events_stays_bounded(self, tz):
+        events = (EXTREME_ALL_DAY, EXTREME_TIMED) * (MAX_EVENTS_PER_CALENDAR // 2)
+        started = time.perf_counter()
+        days = map_school_days(
+            constructed(events), (MIDDLE,), tz=tz, window=self.WINDOW
+        )
+        assert time.perf_counter() - started < 5.0
+        assert len(days) == 17
+
+    def test_events_wholly_outside_the_window_give_no_rows(self):
+        before = HaCalendarEvent.model_construct(
+            start=date(1, 1, 1), end=date(2, 1, 1), summary="No School"
+        )
+        after = HaCalendarEvent.model_construct(
+            start=datetime(9999, 12, 30, tzinfo=UTC),
+            end=datetime(9999, 12, 31, tzinfo=UTC),
+            summary="No School",
+        )
+        assert (
+            map_school_days(
+                constructed((before, after)), (MIDDLE,), tz=TOKYO, window=self.WINDOW
+            )
+            == ()
+        )
+
+    def test_a_window_at_the_end_of_time_is_a_mapping_error(self):
+        window = DayWindow(date(9999, 12, 30), date(9999, 12, 31))
+        with pytest.raises(SnapshotMappingError) as info:
+            map_school_days(
+                constructed((EXTREME_ALL_DAY,)), (MIDDLE,), tz=TOKYO, window=window
+            )
+        assert info.value.error_code == "INVALID_TIME"
 
 
 class TestEntities:

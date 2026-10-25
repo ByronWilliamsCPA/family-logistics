@@ -189,6 +189,51 @@ class TestRejected:
             parse(payload(zones=zones))
 
 
+class TestPlausibleYears:
+    @pytest.mark.parametrize(
+        "fetched",
+        [
+            "1999-12-31T23:59:59+00:00",
+            "2101-01-01T00:00:00Z",
+            "0001-01-01T00:00:00Z",
+            "9999-12-31T23:59:59Z",
+        ],
+    )
+    def test_fetched_at_outside_2000_to_2100_is_refused(self, fetched):
+        with pytest.raises(ValidationError) as info:
+            parse(payload(fetched_at=fetched))
+        assert fetched not in str(info.value)
+        assert safe_error_locations(info.value) == [
+            {"loc": ["fetched_at"], "type": "value_error"}
+        ]
+
+    @pytest.mark.parametrize(
+        ("start", "end"),
+        [
+            ("0001-01-01", "9999-12-31"),
+            ("1999-12-31", "2000-01-02"),
+            ("2100-12-31", "2101-01-01"),
+            ("0001-01-01T00:00:00+05:00", "2026-10-23T00:00:00Z"),
+            ("2026-10-23T00:00:00Z", "9999-12-31T23:59:59+00:00"),
+        ],
+    )
+    def test_event_times_outside_2000_to_2100_are_refused(self, start, end):
+        with pytest.raises(ValidationError) as info:
+            parse(with_events(event(start=start, end=end)))
+        assert start not in str(info.value)
+        assert end not in str(info.value)
+
+    def test_the_years_2000_and_2100_are_accepted(self):
+        snapshot = parse(
+            with_events(
+                event(start="2000-01-01", end="2000-01-02"),
+                event(start="2100-12-30", end="2100-12-31"),
+            )
+            | {"fetched_at": "2000-01-01T00:00:00Z"}
+        )
+        assert snapshot.fetched_at.year == 2000
+
+
 class TestSafeErrorLocations:
     def test_locations_never_carry_payload_text(self):
         data = payload(

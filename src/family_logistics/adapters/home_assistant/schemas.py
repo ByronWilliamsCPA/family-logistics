@@ -34,7 +34,9 @@ __all__ = [
     "MAX_SNAPSHOT_BYTES",
     "MAX_SUMMARY_LENGTH",
     "MAX_TIME_LENGTH",
+    "MAX_YEAR",
     "MAX_ZONES",
+    "MIN_YEAR",
     "ZONE_ENTITY_PATTERN",
     "HaCalendar",
     "HaCalendarEvent",
@@ -42,10 +44,16 @@ __all__ = [
     "safe_error_locations",
 ]
 
-# #CRITICAL: security: these bounds are the only limit on how much untrusted
-# data one request can make the app parse and hold in memory.
-# #VERIFY: the route refuses a body over MAX_SNAPSHOT_BYTES before parsing,
-# and tests/unit/test_ha_snapshot_schema.py covers each list and string bound.
+# #CRITICAL: security: the work one untrusted request can cause is bounded in
+# three places, and none alone suffices. The byte limit and these list and
+# string bounds cap what is parsed and held in memory; the year bounds
+# (MIN_YEAR to MAX_YEAR) keep every time far from the edges of ``datetime``;
+# and the mapper clips each event to the snapshot window before listing its
+# days, so the mapping work is bounded by events times window days, not by
+# how long an event claims to last.
+# #VERIFY: the route refuses a body over MAX_SNAPSHOT_BYTES before parsing;
+# tests/unit/test_ha_snapshot_schema.py covers each list, string and year
+# bound; tests/unit/test_ha_school_days.py::TestExtremeEvents covers clipping.
 MAX_SNAPSHOT_BYTES = 1_048_576
 """Largest request body accepted, in bytes (1 MiB)."""
 MAX_CALENDARS = 16
@@ -57,6 +65,9 @@ MAX_DESCRIPTION_LENGTH = 4000
 MAX_LOCATION_LENGTH = 500
 MAX_REPORTED_ERRORS = 20
 """Most validation errors reported for one request."""
+MIN_YEAR = 2000
+MAX_YEAR = 2100
+"""Plausible years for ``fetched_at`` and event bounds (inclusive)."""
 
 ZONE_ENTITY_PATTERN = r"^zone\.[a-z0-9_]{1,200}$"
 """A Home Assistant zone entity ID; person and device trackers never match."""
@@ -70,6 +81,25 @@ ZoneEntityId = Annotated[str, Field(pattern=ZONE_ENTITY_PATTERN)]
 CalendarEntityId = Annotated[str, Field(pattern=HA_CALENDAR_ENTITY_PATTERN)]
 
 
+def _plausible[T: date](value: T) -> T:
+    """Return ``value`` if its year is within ``MIN_YEAR`` to ``MAX_YEAR``.
+
+    Args:
+        value: A parsed date or date-time.
+
+    Returns:
+        The same value.
+
+    Raises:
+        ValueError: If the year is outside the bounds. The message never
+            echoes the value.
+    """
+    if not MIN_YEAR <= value.year <= MAX_YEAR:
+        msg = f"expected a year from {MIN_YEAR} to {MAX_YEAR}"
+        raise ValueError(msg)
+    return value
+
+
 def _parse_instant(value: object) -> datetime:
     """Parse an ISO 8601 date-time that carries a UTC offset.
 
@@ -80,8 +110,8 @@ def _parse_instant(value: object) -> datetime:
         The timezone-aware date-time.
 
     Raises:
-        ValueError: If the value is not a bounded string in that shape. The
-            message never echoes the value.
+        ValueError: If the value is not a bounded string in that shape, or
+            its year is implausible. The message never echoes the value.
     """
     if (
         not isinstance(value, str)
@@ -90,7 +120,7 @@ def _parse_instant(value: object) -> datetime:
     ):
         msg = "expected an ISO 8601 date-time with a UTC offset"
         raise ValueError(msg)
-    return datetime.fromisoformat(value)
+    return _plausible(datetime.fromisoformat(value))
 
 
 def _parse_event_time(value: object) -> date | datetime:
@@ -103,15 +133,16 @@ def _parse_event_time(value: object) -> date | datetime:
         A ``date`` for ``YYYY-MM-DD``, otherwise an aware ``datetime``.
 
     Raises:
-        ValueError: If the value is neither shape. The message never echoes
-            the value.
+        ValueError: If the value is neither shape, or its year is
+            implausible. The message never echoes the value.
     """
     if isinstance(value, str) and _DATE.fullmatch(value) is not None:
         try:
-            return date.fromisoformat(value)
+            parsed = date.fromisoformat(value)
         except ValueError:
             msg = "expected a valid calendar date"
             raise ValueError(msg) from None
+        return _plausible(parsed)
     try:
         return _parse_instant(value)
     except ValueError:
