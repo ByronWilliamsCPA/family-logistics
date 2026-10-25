@@ -5,11 +5,12 @@ carries the bearer-token dependency at router level, so a route added to it
 cannot forget authentication. Failed attempts are throttled per client address
 and every authentication failure returns the same 401.
 
-No business route exists yet. Later milestones (M2 and M4) add them to this
+``POST /api/v1/ingest/ha-snapshot`` (the school snapshot, ADR 0007) is the
+first business route. Later milestones (M2 and M4) add the others to this
 router: GET /api/v1/status, POST /api/v1/assessments,
-GET /api/v1/assessments/{run_id}, POST /api/v1/ingest/ha-snapshot,
-GET /api/v1/route-requests and POST /api/v1/route-results. They inherit the
-dependency and must not be registered on any other router.
+GET /api/v1/assessments/{run_id}, GET /api/v1/route-requests and
+POST /api/v1/route-results. They inherit the dependency and must not be
+registered on any other router.
 """
 
 from __future__ import annotations
@@ -24,7 +25,18 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi.responses import JSONResponse
+from pydantic import ValidationError as PydanticValidationError
+from starlette.concurrency import run_in_threadpool
 
+from family_logistics.adapters.home_assistant.schemas import (
+    MAX_SNAPSHOT_BYTES,
+    HaSnapshotPayload,
+    safe_error_locations,
+)
+from family_logistics.core.exceptions import ConfigurationError, ValidationError
+from family_logistics.db.school_snapshots import SchoolSnapshotConflictError
+from family_logistics.middleware.correlation import get_correlation_id
 from family_logistics.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -33,6 +45,7 @@ if TYPE_CHECKING:
     from pydantic import SecretStr
 
     from family_logistics.core.config import Settings
+    from family_logistics.services.school_snapshot import SchoolSnapshotIngest
 
 logger = get_logger(__name__)
 
@@ -430,17 +443,210 @@ def require_ha_token(
     return dependency
 
 
+class _BodyTooLargeError(Exception):
+    """The request body exceeds ``MAX_SNAPSHOT_BYTES``."""
+
+
+INVALID_SNAPSHOT = "Invalid snapshot"
+"""``detail`` of every 422 from the snapshot ingest."""
+
+
+async def _read_bounded_body(request: Request, limit: int) -> bytes:
+    """Read the request body, refusing it as soon as it exceeds ``limit``.
+
+    Args:
+        request: The incoming request.
+        limit: Largest accepted body, in bytes.
+
+    Returns:
+        The body.
+
+    Raises:
+        HTTPException: 400 for a malformed ``Content-Length``.
+        _BodyTooLargeError: When the declared or streamed size exceeds ``limit``.
+    """
+    # #CRITICAL: security: the size limit is enforced before any parsing, on
+    # the declared length and again on the bytes actually streamed, so a
+    # chunked or lying client cannot make the app buffer more than ``limit``.
+    # The route reads the body itself (no FastAPI body parameter), so the
+    # router-level token check runs before a single body byte is read.
+    # #VERIFY: tests/unit/test_ha_snapshot_route.py::TestSize and
+    # TestAuthentication.test_authentication_comes_before_the_size_limit.
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        if not (declared.isascii() and declared.isdigit()):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Bad Request")
+        if int(declared) > limit:
+            raise _BodyTooLargeError
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > limit:
+            raise _BodyTooLargeError
+    return bytes(body)
+
+
+def _is_json(request: Request) -> bool:
+    """Report whether the request declares a JSON body.
+
+    Args:
+        request: The incoming request.
+
+    Returns:
+        True for ``application/json`` with or without parameters.
+    """
+    media_type = request.headers.get("content-type", "").split(";", 1)[0]
+    return media_type.strip().lower() == "application/json"
+
+
+def _invalid(
+    code: str | None = None, errors: list[dict[str, object]] | None = None
+) -> JSONResponse:
+    """Build a 422 that carries no payload text.
+
+    Args:
+        code: Machine-readable reason, if any.
+        errors: Redacted validation locations, if any.
+
+    Returns:
+        The response.
+    """
+    content: dict[str, object] = {"detail": INVALID_SNAPSHOT}
+    if code is not None:
+        content["code"] = code
+    if errors is not None:
+        content["errors"] = errors
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, content=content
+    )
+
+
+def _unavailable(reason: str | None = None) -> JSONResponse:
+    """Build the 503 for an ingest the app is not configured to accept.
+
+    Args:
+        reason: Error code for the operator log; None when no service exists.
+
+    Returns:
+        The response; its body names no configuration value.
+    """
+    logger.error("ha_snapshot.unavailable", reason=reason or "NOT_WIRED")
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"detail": "School snapshot ingest is not available"},
+    )
+
+
+def _ingest_snapshot(
+    service: SchoolSnapshotIngest, body: bytes, correlation_id: str | None
+) -> JSONResponse:
+    """Parse, validate and store a snapshot body (runs in a worker thread).
+
+    Args:
+        service: The ingest service.
+        body: The raw request body, already size-checked.
+        correlation_id: Request correlation ID for the audit row.
+
+    Returns:
+        The response: 200 with the acknowledgement, 409, 422 or 503.
+    """
+    # #CRITICAL: security: neither a response nor a log line may echo the
+    # payload (children's school calendars, calendar entity IDs). Errors are
+    # reduced to codes and redacted locations; logs carry only the reason.
+    # #VERIFY: tests/unit/test_ha_snapshot_route.py::TestMalformed and
+    # TestUnknownReferences assert a marker string never reaches the
+    # response or caplog.
+    try:
+        snapshot = HaSnapshotPayload.model_validate_json(body)
+    except PydanticValidationError as exc:
+        errors = safe_error_locations(exc)
+        logger.warning("ha_snapshot.rejected", reason="schema", errors=len(errors))
+        return _invalid(errors=errors)
+    try:
+        ack = service.ingest(snapshot, correlation_id=correlation_id)
+    except SchoolSnapshotConflictError:
+        logger.warning("ha_snapshot.rejected", reason="older_than_stored")
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"detail": "A newer school snapshot is already stored"},
+        )
+    except ValidationError as exc:
+        logger.warning("ha_snapshot.rejected", reason=exc.error_code)
+        return _invalid(code=exc.error_code)
+    except ConfigurationError as exc:
+        return _unavailable(exc.error_code)
+    logger.info(
+        "ha_snapshot.ingested",
+        status=ack.status.value,
+        schools=ack.schools,
+        days=ack.days,
+        fetched_at=ack.fetched_at.isoformat(),
+    )
+    return JSONResponse(content=ack.as_dict())
+
+
+def _add_snapshot_route(
+    router: APIRouter, school_ingest: SchoolSnapshotIngest | None
+) -> None:
+    """Register ``POST /ingest/ha-snapshot`` on the authenticated router.
+
+    Args:
+        router: The HA router (token dependency already attached).
+        school_ingest: The ingest service; None answers 503.
+    """
+
+    async def ingest_ha_snapshot(request: Request) -> JSONResponse:
+        """Accept a Home Assistant school snapshot (ADR 0007).
+
+        Args:
+            request: The incoming request; the body is read here, bounded.
+
+        Returns:
+            200 with counts and freshness; 409, 413, 415, 422 or 503 otherwise.
+        """
+        if school_ingest is None:
+            return _unavailable()
+        if not _is_json(request):
+            return JSONResponse(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                content={"detail": "Expected application/json"},
+            )
+        try:
+            body = await _read_bounded_body(request, MAX_SNAPSHOT_BYTES)
+        except _BodyTooLargeError:
+            logger.warning("ha_snapshot.rejected", reason="too_large")
+            return JSONResponse(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                content={"detail": "Payload too large"},
+            )
+        return await run_in_threadpool(
+            _ingest_snapshot, school_ingest, body, get_correlation_id()
+        )
+
+    router.add_api_route(
+        "/ingest/ha-snapshot",
+        ingest_ha_snapshot,
+        methods=["POST"],
+        name="ingest_ha_snapshot",
+    )
+
+
 def build_ha_router(
-    settings: Settings, *, throttle: HaAuthThrottle | None = None
+    settings: Settings,
+    *,
+    throttle: HaAuthThrottle | None = None,
+    school_ingest: SchoolSnapshotIngest | None = None,
 ) -> APIRouter:
     """Build the Home Assistant router with authentication at router level.
 
-    Later milestones add the HA routes listed in the module docstring to this
-    router; they inherit the bearer-token dependency automatically.
+    Every route listed in the module docstring is registered on this router
+    and inherits the bearer-token dependency automatically.
 
     Args:
         settings: Application settings carrying ``ha_token``.
         throttle: Failure throttle; a default one is created when omitted.
+        school_ingest: School snapshot ingest service; without it the ingest
+            route answers 503.
 
     Returns:
         A router under ``/api/v1`` whose every route requires the HA token.
@@ -448,8 +654,10 @@ def build_ha_router(
     guard = require_ha_token(
         settings, throttle if throttle is not None else HaAuthThrottle()
     )
-    return APIRouter(
+    router = APIRouter(
         prefix="/api/v1",
         tags=["home-assistant"],
         dependencies=[Depends(guard)],
     )
+    _add_snapshot_route(router, school_ingest)
+    return router

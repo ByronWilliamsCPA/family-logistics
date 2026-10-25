@@ -12,6 +12,7 @@ from family_logistics.api.health import build_health_router
 from family_logistics.core.database import create_sqlite_engine
 from family_logistics.middleware.correlation import CorrelationMiddleware
 from family_logistics.middleware.security import SecurityHeadersMiddleware
+from family_logistics.services.school_snapshot import SchoolSnapshotIngest
 
 if TYPE_CHECKING:
     from family_logistics.core.config import Settings
@@ -37,5 +38,7 @@ def create_app(settings: Settings) -> FastAPI:
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(CorrelationMiddleware)
     app.include_router(build_health_router(engine))
-    app.include_router(build_ha_router(settings))
+    app.include_router(
+        build_ha_router(settings, school_ingest=SchoolSnapshotIngest(engine, settings))
+    )
     return app
