@@ -48,7 +48,9 @@ if TYPE_CHECKING:
 
 DAV = "DAV:"
 CALDAV = "urn:ietf:params:xml:ns:caldav"
-CALSERVER = "http://calendarserver.org/ns/"  # NOSONAR: XML namespace id, never fetched
+# An XML namespace identifier that is matched as text and never fetched, so the
+# cleartext-HTTP finding (S5332) does not apply.
+CALSERVER = "http://calendarserver.org/ns/"  # NOSONAR(S5332)
 
 MULTISTATUS = 207
 HTTP_UNAUTHORIZED = 401
