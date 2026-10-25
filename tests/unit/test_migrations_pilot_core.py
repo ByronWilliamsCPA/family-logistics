@@ -520,8 +520,10 @@ def parse_default(text: str) -> object:
 
 @pytest.mark.unit
 class TestPilotCoreMigration:
-    def test_head_is_pilot_core(self):
-        assert migrations_api.head_revision() == "0002_pilot_core"
+    def test_pilot_core_is_an_ancestor_of_head(self, engine):
+        migrations_api.upgrade(engine, "0002_pilot_core")
+        assert migrations_api.current_revision(engine) == "0002_pilot_core"
+        assert table_names(engine) == PILOT_TABLES | {"audit_log"}
 
     def test_upgrade_downgrade_reupgrade(self, engine):
         migrations_api.upgrade(engine)
@@ -557,7 +559,7 @@ class TestPilotCoreMigration:
         migrations_api.upgrade(engine)
 
         assert migrations_api.is_at_head(engine)
-        assert table_names(engine) == PILOT_TABLES | {"audit_log"}
+        assert table_names(engine) == PILOT_TABLES | {"audit_log", "trip_snapshot"}
         assert object_names(engine, "trigger") == AUDIT_TRIGGERS | ALIAS_TRIGGERS
         for name in PILOT_TABLES:
             assert row_count(engine, name) == 0, name
@@ -650,7 +652,7 @@ class TestPilotCoreMigration:
         engine.dispose()
         result = CliRunner().invoke(cli, ["verify-db", str(database)])
         assert result.exit_code == 0, result.output
-        assert "0002_pilot_core" in result.output
+        assert migrations_api.head_revision() in result.output
 
 
 @pytest.mark.unit
@@ -868,7 +870,7 @@ class TestMetadataParity:
     def test_table_set_is_exact(self, engine):
         migrations_api.upgrade(engine)
         assert table_names(engine) == set(schema.metadata.tables)
-        assert table_names(engine) == PILOT_TABLES | {"audit_log"}
+        assert table_names(engine) == PILOT_TABLES | {"audit_log", "trip_snapshot"}
 
     def test_column_types_and_primary_keys_match(self, engine):
         migrations_api.upgrade(engine)
