@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import and_, insert, select, update
 
+from family_logistics.core.exceptions import BusinessLogicError
 from family_logistics.db.schema import calendar_source, source_event, sync_state
 from family_logistics.domain.events import CalendarKind, CalendarSource, SourceEvent
 
@@ -31,6 +32,10 @@ if TYPE_CHECKING:
     from family_logistics.domain.events import CollectionResult, EventStatus
 
 MAX_ERROR_LENGTH = 500
+
+
+class UnregisteredCalendarError(BusinessLogicError):
+    """Raised when a calendar that needs a registry owner is not registered."""
 
 
 def _utc(value: object) -> datetime | None:
@@ -104,9 +109,11 @@ class ApplySummary:
 class CalendarSourceRepository:
     """Calendar sources the collector reads.
 
-    Kind and owner are set by the registry (seed data); discovery only adds
-    calendars it was told to collect and never changes an existing row's kind
-    or owner.
+    Kind and owner are set by the registry (seed data). Discovery only adds the
+    shared transportation calendar, which needs no owner; an individual's
+    calendar needs its owner (a database CHECK enforces it), so it must be
+    registered through the registry seed first. Discovery never changes an
+    existing row's kind or owner.
 
     Args:
         engine: Database engine.
@@ -148,7 +155,8 @@ class CalendarSourceRepository:
         """Insert a discovered calendar unless it already exists.
 
         An existing row keeps its kind, owner and enabled flag; only the
-        display name is refreshed.
+        display name is refreshed. A new row is inserted only for a kind that
+        needs no owner.
 
         Args:
             calendar_id: Calendar identifier.
@@ -159,6 +167,8 @@ class CalendarSourceRepository:
             The stored source.
 
         Raises:
+            UnregisteredCalendarError: If the calendar is new and its kind
+                needs an owner (``person``): the registry seed must add it.
             RuntimeError: If the row cannot be read back after the insert.
         """
         with self._engine.begin() as connection:
@@ -168,6 +178,12 @@ class CalendarSourceRepository:
                 )
             ).first()
             if exists is None:
+                if kind is CalendarKind.PERSON:
+                    msg = (
+                        "calendar is not registered: add it with its owner to "
+                        "the registry seed (`registry load`)"
+                    )
+                    raise UnregisteredCalendarError(msg)
                 connection.execute(
                     insert(calendar_source).values(
                         calendar_id=calendar_id,

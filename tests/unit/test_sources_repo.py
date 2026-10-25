@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from caldav_fakes import register_person_calendar
 
 from family_logistics.core.database import create_sqlite_engine
 from family_logistics.db import migrations_api
@@ -15,6 +16,7 @@ from family_logistics.db.sources import (
     SourceEventRepository,
     SyncState,
     SyncStateRepository,
+    UnregisteredCalendarError,
 )
 from family_logistics.domain.events import (
     CalendarKind,
@@ -33,7 +35,7 @@ SOURCE = CalendarSource("cal-a", "Sam", CalendarKind.PERSON)
 def engine(tmp_path):
     engine = create_sqlite_engine(tmp_path / "fl.db")
     migrations_api.upgrade(engine)
-    CalendarSourceRepository(engine).ensure("cal-a", "Sam", CalendarKind.PERSON)
+    register_person_calendar(engine, "cal-a", "Sam")
     yield engine
     engine.dispose()
 
@@ -73,13 +75,25 @@ class TestCalendarSources:
         repo = CalendarSourceRepository(engine)
         with engine.begin() as connection:
             connection.exec_driver_sql(
-                "UPDATE calendar_source SET kind='school_bell', enabled=0 "
-                "WHERE calendar_id='cal-a'"
+                "UPDATE calendar_source SET kind='school_bell', person_id=NULL, "
+                "enabled=0 WHERE calendar_id='cal-a'"
             )
         source = repo.ensure("cal-a", "Sam (renamed)", CalendarKind.TRANSPORT)
         assert source.display_name == "Sam (renamed)"
         assert source.kind is CalendarKind.SCHOOL_BELL
         assert not source.enabled
+
+    def test_ensure_registers_a_new_transport_calendar(self, engine):
+        repo = CalendarSourceRepository(engine)
+        source = repo.ensure("cal-t", "Family Transportation", CalendarKind.TRANSPORT)
+        assert source.kind is CalendarKind.TRANSPORT
+        assert source.person_id is None
+
+    def test_ensure_refuses_a_new_person_calendar_without_an_owner(self, engine):
+        repo = CalendarSourceRepository(engine)
+        with pytest.raises(UnregisteredCalendarError, match="registry seed"):
+            repo.ensure("cal-new", "Jordan", CalendarKind.PERSON)
+        assert repo.get("cal-new") is None
 
     def test_success_and_failure_are_recorded(self, engine):
         repo = CalendarSourceRepository(engine)

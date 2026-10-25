@@ -34,7 +34,7 @@ uv run family-logistics config        # non-secret settings only
 | `migrate [--revision R] [--downgrade [--yes]]` | Upgrade the schema to head (or to `R`) in one transaction; a target below the current revision is refused unless `--downgrade` is given, and a downgrade needs an explicit `--revision R` and a confirmation prompt, which `--yes` skips |
 | `verify-db PATH` | Read-only integrity and schema-revision check of a database file |
 | `collect discover` | List the collector account's calendars: opaque `calendar_id`, VEVENT support, shared, writable and display name (never URLs) |
-| `collect --once [--calendar NAME]` | Read the configured calendars once and store their occurrences; exit 1 when any calendar is incomplete (DATA-011) |
+| `collect --once [--calendar NAME]` | Read the configured calendars once and store their occurrences (individual calendars must be in the registry seed with an owner); exit 1 when any calendar is incomplete (DATA-011) |
 | `healthcheck` | Probe the local `/healthz`; exit 0 when healthy |
 | `config` | Print non-secret configuration values |
 | `registry load [PATH] [--dry-run]` | Validate the private registry seed and apply it in one audited transaction |

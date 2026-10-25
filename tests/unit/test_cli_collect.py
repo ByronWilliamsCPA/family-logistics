@@ -5,9 +5,17 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
-from caldav_fakes import ALLOWED_HOSTS, BASE_URL, SAM_PATH, default_server
+from caldav_fakes import (
+    ALLOWED_HOSTS,
+    BASE_URL,
+    PARTITION,
+    SAM_PATH,
+    default_server,
+    register_person_calendar,
+)
 from click.testing import CliRunner
 
+from family_logistics.adapters.caldav.ids import calendar_id_for_href
 from family_logistics.cli import SCHEMA_BEHIND_MESSAGE, cli
 from family_logistics.core import config as config_module
 from family_logistics.core.config import Settings
@@ -33,6 +41,9 @@ def migrated(path) -> None:
     engine = create_sqlite_engine(path / "fl.db")
     try:
         migrations_api.upgrade(engine)
+        register_person_calendar(
+            engine, calendar_id_for_href(f"{PARTITION}{SAM_PATH}"), "Sam"
+        )
     finally:
         engine.dispose()
 

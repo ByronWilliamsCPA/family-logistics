@@ -4,8 +4,10 @@ One ``Collector.run_once`` call:
 
 1. discovers the account's calendars (``adapters.caldav.client``);
 2. keeps only the calendars named in ``FL_CALDAV_CALENDARS`` plus the shared
-   transportation calendar, registering new ones as calendar sources (kind and
-   owner of an existing source are never changed here; the registry owns them);
+   transportation calendar. The transportation calendar is registered here when
+   new; an individual's calendar must already be in the registry with its owner
+   (a calendar that is not reports DATA-011). The kind and owner of an existing
+   source are never changed here; the registry owns them;
 3. for each enabled source that is still selected (a stored source dropped from
    the setting is skipped, not reported as a lost share), reads its ctag and
    sync token. When neither changed since a complete collection earlier the
@@ -42,8 +44,16 @@ from family_logistics.adapters.caldav.client import (
     SyncTokenInvalidError,
 )
 from family_logistics.adapters.caldav.ids import calendar_id_for_href
-from family_logistics.db.sources import ApplySummary, SyncState
-from family_logistics.domain.events import CalendarKind, CollectionResult
+from family_logistics.db.sources import (
+    ApplySummary,
+    SyncState,
+    UnregisteredCalendarError,
+)
+from family_logistics.domain.events import (
+    CalendarKind,
+    CalendarSource,
+    CollectionResult,
+)
 from family_logistics.domain.recurrence import RecurrenceError, expand_object
 from family_logistics.domain.rules import make_finding
 from family_logistics.utils.logging import get_logger
@@ -57,7 +67,7 @@ if TYPE_CHECKING:
         SourceEventRepository,
         SyncStateRepository,
     )
-    from family_logistics.domain.events import CalendarSource, SourceEvent
+    from family_logistics.domain.events import SourceEvent
     from family_logistics.domain.models import Finding
 
 logger = get_logger(__name__)
@@ -275,7 +285,17 @@ class Collector:
                 if info.display_name == self.config.transport_calendar
                 else CalendarKind.PERSON
             )
-            source = self.sources.ensure(calendar_id, info.display_name, kind)
+            try:
+                source = self.sources.ensure(calendar_id, info.display_name, kind)
+            except UnregisteredCalendarError as exc:
+                runs.append(
+                    self._failed(
+                        CalendarSource(calendar_id, info.display_name, kind),
+                        str(exc),
+                        run,
+                    )
+                )
+                continue
             if source.enabled:
                 runs.append(self._collect(source, info.href, run))
         runs.extend(

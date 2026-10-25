@@ -15,6 +15,7 @@ from caldav_fakes import (
     TRANSPORT_PATH,
     default_server,
     fixture_text,
+    register_person_calendar,
 )
 
 from family_logistics.adapters.caldav.client import CalDAVClient
@@ -70,6 +71,7 @@ class Clock:
 def engine(tmp_path):
     engine = create_sqlite_engine(tmp_path / "fl.db")
     migrations_api.upgrade(engine)
+    register_person_calendar(engine, SAM_ID, "Sam")
     yield engine
     engine.dispose()
 
@@ -357,14 +359,32 @@ class TestSelection:
         assert source.last_error is None
 
     def test_unlisted_stored_source_is_not_reported(self, engine):
-        CalendarSourceRepository(engine).ensure(
-            "cal-unlisted", "Jordan", CalendarKind.PERSON
-        )
+        register_person_calendar(engine, "cal-unlisted", "Jordan", "jordan")
         run = make(engine, default_server()).run_once()
         assert run.complete
         assert "cal-unlisted" not in {
             c.result.source.calendar_id for c in run.calendars
         }
+
+    def test_unregistered_person_calendar_is_incomplete_not_stored(self, engine):
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "DELETE FROM calendar_source WHERE calendar_id = ?", (SAM_ID,)
+            )
+            connection.exec_driver_sql("DELETE FROM person WHERE person_id = 'sam'")
+        run = make(engine, default_server()).run_once()
+        assert not run.complete
+        sam = next(c for c in run.calendars if c.result.source.calendar_id == SAM_ID)
+        assert not sam.result.complete
+        assert "registry seed" in (sam.result.error or "")
+        assert any(f.rule_id == "DATA-011" for f in run.findings)
+        assert CalendarSourceRepository(engine).get(SAM_ID) is None
+        assert (
+            SourceEventRepository(engine).active(
+                run.window_start, run.window_end, [SAM_ID]
+            )
+            == ()
+        )
 
     def test_selected_by_calendar_id_is_still_collected(self, engine):
         server = default_server()

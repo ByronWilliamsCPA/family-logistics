@@ -10,9 +10,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 from xml.sax.saxutils import escape
 
 import httpx
+
+from family_logistics.db.registry import RegistryStore
+from family_logistics.domain.events import CalendarKind, CalendarSource
+from family_logistics.domain.models import Person, PersonRole
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Engine
 
 FIXTURES = Path(__file__).parent / "fixtures" / "synthetic"
 BASE_URL = "https://caldav.example.test/"
@@ -25,6 +33,20 @@ TRANSPORT_PATH = f"{HOME_PATH}family-transportation/"
 SAM_PATH = f"{HOME_PATH}sam/"
 WORK_PATH = f"{HOME_PATH}riley-work/"
 TASKS_PATH = f"{HOME_PATH}tasks/"
+
+
+def register_person_calendar(
+    engine: Engine, calendar_id: str, display_name: str, person_id: str = "sam"
+) -> None:
+    """Register an individual's calendar and its owner, as the registry seed does."""
+    with engine.begin() as connection:
+        store = RegistryStore(connection)
+        store.upsert_person(Person(person_id, display_name, PersonRole.CHILD))
+        store.upsert_calendar_source(
+            CalendarSource(
+                calendar_id, display_name, CalendarKind.PERSON, person_id=person_id
+            )
+        )
 
 
 def fixture_text(name: str) -> str:
