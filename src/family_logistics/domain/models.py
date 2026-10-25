@@ -159,6 +159,7 @@ class Person:
         monitoring_enabled: Whether transportation checks run for the person.
         monitoring_start: First day monitoring applies (inclusive), optional.
         monitoring_end: Last day monitoring applies (inclusive), optional.
+        home_location_id: Registry location of the person's home, optional.
     """
 
     person_id: str
@@ -171,6 +172,7 @@ class Person:
     monitoring_enabled: bool = True
     monitoring_start: date | None = None
     monitoring_end: date | None = None
+    home_location_id: str | None = None
 
     def is_monitored_on(self, day: date) -> bool:
         """Report whether transportation checks apply on a day.

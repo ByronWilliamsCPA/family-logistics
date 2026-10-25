@@ -68,8 +68,10 @@ analysis and could show green.
    calendar that returns zero events is accepted as empty only after a
    successful, complete response. Retries use exponential backoff and honour
    `Retry-After`.
-6. **Raw retention.** Raw VEVENT snapshots are kept for 30 days (configurable)
-   for diagnosis, then deleted; normalised records persist.
+6. **Raw retention.** The raw VEVENT text (`description` and `location`) is kept
+   for 30 days (configurable) after the event ends or is deleted, for
+   diagnosis, then cleared; the `summary`, normalised records and raw hash
+   persist (see the privacy spec, section 7).
 
 ## Alternatives Considered
 

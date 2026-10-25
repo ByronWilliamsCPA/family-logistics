@@ -40,12 +40,12 @@ send more than a channel needs, and treat other families' data as on loan.
 | Entity | Fields | Class | Minimisation rule |
 |--------|--------|-------|-------------------|
 | Person (family) | person_id, display_name, role, calendar_id, home_location_id, aliases, active, monitoring_enabled | C | First names only. Casey stored with `monitoring_enabled=false`. |
-| External passenger | passenger_id (`ext-<random>`), display_name, household_id or linked contact, default pickup location, default drop-off location, optional alternate destinations, aliases, commitments and their confirmation state, active, carpool_end_date | R | Display name only (first name or nickname), no surname, birthdate or photo. |
+| External passenger | passenger_id (`ext-<random>`), display_name, household_id or linked contact, default pickup location, default drop-off location, optional alternate destinations, aliases, commitments and their confirmation state, active, inactive_since (the recorded carpool end date) | R | Display name only (first name or nickname), no surname, birthdate or photo. |
 | Household (external) | household_id, label, contacts (optional), privacy scope | R | Label is a nickname chosen by the parents (for example "Household E"). Contacts optional and only if a parent decides they are needed. |
 | Driver (family or external contact) | contact_id, display_name, household_id, aliases, driver_eligible flag | C | Name only; phone or email only if notifications to them are ever added (not in v1). Children are never drivers by appearing in an event; eligibility is a registry flag. |
 | Vehicle | vehicle_id, label, seat capacity (driver included), capacity_verified | C | No VIN or plate. |
 | Location | location_id, display name (named location), HA zone ID, address, lat/lon, aliases, verification state | R for external homes, C otherwise | Real addresses are stored **only where routing needs them**, held protected (section 5); everywhere else the named location is shown. Coordinates rounded to 4 decimals (about 11 m) unless a pickup point needs more. |
-| Source event | calendar_id, UID, recurrence_id, etag, raw hash, start/end, location, description, last_seen | R (raw notes) | Raw text kept only as a snapshot with 30-day retention; normalised fields persist. |
+| Source event | calendar_id, UID, recurrence_id, etag, raw hash, start/end, summary, location, description, last_seen | R (raw notes) | The raw text (`description` and `location`) is kept for 30 days after the event ends or is deleted, then cleared; the `summary`, the normalised fields and the raw hash persist (section 7). |
 | Trip and trip passenger | trip_id, type, status, driver, origin, destinations, constraints, sequence | C (R where an external passenger or external address is involved) | Destinations stored as location IDs, not free-text addresses. |
 | Finding | issue_id, rule_id, severity, affected IDs, first/last seen, resolved_at, evidence | C | Evidence references IDs, not raw notes text. |
 | Analysis run | run_id, trigger, window, freshness, rules version, state, counts, output | I (output C) | Report HTML stored as an artifact with run-log retention. |
@@ -69,7 +69,7 @@ Legend: **Y** allowed, **M** allowed masked, **P** pseudonym only, **N** never.
 | Family home address | Y | N | N | N (shown as "Home") | N ("Home") | N ("Home") | N |
 | Activity venue name | Y | Y | Y | Y | Y | Y | Y (public venues only) |
 | Ride times and driver | Y | Y | Y | Y | Y | Y | Fixtures only, synthetic |
-| Raw calendar notes | Y (30 days) | N | N | N | N | N | Sanitized fixtures only (M0 check 2) |
+| Raw calendar notes | Y (until 30 days after the event ends or is deleted) | N | N | N | N | N | Sanitized fixtures only (M0 check 2) |
 | Calendar IDs, UIDs | Y | Hashed | N | N | N | N | N |
 | Secrets | N (env only) | N | N | N | N | N | N |
 
@@ -85,11 +85,18 @@ carry children's schedules. Signal and SMS are future options only.
 
 ## 5. Address protection
 
-- External household addresses and home coordinates are stored in a separate
-  `protected_location` table with application-level encryption (Fernet/AES-GCM)
+- External household addresses and home coordinates are stored as Fernet
+  ciphertext (application-level encryption, Fernet/AES-GCM) in the
+  `address_ciphertext` and `latlon_ciphertext` columns of the `location` table,
   using a key supplied at runtime from the secret store (`FL_DATA_KEY`, from the
-  deployment's secret store). Losing the key loses only those fields; they are re-entered from
-  the registry UI.
+  deployment's secret store). The other columns on `location` (name,
+  `ha_zone_entity_id`, `verification_state`) are not sensitive. Losing the key
+  loses only the ciphertext fields; they are re-entered from the registry UI.
+- The schema also guards these two columns. Each uses a column type that accepts
+  only Fernet-shaped tokens, and a CHECK constraint on each requires a blob that
+  begins with a Fernet token prefix. These checks guard against an accidental
+  plaintext write; they do not prove a value is encrypted, because only the key
+  can show that.
 - Routing uses location IDs internally; plaintext addresses are decrypted only
   in the routing adapter call and the registry UI.
 - The routing provider is the only external party that receives an address:
@@ -102,6 +109,14 @@ carry children's schedules. Signal and SMS are future options only.
   address-shaped string reaches a log record.
 - Masking in push: "Ride for E. at 3:15 needs a driver" rather than full name
   or destination.
+
+> **Deviation from the original proposal.** The original proposal kept
+> addresses and coordinates in a separate `protected_location` table. The
+> approved implementation keeps the ciphertext columns on `location` instead.
+> Protection is the same: each field is encrypted with the runtime key.
+> SQLite has no column or table privileges, so a separate table would add no
+> enforceable access control. Every other column on `location` is non-sensitive,
+> because a venue name is allowed everywhere (section 4).
 
 ## 6. LLM pseudonymisation
 
@@ -121,29 +136,39 @@ Before any call to the local inference server:
 
 | Data | Retention | Mechanism |
 |------|-----------|-----------|
-| Raw VEVENT snapshots | 30 days | daily purge job |
+| Raw VEVENT text (`description` and `location` on `source_event`) | 30 days after the event is deleted, or after it ends if it is never deleted (`COALESCE(deleted_at, end_utc)`), not 30 days after last seen; the `summary`, the normalised fields and `raw_hash` persist | the database function `purge_raw_source_text` nulls those two fields and never deletes rows; the daily job that calls it arrives with the scheduler (M3), and until then the text is kept |
 | Analysis run logs and report artifacts | 90 days | daily purge job |
 | Audit hashes | at least 365 days | the database refuses to delete a row younger than 365 days; the purge job for older rows arrives with the scheduler (M3), and until then rows are kept |
 | Confirmed passenger legs after event deletion | 90 days after the trip date | supports change-impact comparison |
 | Resolved findings | 90 days after resolution | |
-| Inactive external passenger and household | removed or anonymised 90 days after the carpool ends (last trip, or a recorded carpool end date), or on request; audit hashes keep their own retention | registry review prompt at 75 days |
+| Inactive external passenger and household | removed or anonymised 180 days after the carpool ends (measured from the last trip, or a recorded carpool end date), or on request; audit hashes keep their own retention | registry review prompt at 165 days; the removal job arrives with the scheduler (M3), and until then rows are kept |
 | Backups | 14 days rolling (proposed) | backup sidecar |
+
+The inactive-passenger period is 180 days, not 90, because a carpool pauses
+every summer (about 90 days) and a 90-day rule would remove active families each
+summer. The review prompt keeps the original 15-day lead, so it fires at 165
+days. A seasonal pause is not an end: the registry marks a passenger inactive
+only on a deliberate action, and the clock runs from the last trip or a recorded
+carpool end date. The database enforces that `active` and `inactive_since` agree
+(inactive means a date is recorded, active means none), and deleting a
+passenger, person or location removes its alias rows.
 
 ## 8. Other families
 
 **Notice.** Morgan or Riley tells each external family whose child is entered
 in the registry that the household uses a private scheduling system holding the
 child's first name, the agreed pickup and drop-off places, and ride times, and
-that it is deleted 90 days after the carpool ends or sooner on request. No
+that it is deleted 180 days after the carpool ends or sooner on request. No
 data about them is shared outside the household's systems.
 
 If an external family asks what is held, or asks for removal:
 
 - **Export**: the registry UI can produce a per-household summary (names as
   stored, destinations, upcoming rides) for a parent to share by hand.
-- **Delete**: a hard-delete action removes the household, its passengers,
-  protected locations, route cache entries and future legs; audit rows keep
-  only hashes. Deleted data ages out of backups within 14 days.
+- **Delete**: a hard-delete action removes the household, its passengers, the
+  household's protected address data (the location's ciphertext fields are
+  cleared, or the location is removed), route cache entries and future legs;
+  audit rows keep only hashes. Deleted data ages out of backups within 14 days.
 - Both actions are audited and require an admin role.
 
 ## 9. Access control

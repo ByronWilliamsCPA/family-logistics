@@ -31,10 +31,14 @@ test_patterns = [
     "**/*_test.py",
 ]
 
-# Plugin definitions come from the official qlty plugin repository.
-[sources.default]
-repository = "https://github.com/qltysh/qlty"
-tag = "v0.659.0"
+# Plugin definitions come from qlty's built-in default source, which tracks the
+# installed CLI version. The supported form is an array of tables: a
+# `[sources.default]` table is silently ignored (first plugin lookup fails with
+# "Plugin definition not found"), and a repository-pinned default source is
+# rejected as deprecated.
+[[source]]
+name = "default"
+default = true
 
 # ============================================================================
 # Enabled plugins
@@ -49,6 +53,13 @@ name = "ruff"
 
 [[plugin]]
 name = "bandit"
+
+# The qlty bandit plugin ignores `[tool.bandit] exclude_dirs` in pyproject.toml,
+# so asserts in tests (B101) are reported 44 times at PR time. Mirror the
+# pyproject exclusion here; production code under src/ is still scanned.
+[[exclude]]
+plugins = ["bandit"]
+file_patterns = ["tests/**"]
 
 # ============================================================================
 # Code Quality Metrics - Maintainability and Complexity
