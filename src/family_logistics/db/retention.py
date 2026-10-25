@@ -1,10 +1,15 @@
-"""Retention purge for the raw calendar text kept on ``source_event``.
+"""Retention purges for calendar-derived data.
 
 ``source_event.location`` and ``source_event.description`` hold the calendar
 entry's free text exactly as it arrived. That text is Restricted: it can carry
 street addresses, names and notes about children. The normalized columns the
 engine reasons over persist, but the raw text is removed 30 days after the event
 ends or is deleted from its calendar.
+
+``school_day`` holds the parsed school days of the Home Assistant snapshot
+(Confidential). Every ingest replaces them, but if Home Assistant stops posting
+the last snapshot would stay forever, so days that ended more than
+``SCHOOL_DAY_RETENTION_DAYS`` ago are deleted.
 """
 
 from __future__ import annotations
@@ -12,7 +17,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
-from sqlalchemy import func, literal, or_, update
+from sqlalchemy import delete, func, literal, or_, update
 
 from family_logistics.core.exceptions import ValidationError
 from family_logistics.db import schema
@@ -22,6 +27,14 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Connection
 
 RAW_TEXT_RETENTION_DAYS = 30
+
+# #ASSUME: Security: proposed retention for parsed school days (defaults
+# register, pending owner approval); the privacy spec lists no period for the
+# HA snapshot yet. Past school days serve no assessment (the window starts
+# today), so the period only bounds how long a stale snapshot lingers.
+# #VERIFY: owner approves the period; the scheduler (M3) must call
+# ``purge_expired_school_days`` with ``purge_raw_source_text``.
+SCHOOL_DAY_RETENTION_DAYS = 30
 
 
 def purge_raw_source_text(connection: Connection, *, now: datetime) -> int:
@@ -77,3 +90,32 @@ def purge_raw_source_text(connection: Connection, *, now: datetime) -> int:
         .values(location=None, description=None)
     )
     return result.rowcount
+
+
+def purge_expired_school_days(connection: Connection, *, now: datetime) -> int:
+    """Delete parsed school days that ended more than the retention period ago.
+
+    Only ``school_day`` rows are deleted; the ``school_snapshot`` freshness row
+    is kept, so the snapshot still ages out through the staleness check
+    (DATA-011) rather than disappearing. The caller owns the transaction.
+
+    Args:
+        connection: An open connection, normally inside ``engine.begin()``.
+        now: The reference instant. It must be timezone-aware.
+
+    Returns:
+        The number of rows deleted.
+
+    Raises:
+        ValidationError: If ``now`` is a naive datetime. The message does not
+            contain the value.
+    """
+    if now.tzinfo is None or now.utcoffset() is None:
+        msg = "now must be a timezone-aware datetime"
+        raise ValidationError(msg, field="now")
+    cutoff = now - timedelta(days=SCHOOL_DAY_RETENTION_DAYS)
+    table = schema.school_day
+    expired = func.julianday(table.c.end_utc) < func.julianday(
+        literal(cutoff, UtcDateTime())
+    )
+    return connection.execute(delete(table).where(expired)).rowcount

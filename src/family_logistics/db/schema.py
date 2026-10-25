@@ -449,3 +449,59 @@ The next run compares its rides to these to find a passenger removed or a
 destination changed (change impact). ``complete_run`` replaces the whole table
 with the rides of the latest run that did not fail; a failed run leaves it
 untouched."""
+
+# ---------------------------------------------------------------------------
+# School snapshot (revision 0004_school_snapshot)
+# ---------------------------------------------------------------------------
+# The parsed school days of the latest Home Assistant snapshot (ADR 0007) and
+# its freshness. The raw ``calendar.get_events`` payload is never stored: no
+# summary, description, location or zone column exists here (children's data,
+# privacy class C). ``db.school_snapshots`` replaces both tables in one
+# transaction.
+
+school_snapshot = Table(
+    "school_snapshot",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=False),
+    Column("fetched_at", UtcDateTime(), nullable=False),
+    Column("received_at", UtcDateTime(), nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("day_count", Integer, nullable=False),
+    CheckConstraint("id = 1", name="ck_school_snapshot_singleton"),
+    CheckConstraint(
+        "julianday(fetched_at) <= julianday(received_at)",
+        name="ck_school_snapshot_fetched_not_after_received",
+    ),
+    CheckConstraint(
+        "length(content_hash) = 64", name="ck_school_snapshot_content_hash"
+    ),
+    CheckConstraint("day_count >= 0", name="ck_school_snapshot_day_count"),
+)
+"""Freshness of the stored snapshot: a single row (``id = 1``). ``fetched_at``
+is the earlier of Home Assistant's ``fetched_at`` and ``received_at`` (server
+time), so data sent with a clock ahead of the server never reads fresher than
+it is. ``content_hash`` (SHA-256 of the days and the fetch time as sent) makes
+an identical re-post a no-op."""
+
+school_day = Table(
+    "school_day",
+    metadata,
+    Column("person_id", String(64), primary_key=True),
+    Column("day", Date, primary_key=True),
+    Column("location_id", String(64), nullable=False),
+    Column("start_utc", UtcDateTime(), nullable=False),
+    Column("end_utc", UtcDateTime(), nullable=False),
+    Column("kind", String(16), nullable=False),
+    CheckConstraint(
+        "kind IN ('normal', 'early_release', 'late_start', 'no_school', 'unknown')",
+        name="ck_school_day_kind",
+    ),
+    CheckConstraint(
+        "julianday(end_utc) >= julianday(start_utc)",
+        name="ck_school_day_order",
+    ),
+)
+"""One person's parsed school day (``domain.events.SchoolDay``). No foreign key
+to ``person`` or ``location``: the rows are derived data, replaced wholesale on
+every ingest and checked against the registry when they are built, so a
+registry edit is never blocked by a stale snapshot row."""
