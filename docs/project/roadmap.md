@@ -22,14 +22,19 @@ transportation does not wait on later phases such as meal planning.
 | M5 LLM and hardening | Narrative explanations, privacy controls, failure injection, backup and restore drills | Deterministic findings unaffected by malformed LLM output |
 | M6 Meals (phase 2) | Meal rotation, cooking windows, shopping review | Estimated separately |
 
-Done so far (M0): domain models, the Template v1 notes parser,
+Done so far: M0 discovery code (domain models, the Template v1 notes parser,
 occurrence-bound confirmation codes, passenger-level change impact, run
 status, capacity, constrained stop ordering, address encryption at rest and
-the read-only CalDAV transport. Also in the tree as groundwork for later
+the read-only CalDAV transport), the M1 ingestion half (read-only CalDAV
+collector, recurrence expansion, source persistence and the `collect` CLI) and
+the M2 engine (location timeline, coverage, driver and feasibility rules,
+finding lifecycle and `assess()`). Also in the tree as groundwork for later
 milestones: the SQLite schema with Alembic migrations, an append-only audit log,
-the Apprise client and `ops_alert()` helper (not yet called by any scheduler;
-channel wiring and scheduling remain M3), structured logging, and startup
-checks (`verify-db`, `healthcheck`).
+the pilot registry and seed loader, the Apprise client and `ops_alert()` helper
+(not yet called by any scheduler; channel wiring and scheduling remain M3),
+structured logging, and startup checks (`verify-db`, `healthcheck`). The
+assessment orchestrator that joins the collector to the engine is in review
+(#17).
 
 ## Path to MVP
 
@@ -39,7 +44,8 @@ hardening) and M6 (meals) follow MVP.
 
 Status as of 2026-10-25. Merged: pilot contracts and core schema (#4),
 registry and seed loader (#5), review fixes (#13, #14), the engine (#6), the
-collector (#7) and a base-image digest update (#8).
+collector (#7) and Renovate updates (#8, #10, #11). The assessment
+orchestrator is open as #17.
 
 ### Step 1: Close out M1 and M2
 
@@ -48,8 +54,8 @@ collector (#7) and a base-image digest update (#8).
 | #7 `feat/m1-collector` | Merged | M1 ingestion half: read-only CalDAV collector, recurrence expansion, source persistence, `collect` CLI |
 | #6 `feat/m2-engine` | Merged | M2 engine: location timeline, coverage, driver and feasibility rules, finding lifecycle, `assess()` |
 | #8 Renovate base image digest | Merged | Dependency hygiene |
-| #10 Renovate pre-commit hooks (minor) | Open | Dependency hygiene. Needs a rebase on `main`, then CI. |
-| #11 Renovate pre-commit hooks (major) | Open, behind `main` | Dependency hygiene. Major bumps of `pre-commit-hooks` (v6 drops two hooks) and `conventional-pre-commit` (v4 skips merge commits by default). Run `pre-commit run --all-files` before merging. |
+| #10 Renovate pre-commit hooks (minor) | Merged | Dependency hygiene |
+| #11 Renovate pre-commit hooks (major) | Merged | Dependency hygiene. Major bumps of `pre-commit-hooks` (v6 drops two hooks) and `conventional-pre-commit` (v4 skips merge commits by default). |
 
 Open items that block the M1 and M2 exit gates, none of which is a PR yet:
 
@@ -68,7 +74,7 @@ Open items that block the M1 and M2 exit gates, none of which is a PR yet:
 
 | Milestone | PR | Replaces | Completes |
 |-----------|----|----------|-----------|
-| M2/M3 bridge | Assessment orchestrator | `services/assessments.py` stub | Collect, build timeline, apply school overlays, run the rules, compute change impact and run status, persist findings with lifecycle. A failed or incomplete run is never reported as clear. |
+| M2/M3 bridge | Assessment orchestrator (#17, in review) | `services/assessments.py` stub | Collect, build timeline, apply school overlays, run the rules, compute change impact and run status, persist findings with lifecycle. A failed or incomplete run is never reported as clear. |
 | M3 | Routing provider and budget | `adapters/routing` base only | At least one route provider, caching, budget warning. Unknown travel time stays incomplete (ROUTE-010). |
 | M3 | Notification service | `services/notifications.py` stub | Finding rendering, deduplication, shadow-mode default, quiet hours, imminent-ride windows, dedicated `fl-*` tags only. |
 | M3 | Scheduler and ops alerts | `services/scheduler.py` stub | Weekly, daily and incremental jobs, on-demand coalescing, `ops_alert()` wired to failed or incomplete runs, collection failures, a degraded database and the routing budget. **Gate: live dry-run reports in shadow mode.** |
