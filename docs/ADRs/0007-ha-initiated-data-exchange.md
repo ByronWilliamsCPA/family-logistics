@@ -68,6 +68,39 @@ initiates a connection to Home Assistant:
 - Payloads carry no secrets; zone coordinates are stored as location records
   under the privacy spec.
 
+## Snapshot Contract
+
+Implemented for `POST /api/v1/ingest/ha-snapshot`; the full guide, with an
+example payload, is [Home Assistant school snapshot](../guides/ha-school-snapshot.md).
+
+- **Request**: `{"fetched_at", "calendars", "zones"}`. `calendars` maps each
+  `calendar.*` entity ID to its raw `calendar.get_events` result
+  (`{"events": [{"start", "end", "summary", "description"?, "location"?}]}`);
+  `zones` lists `zone.*` entity IDs. Every object refuses unknown keys; lists
+  and strings are bounded (16 calendars, 1000 events each, 64 zones, 500
+  character summaries); the body is limited to 1 MiB, checked before parsing
+  and after authentication.
+- **Mapping**: `FL_HA_SCHOOLS` maps bell and district calendars to a registry
+  school location and its students. The payload must hold exactly the
+  configured calendars. Summaries are classified deterministically by one
+  keyword table (no school, early release, late start, normal); an
+  unrecognized summary is `unknown`, never `normal`. Bell times come only from
+  timed bell-calendar events within one local day (`FL_TIMEZONE`).
+- **Time**: `fetched_at` must carry a UTC offset and be no more than 5 minutes
+  ahead of the server; the stored freshness is `min(fetched_at, received_at)`.
+  A snapshot not newer than the stored one is refused (409) unless it is an
+  identical re-post, which is acknowledged as unchanged.
+- **Zones**: each zone must be the `ha_zone_entity_id` of a registry location,
+  else 422. Zones are checked only and never stored; the payload carries no
+  coordinates. (This narrows the earlier note on zone coordinates: location
+  records stay the only home of coordinates, entered through the registry.)
+- **Storage**: one row per person and day (date, location, start, end, kind)
+  plus the freshness, a content hash and a day count, replaced atomically with
+  one audit row of counts and freshness. Event text is never stored or logged.
+- **Errors**: 422 bodies carry an error code or redacted locations only;
+  configuration problems (no school, no audit key, a configured ID missing
+  from the registry) answer 503. Nothing is stored on any error.
+
 ## Alternatives Considered
 
 | Option | Assessment |
