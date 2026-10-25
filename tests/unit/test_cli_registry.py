@@ -86,6 +86,16 @@ class TestRegistryLoad:
         assert result.exit_code == 2
         assert "inside a git working tree" in result.output
 
+    def test_unreadable_seed_is_a_clean_error(self, env):
+        migrated()
+        seed = env / "registry.yaml"
+        # A Windows editor's "Unicode" save is UTF-16, not UTF-8.
+        seed.write_bytes(EXAMPLE.read_text(encoding="utf-8").encode("utf-16"))
+        result = run("registry", "load", str(seed))
+        assert result.exit_code == 2
+        assert "could not be read" in result.output
+        assert "Traceback" not in result.output
+
     def test_no_path(self, env):
         migrated()
         result = run("registry", "load")

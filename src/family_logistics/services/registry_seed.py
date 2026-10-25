@@ -45,7 +45,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from family_logistics.core.exceptions import ConfigurationError, ValidationError
 from family_logistics.db.audit import record_on
-from family_logistics.db.registry import Household, RegistryStore
+from family_logistics.db.registry import Household, RegistryError, RegistryStore
 from family_logistics.domain.events import (
     CalendarKind,
     CalendarSource,
@@ -86,6 +86,7 @@ WEEKDAY_NAMES = (
 )
 COORDINATES = re.compile(r"^\s*-?\d{1,2}(\.\d+)?\s*,\s*-?\d{1,3}(\.\d+)?\s*$")
 MAX_SEED_BYTES = 1_000_000
+MERGE_TAG = "tag:yaml.org,2002:merge"
 
 SlugId = Annotated[str, StringConstraints(pattern=SLUG)]
 CalendarId = Annotated[str, StringConstraints(pattern=CALENDAR_ID)]
@@ -522,6 +523,15 @@ def inside_git_worktree(path: Path) -> bool:
     return any((parent / ".git").exists() for parent in resolved.parents)
 
 
+def _is_hashable(value: object) -> bool:
+    """Report whether a constructed YAML key can go in a set."""
+    try:
+        hash(value)
+    except TypeError:
+        return False
+    return True
+
+
 class _UniqueKeyLoader(yaml.SafeLoader):
     """Safe YAML loader that rejects a mapping key listed twice.
 
@@ -548,9 +558,16 @@ class _UniqueKeyLoader(yaml.SafeLoader):
         seen: set[object] = set()
         pairs = cast("list[tuple[yaml.Node, yaml.Node]]", node.value)
         for key_node, _ in pairs:
+            # ``<<`` has no constructor of its own; the parent class expands it
+            # (and lets an explicit key override a merged one, as YAML allows).
+            if key_node.tag == MERGE_TAG:
+                continue
             # Third-party stub gap: types-PyYAML leaves construct_object's
             # ``node`` parameter unannotated.
             key = cast("object", self.construct_object(key_node, deep=deep))  # pyright: ignore[reportUnknownMemberType]
+            if not _is_hashable(key):
+                # The parent raises its own error for an unhashable key.
+                continue
             if key in seen:
                 raise yaml.constructor.ConstructorError(
                     problem="duplicate mapping key",
@@ -611,7 +628,8 @@ def load_seed_file(path: Path, *, allow_repo_path: bool = False) -> RegistrySeed
 
     Raises:
         SeedError: If the path is inside a working tree without permission,
-            the file is missing or too large, or validation fails.
+            the file is missing, too large, unreadable or not UTF-8 text, or
+            validation fails.
     """
     # #CRITICAL: Security: a real seed holds names and addresses; refusing a
     # path inside a git working tree keeps it out of this public repository.
@@ -627,7 +645,14 @@ def load_seed_file(path: Path, *, allow_repo_path: bool = False) -> RegistrySeed
     if path.stat().st_size > MAX_SEED_BYTES:
         msg = "registry seed is larger than 1 MB"
         raise SeedError(msg)
-    return parse_seed(path.read_text(encoding="utf-8"))
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # The OS or codec message can carry a path or byte offsets; name the
+        # file only.
+        msg = f"registry seed could not be read as UTF-8 text: {path.name}"
+        raise SeedError(msg) from None
+    return parse_seed(text)
 
 
 # ---------------------------------------------------------------------------
@@ -956,6 +981,42 @@ def _require_cipher_for(
         raise ConfigurationError(msg)
 
 
+def _reject_retained_location_aliases(
+    store: RegistryStore, seed: RegistrySeed, retained: Sequence[str]
+) -> None:
+    """Refuse a seed alias that a retained location still holds.
+
+    A location missing from the seed is kept with its aliases, and its alias
+    rows cannot be released the way a deactivated person's are. Without this
+    check a dry run passes and the real load then fails on the unique
+    ``(kind, lower(alias))`` index.
+
+    Args:
+        store: Registry store on an open connection.
+        seed: The validated seed.
+        retained: IDs of the locations the seed no longer lists.
+
+    Raises:
+        RegistryError: If a seed location claims an alias of a retained
+            location. The message names the two location IDs, never the alias.
+    """
+    if not retained:
+        return
+    held = store.aliases_by_target("location")
+    holders = {
+        _alias_key(a): rid for rid in retained for a in held.get(rid, ()) if a.strip()
+    }
+    for x in seed.locations:
+        for alias in x.aliases:
+            holder = holders.get(_alias_key(alias))
+            if holder is not None:
+                msg = (
+                    f"location {x.id} repeats an alias of retained location "
+                    f"{holder}; remove the alias from one of them"
+                )
+                raise RegistryError(msg, field="aliases")
+
+
 def build_plan(store: RegistryStore, seed: RegistrySeed) -> SeedPlan:  # noqa: C901, PLR0912 - one pass per section
     """Compare a seed with the database.
 
@@ -992,11 +1053,11 @@ def build_plan(store: RegistryStore, seed: RegistrySeed) -> SeedPlan:  # noqa: C
             None if prior_loc is None else _location_state(prior_loc, store),
             _location_state(x, store),
         )
-    retained.extend(
-        f"location:{i}"
-        for i in existing_locations
-        if i not in {x.id for x in seed.locations}
-    )
+    retained_locations = [
+        i for i in existing_locations if i not in {x.id for x in seed.locations}
+    ]
+    retained.extend(f"location:{i}" for i in retained_locations)
+    _reject_retained_location_aliases(store, seed, retained_locations)
 
     existing_households = {h.household_id: h for h in store.households()}
     for h in seed.households:
@@ -1090,10 +1151,15 @@ def _apply(
 ) -> None:
     """Write a plan's changes, in foreign-key order, on the store's connection."""
     refs = {c.object_ref for c in plan.changes if c.action != "deactivate"}
+    # A deactivated person or passenger keeps its alias rows, which would
+    # still hold the unique (kind, lower(alias)) slot when a new owner claims
+    # the alias. Lookups ignore inactive rows, and a later upsert rewrites the
+    # aliases if the entry returns, so release them in this transaction.
+    released = {c.object_ref for c in plan.changes if c.action == "deactivate"}
     # Clear the aliases of every changing target first, so an alias moving
     # from one target to another never collides with its old owner on the
     # unique (kind, lower(alias)) index; each upsert then rewrites its own.
-    for ref in sorted(refs):
+    for ref in sorted(refs | released):
         kind, ident = ref.split(":", 1)
         if kind in {"person", "passenger", "location"}:
             store.set_aliases(kind, ident, ())
