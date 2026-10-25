@@ -48,8 +48,26 @@ def engine(tmp_path):
     engine.dispose()
 
 
+FRESH_SCHOOL = SchoolSnapshot((), NOW - timedelta(minutes=20))
+"""A fresh Home Assistant snapshot with no school days (ADR 0007).
+
+Without a snapshot a run is incomplete (DATA-011), so tests that are not about
+the snapshot supply this one through ``make_service``.
+"""
+
+
+class SnapshotAssessmentService(AssessmentService):
+    """The service under test, with a fresh school snapshot unless told otherwise.
+
+    Pass ``school=None`` to run without a snapshot; any other value replaces it.
+    """
+
+    def run(self, trigger="on_demand", school=FRESH_SCHOOL):
+        return super().run(trigger, school)
+
+
 def make_service(engine, *, provider=None, clock=lambda: NOW, **settings):
-    return AssessmentService(
+    return SnapshotAssessmentService(
         engine,
         make_settings(**settings),
         provider or routes(),
@@ -422,11 +440,30 @@ class TestFreshness:
             for t in outcome.result.findings
         )
 
-    def test_without_a_school_snapshot_a_finding_free_run_can_be_clear(self, engine):
-        # Pins the behavior until ADR 0007 supplies the Home Assistant snapshot: no
-        # ha_snapshot freshness pair is reported, so it cannot make a run stale.
+    def test_without_a_school_snapshot_the_run_is_incomplete_never_clear(self, engine):
+        # ADR 0007: a missing snapshot is never read as "no school". It raises
+        # DATA-011 for ha_snapshot and makes the run incomplete (design rule 4).
         collect_all(engine, at_time=NOW - timedelta(minutes=20))
-        outcome = make_service(engine).run()
+        outcome = make_service(engine).run(school=None)
+        assert outcome.result.run_status is RunStatus.INCOMPLETE
+        assert [
+            (t.finding.rule_id, t.finding.entity_keys) for t in outcome.result.findings
+        ] == [("DATA-011", ("source:ha_snapshot",))]
+
+    def test_the_service_default_is_no_snapshot_and_so_incomplete(self, engine):
+        # The unwrapped service, called as production code calls it with the
+        # school argument omitted.
+        collect_all(engine, at_time=NOW - timedelta(minutes=20))
+        service = AssessmentService(
+            engine, make_settings(), routes(), clock=lambda: NOW
+        )
+        assert service.run().result.run_status is RunStatus.INCOMPLETE
+
+    def test_with_a_fresh_school_snapshot_a_finding_free_run_is_clear(self, engine):
+        collect_all(engine, at_time=NOW - timedelta(minutes=20))
+        outcome = make_service(engine).run(
+            school=SchoolSnapshot((), NOW - timedelta(minutes=5))
+        )
         assert outcome.result.findings == ()
         assert outcome.result.run_status is RunStatus.CLEAR
 
