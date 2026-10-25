@@ -611,7 +611,8 @@ def load_seed_file(path: Path, *, allow_repo_path: bool = False) -> RegistrySeed
 
     Raises:
         SeedError: If the path is inside a working tree without permission,
-            the file is missing or too large, or validation fails.
+            the file is missing, too large, unreadable or not UTF-8 text, or
+            validation fails.
     """
     # #CRITICAL: Security: a real seed holds names and addresses; refusing a
     # path inside a git working tree keeps it out of this public repository.
@@ -627,7 +628,14 @@ def load_seed_file(path: Path, *, allow_repo_path: bool = False) -> RegistrySeed
     if path.stat().st_size > MAX_SEED_BYTES:
         msg = "registry seed is larger than 1 MB"
         raise SeedError(msg)
-    return parse_seed(path.read_text(encoding="utf-8"))
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # The OS or codec message can carry a path or byte offsets; name the
+        # file only.
+        msg = f"registry seed could not be read as UTF-8 text: {path.name}"
+        raise SeedError(msg) from None
+    return parse_seed(text)
 
 
 # ---------------------------------------------------------------------------

@@ -198,6 +198,25 @@ class TestParsing:
         with pytest.raises(SeedError, match="larger than"):
             load_seed_file(path)
 
+    def test_non_utf8_file_is_a_seed_error(self, tmp_path):
+        path = tmp_path / "registry.yaml"
+        # A Windows editor's "Unicode" save: UTF-16 with a byte-order mark.
+        path.write_bytes(seed_text(base_seed()).encode("utf-16"))
+        with pytest.raises(SeedError, match="could not be read"):
+            load_seed_file(path)
+
+    def test_unreadable_file_is_a_seed_error(self, tmp_path, monkeypatch):
+        path = tmp_path / "registry.yaml"
+        path.write_text(seed_text(base_seed()), encoding="utf-8")
+
+        def denied(*_args: object, **_kwargs: object) -> str:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(Path, "read_text", denied)
+        with pytest.raises(SeedError, match="could not be read") as caught:
+            load_seed_file(path)
+        assert "Permission denied" not in str(caught.value)
+
     def test_git_detection(self, tmp_path):
         repo = tmp_path / "repo"
         (repo / ".git").mkdir(parents=True)
