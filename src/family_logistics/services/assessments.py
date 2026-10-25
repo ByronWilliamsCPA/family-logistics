@@ -23,8 +23,9 @@ is left out of the freshness pair.
 #CRITICAL: External resources: a run with no Home Assistant school snapshot
 (ADR 0007: Home Assistant pushes it, so it may never have arrived) always adds
 an ``ha_snapshot`` freshness pair with no timestamp. The engine reports that as
-DATA-011 and the run ends INCOMPLETE, never CLEAR. A missing or stale snapshot
-is never read as "no school" (ADR 0007, design rule 4 in CLAUDE.md).
+DATA-011, so the run is never CLEAR: it ends INCOMPLETE, or ATTENTION_REQUIRED
+when a critical finding is open. The engine still receives no school days;
+DATA-011 flags that gap (ADR 0007, design rule 4 in CLAUDE.md).
 #VERIFY: tests/unit/test_assessment_service.py::TestFreshness (the missing,
 stale and fresh snapshot cases).
 """
@@ -212,7 +213,7 @@ class AssessmentService:
         Args:
             trigger: What started the run (one of ``TRIGGERS``).
             school: School schedules from Home Assistant. ``None`` means no snapshot
-                has arrived: the run is incomplete (DATA-011), never clear.
+                has arrived: DATA-011 is raised and the run is never clear.
 
         Returns:
             The stored run and its result. A run that raised is failed, keeps
@@ -303,10 +304,12 @@ class AssessmentService:
         )
         activities = self._activities(events, by_calendar, snapshot)
         freshness = [icloud_freshness(enabled)]
-        # #CRITICAL: External resources: a missing school snapshot must never be
-        # read as "no school" (ADR 0007, design rule 4). The HA freshness pair is
+        # #CRITICAL: External resources: a missing school snapshot must never let
+        # a run read as clear (ADR 0007, design rule 4). The HA freshness pair is
         # always reported, with no timestamp when no snapshot has arrived, so the
-        # engine raises DATA-011 for ha_snapshot and the run ends INCOMPLETE.
+        # engine raises DATA-011 for ha_snapshot and the run is never CLEAR
+        # (INCOMPLETE, or ATTENTION_REQUIRED when a critical finding is open).
+        # School checks still see no school days; DATA-011 is the protection.
         # #VERIFY: tests/unit/test_assessment_service.py::TestFreshness
         # (test_without_a_school_snapshot_the_run_is_incomplete_never_clear).
         # #EDGE: Data integrity: a naive ``SchoolSnapshot.received_at`` makes
@@ -328,7 +331,7 @@ class AssessmentService:
             transport_defaults=snapshot.transport_defaults,
             activities=activities,
             trips=trips,
-            school_days=school.days if school else (),
+            school_days=school.days if school is not None else (),
             source_freshness=tuple(freshness),
             previous_findings=history.open_findings,
             timezone=self._settings.timezone,
