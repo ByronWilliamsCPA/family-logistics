@@ -35,8 +35,9 @@ already-collected calendar rows, judges source freshness, runs
 run's rides. Collection stays in `services/collector.py`. Timeline, rules,
 change impact and run status all run inside `assess()`. School overlays apply
 only when a `SchoolSnapshot` is supplied, and no production path supplies one
-yet. `AssessmentService.run` has no production caller yet: no CLI command, API
-route or scheduler job invokes it.
+yet; a run without a snapshot now ends non-CLEAR (DATA-011) until the Home
+Assistant ingest route supplies one. `AssessmentService.run` has no production
+caller yet: no CLI command, API route or scheduler job invokes it.
 
 Also in the tree as groundwork for later milestones: the SQLite schema with
 Alembic migrations, an append-only audit log, the pilot registry and seed
@@ -87,12 +88,6 @@ the M3 shadow dry-run is trusted. None of these is a PR yet:
 - **Owner review of the engine defaults:** merge gap, travel and stop buffers,
   pickup tolerance, unknown-capacity threshold, bus and school rules, and
   DEST-004 severity. Verify registry addresses before the shadow pilot.
-- **A run without a school snapshot can still end CLEAR:** the module docstring
-  of `services/assessments.py` and the test
-  `test_without_a_school_snapshot_a_finding_free_run_can_be_clear` pin this.
-  It conflicts with ADR 0007 (a missing snapshot is DATA-011, school checks
-  incomplete) and design rule 4 (an incomplete analysis is never reported as
-  clear). It must be closed before the M3 shadow dry-run is trusted.
 - **Follow-ups #17 left open** (documented as RAD notes): snapshot retention
   against ADR 0004, INCOMPLETE run semantics, privacy posture of the stored ride
   text, run serialization, and the healing policy for a corrupt snapshot row.

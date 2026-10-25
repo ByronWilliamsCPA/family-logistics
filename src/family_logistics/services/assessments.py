@@ -20,12 +20,14 @@ calendars the collector selects (``FL_CALDAV_CALENDARS`` plus the transport
 calendar) are judged; an enabled but unselected calendar is never collected and
 is left out of the freshness pair.
 #VERIFY: tests/unit/test_assessment_service.py::TestFreshness.
-#ASSUME: External resources: until the Home Assistant school snapshot is
-delivered (ADR 0007, implementation target M2), a run has no school-day data
-and can still end CLEAR (no Home Assistant freshness pair is added). Whether
-that should read INCOMPLETE is an open design question (see the run-status
-rules); this module documents the current behavior only.
-#VERIFY: tests/unit/test_assessment_service.py::TestFreshness pins this.
+#CRITICAL: External resources: a run with no Home Assistant school snapshot
+(ADR 0007: Home Assistant pushes it, so it may never have arrived) always adds
+an ``ha_snapshot`` freshness pair with no timestamp. The engine reports that as
+DATA-011, so the run is never CLEAR: it ends INCOMPLETE, or ATTENTION_REQUIRED
+when a critical finding is open. The engine still receives no school days;
+DATA-011 flags that gap (ADR 0007, design rule 4 in CLAUDE.md).
+#VERIFY: tests/unit/test_assessment_service.py::TestFreshness (the missing,
+stale and fresh snapshot cases).
 """
 
 from __future__ import annotations
@@ -210,7 +212,8 @@ class AssessmentService:
 
         Args:
             trigger: What started the run (one of ``TRIGGERS``).
-            school: School schedules from Home Assistant, when available.
+            school: School schedules from Home Assistant. ``None`` means no snapshot
+                has arrived: DATA-011 is raised and the run is never clear.
 
         Returns:
             The stored run and its result. A run that raised is failed, keeps
@@ -301,20 +304,23 @@ class AssessmentService:
         )
         activities = self._activities(events, by_calendar, snapshot)
         freshness = [icloud_freshness(enabled)]
-        # #ASSUME: External resources: until the Home Assistant school snapshot
-        # is delivered (ADR 0007, target M2) there is no school-day data and no
-        # HA freshness pair, and a run can still end CLEAR. Status semantics are
-        # unchanged here.
-        # #VERIFY: tests/unit/test_assessment_service.py::TestFreshness pins
-        # the current behavior.
+        # #CRITICAL: External resources: a missing school snapshot must never let
+        # a run read as clear (ADR 0007, design rule 4). The HA freshness pair is
+        # always reported, with no timestamp when no snapshot has arrived, so the
+        # engine raises DATA-011 for ha_snapshot and the run is never CLEAR
+        # (INCOMPLETE, or ATTENTION_REQUIRED when a critical finding is open).
+        # School checks still see no school days; DATA-011 is the protection.
+        # #VERIFY: tests/unit/test_assessment_service.py::TestFreshness
+        # (test_without_a_school_snapshot_the_run_is_incomplete_never_clear).
         # #EDGE: Data integrity: a naive ``SchoolSnapshot.received_at`` makes
         # ``AssessmentInput.__post_init__`` (domain/events.py) raise a
         # ``ValidationError`` when ``inp`` is built below, before ``assess`` is
         # called. The exception escapes ``_assess`` and ``run`` records a failed
         # run, never a clear one.
         # #VERIFY: tests/unit/test_assessment_service.py::TestFailedRuns.
-        if school is not None:
-            freshness.append((HA_SNAPSHOT_SOURCE, school.received_at))
+        freshness.append(
+            (HA_SNAPSHOT_SOURCE, school.received_at if school is not None else None)
+        )
         inp = AssessmentInput(
             window_start=start,
             window_end=end,
@@ -325,7 +331,7 @@ class AssessmentService:
             transport_defaults=snapshot.transport_defaults,
             activities=activities,
             trips=trips,
-            school_days=school.days if school else (),
+            school_days=school.days if school is not None else (),
             source_freshness=tuple(freshness),
             previous_findings=history.open_findings,
             timezone=self._settings.timezone,
