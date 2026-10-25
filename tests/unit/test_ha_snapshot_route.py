@@ -31,7 +31,11 @@ from family_logistics.core.database import create_sqlite_engine
 from family_logistics.db import migrations_api
 from family_logistics.db.registry import RegistryStore
 from family_logistics.db.schema import audit_log, school_day
-from family_logistics.db.school_snapshots import SchoolSnapshotRepository
+from family_logistics.db.school_snapshots import (
+    SNAPSHOT_RETRY_AFTER_SECONDS,
+    SchoolSnapshotBusyError,
+    SchoolSnapshotRepository,
+)
 from family_logistics.domain.events import TransportDirection, TransportMode
 from family_logistics.services.assessments import AssessmentService
 from family_logistics.services.school_snapshot import SchoolSnapshotIngest
@@ -279,6 +283,70 @@ class TestUnknownReferences:
         assert latest.received_at == NOW - timedelta(minutes=1)
         assert count(engine, school_day) == 3
         assert count(engine, audit_log) == 1
+
+
+class TestPrecedence:
+    def test_an_older_snapshot_with_an_unknown_zone_is_422_not_409(
+        self, client, engine
+    ):
+        assert post(client, payload()).status_code == 200
+        older = payload(
+            fetched_at=(NOW - timedelta(hours=2)).isoformat(),
+            zones=["zone.home", f"zone.{PRIVATE}"],
+            middle=[bell(FRIDAY, end="12:00", summary="Early Release")],
+        )
+        response = post(client, older)
+        assert (response.status_code, response.json()["code"]) == (422, "UNKNOWN_ZONE")
+        assert count(engine, audit_log) == 1
+
+    def test_an_empty_snapshot_is_422_and_keeps_the_previous_one(self, client, engine):
+        assert post(client, payload()).status_code == 200
+        empty = payload(fetched_at=NOW.isoformat(), middle=[], high=[], district=[])
+        response = post(client, empty)
+        assert (response.status_code, response.json()["code"]) == (
+            422,
+            "EMPTY_SNAPSHOT",
+        )
+        latest = SchoolSnapshotRepository(engine).latest()
+        assert latest is not None
+        assert latest.received_at == NOW - timedelta(minutes=1)
+        assert count(engine, school_day) == 3
+
+
+class TestBusy:
+    def test_a_held_write_lock_is_503_with_retry_after(
+        self, engine, audit_key, monkeypatch
+    ):
+        def busy(self, snapshot, *, correlation_id=None):
+            msg = "the database is locked by another writer; nothing stored"
+            raise SchoolSnapshotBusyError(msg, error_code="SNAPSHOT_BUSY")
+
+        monkeypatch.setattr(SchoolSnapshotIngest, "ingest", busy)
+        client = TestClient(build(engine, audit_key), client=("192.0.2.1", 50000))
+        response = post(client, payload())
+        assert response.status_code == 503
+        assert response.headers["Retry-After"] == str(SNAPSHOT_RETRY_AFTER_SECONDS)
+        assert response.json() == {"detail": "School snapshot store is busy"}
+
+    def test_a_real_lock_held_by_another_writer_is_503(self, engine, audit_key):
+        values = snapshot_settings(audit_key, ha_token=TOKEN)
+        ingest = SchoolSnapshotIngest(engine, values, clock=lambda: NOW)
+        ingest.repository._lock_timeout_ms = 50
+        router = build_ha_router(
+            values, throttle=HaAuthThrottle(clock=Clock()), school_ingest=ingest
+        )
+        app = FastAPI()
+        app.include_router(router)
+        client = TestClient(app, client=("192.0.2.1", 50000))
+        with engine.connect() as holder:
+            holder.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                response = post(client, payload())
+            finally:
+                holder.rollback()
+        assert response.status_code == 503
+        assert "Retry-After" in response.headers
+        assert count(engine, school_day) == 0
 
 
 class TestUnavailable:

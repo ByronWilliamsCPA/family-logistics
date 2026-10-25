@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from fl_engine import NOW
@@ -111,8 +112,15 @@ class TestStored:
     def test_the_default_clock_is_the_utc_wall_clock(self, engine, audit_key):
         before = datetime.now(UTC)
         fetched = (before - timedelta(minutes=1)).isoformat()
-        ingest = SchoolSnapshotIngest(engine, snapshot_settings(audit_key))
-        ack = ingest.ingest(parse(fetched_at=fetched))
+        values = snapshot_settings(audit_key)
+        today = before.astimezone(ZoneInfo(values.timezone)).date()
+        holiday = {
+            "start": (today - timedelta(days=1)).isoformat(),
+            "end": (today + timedelta(days=2)).isoformat(),
+            "summary": "Winter Break",
+        }
+        ingest = SchoolSnapshotIngest(engine, values)
+        ack = ingest.ingest(parse(fetched_at=fetched, district=[holiday]))
         assert before <= ack.received_at <= datetime.now(UTC)
         assert ack.received_at.utcoffset() == timedelta(0)
 
@@ -196,6 +204,79 @@ class TestRejected:
             make_ingest(engine, audit_key).ingest(snapshot)
         assert count(engine, school_day) == 0
         assert count(engine, audit_log) == 0
+
+
+class TestPrecedence:
+    """Reference errors win over a conflict with the stored snapshot."""
+
+    def older(self, **overrides) -> HaSnapshotPayload:
+        return parse(
+            fetched_at=(NOW - timedelta(hours=1)).isoformat(),
+            middle=[bell(FRIDAY, end="12:00", summary="Early Release")],
+            **overrides,
+        )
+
+    def test_an_older_snapshot_with_an_unknown_zone_is_rejected(
+        self, engine, audit_key
+    ):
+        make_ingest(engine, audit_key).ingest(parse())
+        with pytest.raises(IngestRejectedError) as caught:
+            make_ingest(engine, audit_key).ingest(
+                self.older(zones=["zone.home", "zone.private_unlisted"])
+            )
+        assert caught.value.error_code == "UNKNOWN_ZONE"
+        assert count(engine, audit_log) == 1
+
+    def test_an_older_snapshot_under_a_stale_configuration_is_unavailable(
+        self, engine, audit_key
+    ):
+        make_ingest(engine, audit_key).ingest(parse())
+        stale = [SCHOOLS[0] | {"location_id": "nowhere"}, SCHOOLS[1]]
+        with pytest.raises(SchoolIngestUnavailableError) as caught:
+            make_ingest(engine, audit_key, ha_schools=stale).ingest(self.older())
+        assert caught.value.error_code == "REGISTRY_MISMATCH"
+        assert count(engine, audit_log) == 1
+
+
+class TestEmptySnapshot:
+    def test_every_calendar_empty_is_rejected_and_the_old_one_kept(
+        self, engine, audit_key
+    ):
+        ingest = make_ingest(engine, audit_key)
+        ingest.ingest(parse())
+        before = ingest.repository.freshness()
+        with pytest.raises(IngestRejectedError) as caught:
+            make_ingest(engine, audit_key).ingest(
+                parse(fetched_at=NOW.isoformat(), middle=[], high=[], district=[])
+            )
+        assert caught.value.error_code == "EMPTY_SNAPSHOT"
+        assert ingest.repository.freshness() == before
+        assert count(engine, school_day) == 3
+        assert count(engine, audit_log) == 1
+
+    def test_events_only_outside_the_window_count_as_empty(self, engine, audit_key):
+        yesterday = FRIDAY - timedelta(days=1)
+        with pytest.raises(IngestRejectedError) as caught:
+            make_ingest(engine, audit_key).ingest(
+                parse(middle=[bell(yesterday)], high=[], district=[])
+            )
+        assert caught.value.error_code == "EMPTY_SNAPSHOT"
+        assert count(engine, school_day) == 0
+        assert count(engine, audit_log) == 0
+
+    def test_a_break_spanning_the_window_is_not_empty(self, engine, audit_key):
+        summer = {"start": "2026-06-10", "end": "2026-12-31", "summary": "Summer Break"}
+        ingest = make_ingest(engine, audit_key)
+        ack = ingest.ingest(parse(middle=[], high=[], district=[summer]))
+        assert ack.status is ReplaceStatus.STORED
+        latest = ingest.repository.latest()
+        assert latest is not None
+        assert {d.kind for d in latest.days} == {SchoolDayKind.NO_SCHOOL}
+
+    def test_some_empty_calendars_are_accepted(self, engine, audit_key):
+        ack = make_ingest(engine, audit_key).ingest(parse(middle=[], district=[]))
+        assert ack.status is ReplaceStatus.STORED
+        assert ack.days == 2
 
 
 class TestUnavailable:

@@ -23,6 +23,7 @@ from family_logistics.core.exceptions import ConfigurationError, ValidationError
 from family_logistics.db.audit import record_on
 from family_logistics.db.schema import location, person
 from family_logistics.db.school_snapshots import (
+    ReplaceHooks,
     ReplaceOutcome,
     ReplaceStatus,
     SchoolSnapshotRepository,
@@ -69,7 +70,8 @@ AUDIT_OBJECT_REF = "school_snapshot"
 class IngestRejectedError(ValidationError):
     """The snapshot is refused (HTTP 422); the message never echoes input.
 
-    Error codes: ``FETCHED_AT_IN_FUTURE``, ``UNKNOWN_ZONE``.
+    Error codes: ``FETCHED_AT_IN_FUTURE``, ``EMPTY_SNAPSHOT``,
+    ``UNKNOWN_ZONE``.
     """
 
 
@@ -159,14 +161,19 @@ class SchoolSnapshotIngest:
         Raises:
             SchoolIngestUnavailableError: No school or audit key is configured,
                 or the configuration does not match the registry.
-            IngestRejectedError: ``fetched_at`` is too far ahead, or a zone is
+            IngestRejectedError: ``fetched_at`` is too far ahead, no
+                configured calendar has an event in the window, or a zone is
                 not a registry location's zone.
 
         Note:
             ``SnapshotMappingError`` (a calendar outside or missing from the
-            configuration) and ``SchoolSnapshotConflictError`` (an older
-            snapshot than the stored one) propagate unchanged. Nothing is
-            stored and no audit row is written on any error.
+            configuration), ``SchoolSnapshotConflictError`` (an older
+            snapshot than the stored one) and ``SchoolSnapshotBusyError``
+            (the write lock was not granted in time) propagate unchanged.
+            The registry and zone checks run under the write lock before the
+            comparison with the stored snapshot, so a reference error wins
+            over a conflict. Nothing is stored and no audit row is written on
+            any error.
         """
         settings = self._settings
         if not settings.ha_schools:
@@ -187,10 +194,25 @@ class SchoolSnapshotIngest:
         days = map_school_days(
             snapshot, settings.ha_schools, tz=zone, window=DayWindow(today, last)
         )
+        # #CRITICAL: external resources: a Home Assistant calendar entity that
+        # is unavailable returns no events, and an outage hits every calendar
+        # at once. A snapshot in which no configured calendar has a single
+        # event overlapping the window (after clipping) is refused, so the
+        # stored snapshot is kept and goes stale (DATA-011) rather than being
+        # replaced by an empty one that reads as "nothing known". Every event
+        # that overlaps the window yields a row per configured person, so an
+        # empty mapping is exactly that outage signature; a break that spans
+        # the window still yields rows and is accepted.
+        # #VERIFY: TestEmptySnapshot in test_school_snapshot_service.py.
+        if not days:
+            msg = "no configured calendar has an event in the snapshot window"
+            raise IngestRejectedError(msg, error_code="EMPTY_SNAPSHOT")
         acks: list[IngestAck] = []
 
-        def before_commit(connection: Connection, outcome: ReplaceOutcome) -> None:
+        def before_compare(connection: Connection) -> None:
             self._check_registry(connection, snapshot.zones)
+
+        def before_commit(connection: Connection, outcome: ReplaceOutcome) -> None:
             ack = IngestAck(
                 status=outcome.status,
                 schools=len(settings.ha_schools),
@@ -210,19 +232,22 @@ class SchoolSnapshotIngest:
             )
             acks.append(ack)
 
-        self._repo.replace(
+        self._repo.replace_with(
             days,
             fetched_at=snapshot.fetched_at,
             received_at=now,
-            before_commit=before_commit,
+            hooks=ReplaceHooks(
+                before_compare=before_compare, before_commit=before_commit
+            ),
         )
         return acks[0]
 
     def _check_registry(self, connection: Connection, zones: tuple[str, ...]) -> None:
         """Check the configuration and the zones against the registry.
 
-        Runs inside the snapshot's write transaction, so a failure here rolls
-        the whole ingest back.
+        Runs inside the snapshot's write transaction, before the comparison
+        with the stored snapshot, so a failure here rolls the whole ingest
+        back and is reported ahead of a conflict.
 
         Args:
             connection: The open write connection.

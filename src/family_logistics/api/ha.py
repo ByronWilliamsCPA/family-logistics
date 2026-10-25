@@ -35,7 +35,10 @@ from family_logistics.adapters.home_assistant.schemas import (
     safe_error_locations,
 )
 from family_logistics.core.exceptions import ConfigurationError, ValidationError
-from family_logistics.db.school_snapshots import SchoolSnapshotConflictError
+from family_logistics.db.school_snapshots import (
+    SchoolSnapshotBusyError,
+    SchoolSnapshotConflictError,
+)
 from family_logistics.middleware.correlation import get_correlation_id
 from family_logistics.utils.logging import get_logger
 
@@ -548,7 +551,8 @@ def _ingest_snapshot(
         correlation_id: Request correlation ID for the audit row.
 
     Returns:
-        The response: 200 with the acknowledgement, 409, 422 or 503.
+        The response: 200 with the acknowledgement, 409, 422 or 503 (with
+        ``Retry-After`` while another writer holds the database).
     """
     # #CRITICAL: security: neither a response nor a log line may echo the
     # payload (children's school calendars, calendar entity IDs). Errors are
@@ -569,6 +573,17 @@ def _ingest_snapshot(
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
             content={"detail": "A newer school snapshot is already stored"},
+        )
+    except SchoolSnapshotBusyError as exc:
+        # #ASSUME: timing: the write lock is held briefly (another ingest, a
+        # purge or a migration); Home Assistant retries on its next poll or
+        # after Retry-After. Nothing was stored and no audit row was written.
+        # #VERIFY: TestBusy in tests/unit/test_ha_snapshot_route.py.
+        logger.warning("ha_snapshot.rejected", reason=exc.error_code)
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "School snapshot store is busy"},
+            headers={"Retry-After": str(exc.retry_after)},
         )
     except ValidationError as exc:
         logger.warning("ha_snapshot.rejected", reason=exc.error_code)

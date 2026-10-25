@@ -99,7 +99,13 @@ example payload, is [Home Assistant school snapshot](../guides/ha-school-snapsho
   one audit row of counts and freshness. Event text is never stored or logged.
 - **Errors**: 422 bodies carry an error code or redacted locations only;
   configuration problems (no school, no audit key, a configured ID missing
-  from the registry) answer 503. Nothing is stored on any error.
+  from the registry) answer 503, and a write lock not granted in time answers
+  503 with `Retry-After`. The registry and zone checks run under the write
+  lock before the comparison with the stored snapshot, so a reference error
+  wins over a 409. A snapshot in which no configured calendar has an event in
+  the window (the signature of a Home Assistant entity outage) is refused with
+  422 `EMPTY_SNAPSHOT`, and the stored one is kept to go stale. Nothing is
+  stored on any error.
 
 ## Alternatives Considered
 
