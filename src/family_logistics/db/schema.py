@@ -422,3 +422,17 @@ finding = Table(
 )
 """Current state of every finding by stable ``issue_id``; ``lifecycle`` is
 new, ongoing, resolved or regressed."""
+
+trip_snapshot = Table(
+    "trip_snapshot",
+    metadata,
+    Column("trip_key", String(512), primary_key=True),
+    Column("payload", JSON, nullable=False),
+    Column("run_id", String(36), ForeignKey("analysis_run.run_id"), nullable=True),
+    Column("updated_at", UtcDateTime(), nullable=False),
+)
+"""Rides accepted by the latest completed run, keyed by the source occurrence.
+
+The next run compares its rides to these to find a passenger removed or a
+destination changed (change impact). The whole table is replaced after every
+run that did not fail, so it never holds more than one run's rides."""
