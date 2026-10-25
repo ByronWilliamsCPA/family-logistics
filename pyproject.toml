@@ -40,6 +40,7 @@ dependencies = [
     # In-process scheduler (single writer). 4.x is a different API; stay on 3.x.
     "apscheduler>=3.10,<4",
     "cryptography>=43.0.0",
+    "pyyaml>=6.0.2",
 ]
 
 [project.urls]
@@ -62,7 +63,6 @@ dev = [
     "pytest-xdist>=3.3.0",
     "pytest-randomly>=3.15.0",
     "hypothesis>=6.82.0",
-
     # Code Quality (always included)
     "ruff>=0.9.0",
     "basedpyright>=1.18.0",  # Stricter type checker (replaces mypy)
@@ -72,7 +72,6 @@ dev = [
     "pydoclint>=0.8.4",  # Docstring argument validation
     "yamllint>=1.35.0",  # YAML lint (pre-commit hook runs the locked version)
     "detect-secrets>=1.5.0",  # Pre-push secret baseline regression check
-
     # Pre-commit
     "pre-commit>=3.3.0",
     # Documentation
@@ -97,6 +96,7 @@ dev = [
     # "google-cloud-assured-oss>=0.1.0",  # Package not yet available in PyPI
     "google-api-core>=2.0.0",
     "python-dotenv>=1.0.0",  # For loading .env files
+    "types-pyyaml>=6.0.12",
 ]
 
 # Supply chain security tools

@@ -66,6 +66,7 @@ path = [
     "sonar-project.properties",
     "overrides/**",
     "configs/**",
+    "config/**",
     "data/.gitkeep",
     "scripts/**/*.sh",
     "scripts/.gitkeep",
