@@ -196,15 +196,17 @@ def _opt_datetime(row: Row, key: str) -> datetime | None:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
-def _opt_bytes(row: Row, key: str) -> bytes | None:
-    """Return an optional binary column."""
+def _opt_token(row: Row, key: str) -> str | None:
+    """Return an optional protected column as Fernet token text.
+
+    ``db.column_types.FernetToken`` stores the token as ASCII bytes and hands
+    it back as ``str``, the form ``AddressCipher.decrypt`` takes.
+    """
     value = row[key]
     if value is None:
         return None
-    if isinstance(value, memoryview):
-        return value.tobytes()
-    if not isinstance(value, bytes):
-        msg = f"registry column {key} is not binary"
+    if not isinstance(value, str):
+        msg = f"registry column {key} is not token text"
         raise TypeError(msg)
     return value
 
@@ -342,7 +344,7 @@ class RegistryStore:
 
     # -- locations -----------------------------------------------------------
 
-    def _encrypt(self, value: SensitiveStr | None, field_name: str) -> bytes | None:
+    def _encrypt(self, value: SensitiveStr | None, field_name: str) -> str | None:
         """Encrypt a protected value, refusing without a cipher."""
         if value is None:
             return None
@@ -350,13 +352,13 @@ class RegistryStore:
             # #CRITICAL: Security: never store a protected address in clear.
             msg = f"FL_DATA_KEY is required before storing a location {field_name}"
             raise ConfigurationError(msg)
-        return self._cipher.encrypt(value).encode("ascii")
+        return self._cipher.encrypt(value)
 
-    def _decrypt(self, token: bytes | None) -> SensitiveStr | None:
+    def _decrypt(self, token: str | None) -> SensitiveStr | None:
         """Decrypt a protected value; None without a cipher or a value."""
         if token is None or self._cipher is None:
             return None
-        return self._cipher.decrypt(token.decode("ascii"))
+        return self._cipher.decrypt(token)
 
     def upsert_location(self, item: Location) -> None:
         """Insert or update a location and its aliases.
@@ -402,8 +404,8 @@ class RegistryStore:
                 aliases=aliases.get(_text(r, "location_id"), ()),
                 verified=_text(r, "verification_state") == VERIFIED,
                 ha_zone_entity_id=_opt_text(r, "ha_zone_entity_id"),
-                address=self._decrypt(_opt_bytes(r, "address_ciphertext")),
-                coordinates=self._decrypt(_opt_bytes(r, "latlon_ciphertext")),
+                address=self._decrypt(_opt_token(r, "address_ciphertext")),
+                coordinates=self._decrypt(_opt_token(r, "latlon_ciphertext")),
             )
             for r in rows
         ]

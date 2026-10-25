@@ -90,8 +90,14 @@ class TestLocations:
             dump = "".join(
                 str(r) for r in connection.execute(text("SELECT * FROM location"))
             )
-        assert isinstance(raw, bytes)
-        assert ADDRESS.encode() not in raw
+            stored_class = connection.execute(
+                text("SELECT typeof(address_ciphertext) FROM location")
+            ).scalar_one()
+        # FernetToken hands the token back as text; SQLite keeps it as a blob.
+        assert isinstance(raw, str)
+        assert raw.startswith("gAAAAA")
+        assert stored_class == "blob"
+        assert ADDRESS not in raw
         assert ADDRESS not in dump
 
     def test_read_back_with_and_without_cipher(self, engine, cipher):
