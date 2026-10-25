@@ -640,3 +640,21 @@ class TestEnumWireValues:
         assert [member.value for member in enum_type] == wire_values
         for member in enum_type:
             assert enum_type(member.value) is member
+
+
+@pytest.mark.unit
+class TestSchoolSnapshotLocation:
+    def test_school_snapshot_lives_in_the_domain_layer(self):
+        from family_logistics.domain import events
+        from family_logistics.services import assessments
+
+        assert events.SchoolSnapshot.__module__ == "family_logistics.domain.events"
+        assert assessments.SchoolSnapshot is events.SchoolSnapshot
+
+    def test_school_snapshot_is_frozen(self):
+        from family_logistics.domain.events import SchoolSnapshot
+
+        snapshot = SchoolSnapshot(days=(), received_at=START)
+        attribute = "received_at"
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            setattr(snapshot, attribute, NAIVE)

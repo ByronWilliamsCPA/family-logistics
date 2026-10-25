@@ -565,6 +565,28 @@ class SchoolDay:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class SchoolSnapshot:
+    """School schedules supplied by Home Assistant (ADR 0007).
+
+    It lives in the domain layer so the database repository that stores the
+    parsed school days can return it without importing from ``services``.
+
+    Unlike the other contract types, construction does not check that
+    ``received_at`` is timezone-aware: a naive value is caught when the
+    assessment builds its ``AssessmentInput``, and that run is stored as failed
+    (``services.assessments``).
+
+    Attributes:
+        days: School days inside the window.
+        received_at: Freshness of the snapshot (UTC); the staleness check
+            measures the snapshot's age from it.
+    """
+
+    days: tuple[SchoolDay, ...]
+    received_at: datetime
+
+
 _ASSESSMENT_SEQUENCE_FIELDS: tuple[str, ...] = (
     "people",
     "external_passengers",

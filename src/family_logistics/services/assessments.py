@@ -58,6 +58,7 @@ from family_logistics.domain.events import (
     ActivityClassification,
     AssessmentInput,
     CalendarKind,
+    SchoolSnapshot,
 )
 from family_logistics.domain.locations import LocationResolver
 from family_logistics.domain.parser import parse_trip
@@ -79,7 +80,7 @@ if TYPE_CHECKING:
     from family_logistics.core.crypto import AddressCipher
     from family_logistics.db.assessments import StoredHistory
     from family_logistics.db.registry import RegistrySnapshot
-    from family_logistics.domain.events import CalendarSource, SchoolDay, SourceEvent
+    from family_logistics.domain.events import CalendarSource, SourceEvent
     from family_logistics.domain.models import Finding, SourceEventKey, Trip
 
 logger = get_logger(__name__)
@@ -103,19 +104,6 @@ class RunOutcome:
 
     run_id: str
     result: AssessmentResult
-
-
-@dataclass(frozen=True, slots=True)
-class SchoolSnapshot:
-    """School schedules supplied by Home Assistant (ADR 0007, target M2).
-
-    Attributes:
-        days: School days inside the window.
-        received_at: When the snapshot arrived (UTC).
-    """
-
-    days: tuple[SchoolDay, ...]
-    received_at: datetime
 
 
 def engine_settings(settings: Settings) -> EngineSettings:
