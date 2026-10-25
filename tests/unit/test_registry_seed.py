@@ -217,6 +217,36 @@ class TestParsing:
             load_seed_file(path)
         assert "Permission denied" not in str(caught.value)
 
+    def test_yaml_merge_key_is_accepted(self):
+        text = (
+            "version: 1\n"
+            "vehicles:\n"
+            "  - &first {id: van-a, name: Van, seats: 4}\n"
+            "  - <<: *first\n"
+            "    id: van-b\n"
+        )
+        seed = parse_seed(text)
+        assert [(v.id, v.name, v.seats) for v in seed.vehicles] == [
+            ("van-a", "Van", 4),
+            ("van-b", "Van", 4),
+        ]
+
+    def test_duplicate_key_beside_a_merge_key_is_still_rejected(self):
+        text = (
+            "version: 1\n"
+            "vehicles:\n"
+            "  - &first {id: van-a, name: Van, seats: 4}\n"
+            "  - <<: *first\n"
+            "    id: van-b\n"
+            "    id: van-c\n"
+        )
+        with pytest.raises(SeedError, match=r"not valid YAML near line \d"):
+            parse_seed(text)
+
+    def test_unhashable_mapping_key_is_a_seed_error(self):
+        with pytest.raises(SeedError, match="not valid YAML"):
+            parse_seed("? [a, b]\n: 1\n")
+
     def test_git_detection(self, tmp_path):
         repo = tmp_path / "repo"
         (repo / ".git").mkdir(parents=True)

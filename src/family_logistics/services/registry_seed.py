@@ -86,6 +86,7 @@ WEEKDAY_NAMES = (
 )
 COORDINATES = re.compile(r"^\s*-?\d{1,2}(\.\d+)?\s*,\s*-?\d{1,3}(\.\d+)?\s*$")
 MAX_SEED_BYTES = 1_000_000
+MERGE_TAG = "tag:yaml.org,2002:merge"
 
 SlugId = Annotated[str, StringConstraints(pattern=SLUG)]
 CalendarId = Annotated[str, StringConstraints(pattern=CALENDAR_ID)]
@@ -522,6 +523,15 @@ def inside_git_worktree(path: Path) -> bool:
     return any((parent / ".git").exists() for parent in resolved.parents)
 
 
+def _is_hashable(value: object) -> bool:
+    """Report whether a constructed YAML key can go in a set."""
+    try:
+        hash(value)
+    except TypeError:
+        return False
+    return True
+
+
 class _UniqueKeyLoader(yaml.SafeLoader):
     """Safe YAML loader that rejects a mapping key listed twice.
 
@@ -548,9 +558,16 @@ class _UniqueKeyLoader(yaml.SafeLoader):
         seen: set[object] = set()
         pairs = cast("list[tuple[yaml.Node, yaml.Node]]", node.value)
         for key_node, _ in pairs:
+            # ``<<`` has no constructor of its own; the parent class expands it
+            # (and lets an explicit key override a merged one, as YAML allows).
+            if key_node.tag == MERGE_TAG:
+                continue
             # Third-party stub gap: types-PyYAML leaves construct_object's
             # ``node`` parameter unannotated.
             key = cast("object", self.construct_object(key_node, deep=deep))  # pyright: ignore[reportUnknownMemberType]
+            if not _is_hashable(key):
+                # The parent raises its own error for an unhashable key.
+                continue
             if key in seen:
                 raise yaml.constructor.ConstructorError(
                     problem="duplicate mapping key",
