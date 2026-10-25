@@ -14,6 +14,8 @@ Subcommands:
 - ``registry load``: validate the private registry seed and apply it
   atomically (``--dry-run`` shows the plan only).
 - ``registry show``: list the registry without addresses or coordinates.
+- ``collect --once``: read the configured iCloud calendars once and store their
+  occurrences (prints calendar IDs and counts only).
 """
 
 from __future__ import annotations
@@ -520,6 +522,116 @@ def registry_show() -> None:
     click.echo(f"Transport defaults ({len(defaults)}):")
     for pid, count in sorted(per_person.items()):
         click.echo(f"  {pid:<16} {count}")
+
+
+def _credential_problems(settings: Settings) -> list[str]:
+    """Return what prevents talking to CalDAV (no secret values)."""
+    if not settings.caldav_username or settings.caldav_app_password is None:
+        return ["FL_CALDAV_USERNAME and FL_CALDAV_APP_PASSWORD are required"]
+    return []
+
+
+@cli.group(invoke_without_command=True)
+@click.option(
+    "--once",
+    is_flag=True,
+    help="Collect once and exit (the scheduled collector arrives in M3).",
+)
+@click.option(
+    "--calendar",
+    "calendars",
+    multiple=True,
+    help="Restrict to this calendar (display name or ID); repeatable.",
+)
+@click.pass_context
+def collect(ctx: click.Context, once: bool, calendars: tuple[str, ...]) -> None:
+    """Read the configured iCloud calendars and store their occurrences.
+
+    Exit status is 0 when every calendar was read completely, 1 when any was
+    incomplete (DATA-011), and 2 for configuration problems. Prints calendar
+    IDs and counts only.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    if not once:
+        _fail("Use `collect --once` or `collect discover` (scheduling arrives in M3).")
+    settings = _settings()
+    _configure_logging(settings)
+    problems = _credential_problems(settings) + directory_problems(
+        settings.database_path
+    )
+    if problems:
+        _fail("; ".join(problems))
+    from family_logistics.services import wiring  # noqa: PLC0415
+
+    engine = create_sqlite_engine(settings.database_path)
+    try:
+        if not migrations_api.is_at_head(engine):
+            _fail(SCHEMA_BEHIND_MESSAGE)
+        collector, http = wiring.build_collector(settings, engine)
+        try:
+            run = collector.run_once(only=calendars or None)
+        finally:
+            http.close()
+    finally:
+        engine.dispose()
+    if run.discovery_error:
+        click.echo(f"Discovery failed: {run.discovery_error}")
+    for item in run.calendars:
+        result = item.result
+        state = "complete" if result.complete else "INCOMPLETE"
+        applied = item.applied
+        changes = f"+{applied.inserted} ~{applied.updated} -{applied.deleted}"
+        detail = "reused" if item.reused else changes
+        label = f"{result.source.calendar_id} {result.source.kind.value}"
+        count = len(result.events)
+        click.echo(f"{label}: {count} occurrences, {state} ({detail})")
+    click.echo(f"DATA-011 findings: {len(run.findings)}")
+    sys.exit(0 if run.complete else 1)
+
+
+def _yes_no(value: bool | None) -> str:
+    """Render an optional flag for the discovery table."""
+    if value is None:
+        return "unknown"
+    return "yes" if value else "no"
+
+
+@collect.command("discover")
+def collect_discover() -> None:
+    """List the account's calendars: ID, events, shared, writable, name.
+
+    Copy the IDs of the calendars to collect into the private registry seed.
+    URLs and account identifiers are never printed. A calendar shown as
+    writable means the collector account holds write access: share it View
+    Only instead.
+    """
+    settings = _settings()
+    problems = _credential_problems(settings)
+    if problems:
+        _fail("; ".join(problems))
+    from family_logistics.adapters.caldav.client import CalDAVError  # noqa: PLC0415
+    from family_logistics.adapters.caldav.ids import calendar_id_for_href  # noqa: PLC0415
+    from family_logistics.services import wiring  # noqa: PLC0415
+
+    client, http = wiring.build_caldav_client(settings)
+    try:
+        calendars = client.discover()
+    except CalDAVError as exc:
+        click.echo(f"Discovery failed: {exc}", err=True)
+        sys.exit(1)
+    finally:
+        http.close()
+    click.echo("calendar_id\tevents\tshared\twritable\tname")
+    for info in calendars:
+        cells = (
+            calendar_id_for_href(info.href),
+            _yes_no(info.supports_events),
+            _yes_no(info.shared),
+            _yes_no(info.writable),
+            info.display_name,
+        )
+        click.echo("\t".join(cells))
 
 
 if __name__ == "__main__":

@@ -37,6 +37,10 @@ dependencies = [
     "httpx>=0.27.0",
     "icalendar>=6.0.0",
     "recurring-ical-events>=3.3.0",
+    # Imported directly by domain.recurrence (X-WR-TIMEZONE normalization).
+    "x-wr-timezone>=0.0.7",
+    # CalDAV multistatus responses are untrusted XML: parse with defusedxml.
+    "defusedxml>=0.7.1",
     # In-process scheduler (single writer). 4.x is a different API; stay on 3.x.
     "apscheduler>=3.10,<4",
     "cryptography>=43.0.0",
@@ -66,6 +70,7 @@ dev = [
     # Code Quality (always included)
     "ruff>=0.9.0",
     "basedpyright>=1.18.0",  # Stricter type checker (replaces mypy)
+    "types-defusedxml>=0.7.0",  # stubs for the CalDAV XML parser
     "bandit>=1.7.0",
     "vulture>=2.11",  # Dead code detection
     "pip-audit>=2.7.0",  # Python vulnerability scanning
