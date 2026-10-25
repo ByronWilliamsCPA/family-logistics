@@ -17,7 +17,7 @@ from family_logistics.core.database import create_sqlite_engine
 from family_logistics.core.exceptions import ConfigurationError
 from family_logistics.db import migrations_api
 from family_logistics.db.audit import AuditRepository
-from family_logistics.db.registry import RegistryStore, load_snapshot
+from family_logistics.db.registry import RegistryError, RegistryStore, load_snapshot
 from family_logistics.domain.events import TransportMode
 from family_logistics.services import registry_seed
 from family_logistics.services.registry_seed import (
@@ -333,6 +333,65 @@ class TestApply:
         assert school is not None
         assert home.aliases == ("central",)
         assert school.aliases == ()
+
+    @pytest.mark.parametrize(
+        ("section", "kind", "old_id", "new_id"),
+        [
+            ("people", "person", "riley", "riley-b"),
+            ("external_passengers", "passenger", "ext-e", "ext-e2"),
+        ],
+    )
+    def test_alias_survives_an_id_rename(
+        self, engine, cipher, section, kind, old_id, new_id
+    ):
+        first = base_seed()
+        first[section][0]["aliases"] = ["Nickname"]  # type: ignore[index]
+        apply_seed(engine, parse_seed(seed_text(first)), cipher=cipher, today=TODAY)
+        # The old ID leaves the seed (deactivated) and a new ID keeps the alias.
+        renamed = base_seed()
+        renamed[section][0]["id"] = new_id  # type: ignore[index]
+        renamed[section][0]["aliases"] = ["nickname"]  # type: ignore[index]
+        seed = parse_seed(seed_text(renamed))
+        dry = apply_seed(engine, seed, cipher=cipher, dry_run=True)
+        # A clean dry run must mean a clean load: the deactivated holder keeps
+        # its alias row unless it is released before the new owner claims it.
+        plan = apply_seed(engine, seed, cipher=cipher, today=TODAY)
+        assert plan.changes == dry.changes
+        assert {c.object_ref: c.action for c in plan.changes} == {
+            f"{kind}:{old_id}": "deactivate",
+            f"{kind}:{new_id}": "create",
+        }
+        with engine.connect() as connection:
+            held = RegistryStore(connection, cipher).aliases_by_target(kind)
+        assert held == {new_id: ("nickname",)}
+
+    def test_alias_of_a_retained_location_is_refused_by_the_dry_run(
+        self, engine, cipher
+    ):
+        apply_seed(
+            engine, parse_seed(seed_text(base_seed())), cipher=cipher, today=TODAY
+        )
+        # "school" leaves the seed but is retained, with its alias; a new
+        # location cannot take that alias, and a dry run must say so.
+        data = base_seed()
+        data["locations"] = [
+            data["locations"][0],  # type: ignore[index]
+            {"id": "school-2", "name": "School 2", "aliases": ["central"]},
+        ]
+        data["transport_defaults"][0]["destination"] = "school-2"  # type: ignore[index]
+        seed = parse_seed(seed_text(data))
+        before = audit_count(engine)
+        for dry_run in (True, False):
+            with pytest.raises(
+                RegistryError,
+                match="location school-2 repeats an alias of retained location school",
+            ) as caught:
+                apply_seed(engine, seed, cipher=cipher, dry_run=dry_run, today=TODAY)
+            assert "central" not in str(caught.value).lower()
+        assert audit_count(engine) == before
+        with engine.connect() as connection:
+            store = RegistryStore(connection, cipher)
+            assert {x.location_id for x in store.locations()} == {"home", "school"}
 
     def test_audit_failure_rolls_back_registry_changes(
         self, engine, cipher, monkeypatch

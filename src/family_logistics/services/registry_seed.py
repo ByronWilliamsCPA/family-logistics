@@ -45,7 +45,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from family_logistics.core.exceptions import ConfigurationError, ValidationError
 from family_logistics.db.audit import record_on
-from family_logistics.db.registry import Household, RegistryStore
+from family_logistics.db.registry import Household, RegistryError, RegistryStore
 from family_logistics.domain.events import (
     CalendarKind,
     CalendarSource,
@@ -956,6 +956,42 @@ def _require_cipher_for(
         raise ConfigurationError(msg)
 
 
+def _reject_retained_location_aliases(
+    store: RegistryStore, seed: RegistrySeed, retained: Sequence[str]
+) -> None:
+    """Refuse a seed alias that a retained location still holds.
+
+    A location missing from the seed is kept with its aliases, and its alias
+    rows cannot be released the way a deactivated person's are. Without this
+    check a dry run passes and the real load then fails on the unique
+    ``(kind, lower(alias))`` index.
+
+    Args:
+        store: Registry store on an open connection.
+        seed: The validated seed.
+        retained: IDs of the locations the seed no longer lists.
+
+    Raises:
+        RegistryError: If a seed location claims an alias of a retained
+            location. The message names the two location IDs, never the alias.
+    """
+    if not retained:
+        return
+    held = store.aliases_by_target("location")
+    holders = {
+        _alias_key(a): rid for rid in retained for a in held.get(rid, ()) if a.strip()
+    }
+    for x in seed.locations:
+        for alias in x.aliases:
+            holder = holders.get(_alias_key(alias))
+            if holder is not None:
+                msg = (
+                    f"location {x.id} repeats an alias of retained location "
+                    f"{holder}; remove the alias from one of them"
+                )
+                raise RegistryError(msg, field="aliases")
+
+
 def build_plan(store: RegistryStore, seed: RegistrySeed) -> SeedPlan:  # noqa: C901, PLR0912 - one pass per section
     """Compare a seed with the database.
 
@@ -992,11 +1028,11 @@ def build_plan(store: RegistryStore, seed: RegistrySeed) -> SeedPlan:  # noqa: C
             None if prior_loc is None else _location_state(prior_loc, store),
             _location_state(x, store),
         )
-    retained.extend(
-        f"location:{i}"
-        for i in existing_locations
-        if i not in {x.id for x in seed.locations}
-    )
+    retained_locations = [
+        i for i in existing_locations if i not in {x.id for x in seed.locations}
+    ]
+    retained.extend(f"location:{i}" for i in retained_locations)
+    _reject_retained_location_aliases(store, seed, retained_locations)
 
     existing_households = {h.household_id: h for h in store.households()}
     for h in seed.households:
@@ -1090,10 +1126,15 @@ def _apply(
 ) -> None:
     """Write a plan's changes, in foreign-key order, on the store's connection."""
     refs = {c.object_ref for c in plan.changes if c.action != "deactivate"}
+    # A deactivated person or passenger keeps its alias rows, which would
+    # still hold the unique (kind, lower(alias)) slot when a new owner claims
+    # the alias. Lookups ignore inactive rows, and a later upsert rewrites the
+    # aliases if the entry returns, so release them in this transaction.
+    released = {c.object_ref for c in plan.changes if c.action == "deactivate"}
     # Clear the aliases of every changing target first, so an alias moving
     # from one target to another never collides with its old owner on the
     # unique (kind, lower(alias)) index; each upsert then rewrites its own.
-    for ref in sorted(refs):
+    for ref in sorted(refs | released):
         kind, ident = ref.split(":", 1)
         if kind in {"person", "passenger", "location"}:
             store.set_aliases(kind, ident, ())
