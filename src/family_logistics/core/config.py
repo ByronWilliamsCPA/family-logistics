@@ -29,9 +29,22 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from cryptography.fernet import Fernet
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 from pydantic import ValidationError as PydanticValidationError
-from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    NoDecode,
+    SettingsConfigDict,
+    SettingsError,
+)
 
 from family_logistics.core.exceptions import ConfigurationError
 from family_logistics.core.urls import (
@@ -137,6 +150,85 @@ DEFAULT_PROXY_TRUSTED_CIDRS: tuple[str, ...] = ()
 deployment sets ``FL_PROXY_TRUSTED_CIDRS`` to its reverse proxy's address."""
 
 
+HA_CALENDAR_ENTITY_PATTERN = r"^calendar\.[a-z0-9_]{1,200}$"
+"""A Home Assistant calendar entity ID. Only the ``calendar`` domain matches,
+so a person tracker, device tracker or sensor can never be configured as a
+school calendar (privacy spec, HA snapshot row)."""
+
+REGISTRY_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+"""Shape of a registry person or location ID in ``FL_HA_SCHOOLS``."""
+
+MAX_HA_SCHOOLS = 8
+MAX_SCHOOL_PEOPLE = 16
+MAX_SCHOOL_CALENDARS = 8
+
+CalendarEntityId = Annotated[str, StringConstraints(pattern=HA_CALENDAR_ENTITY_PATTERN)]
+RegistryId = Annotated[str, StringConstraints(pattern=REGISTRY_ID_PATTERN)]
+
+
+class HaSchool(BaseModel):
+    """One school whose schedule Home Assistant delivers (``FL_HA_SCHOOLS``).
+
+    Bell calendars carry the school's timed bell schedule (the only source of
+    start and end times); district calendars carry closures and short days
+    (classification only). A district calendar may serve several schools.
+
+    Attributes:
+        model_config: Unknown keys are refused; instances are immutable.
+        location_id: Registry location of the school.
+        person_ids: Registry people who attend it (each in one school only).
+        bell_calendars: Calendar entity IDs with the bell schedule.
+        district_calendars: Calendar entity IDs with closures and short days.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    location_id: RegistryId
+    person_ids: tuple[RegistryId, ...] = Field(
+        min_length=1, max_length=MAX_SCHOOL_PEOPLE
+    )
+    bell_calendars: tuple[CalendarEntityId, ...] = Field(
+        default=(), max_length=MAX_SCHOOL_CALENDARS
+    )
+    district_calendars: tuple[CalendarEntityId, ...] = Field(
+        default=(), max_length=MAX_SCHOOL_CALENDARS
+    )
+
+    @model_validator(mode="after")
+    def _calendars_are_coherent(self) -> Self:
+        """Require a calendar, one role per calendar and distinct people.
+
+        Returns:
+            The validated school.
+
+        Raises:
+            ValueError: If the school has no calendar, a calendar is listed
+                twice or in both roles, or a person is listed twice. The
+                message never echoes a value.
+        """
+        calendars = [*self.bell_calendars, *self.district_calendars]
+        if not calendars:
+            msg = "a school needs at least one bell or district calendar"
+            raise ValueError(msg)
+        if len(set(calendars)) != len(calendars):
+            msg = "a calendar is listed twice, or as both bell and district"
+            raise ValueError(msg)
+        if len(set(self.person_ids)) != len(self.person_ids):
+            msg = "a person is listed twice for one school"
+            raise ValueError(msg)
+        return self
+
+    def entities(self) -> dict[str, str]:
+        """Return every calendar entity of the school with its role.
+
+        Returns:
+            Entity ID to ``"bell"`` or ``"district"``.
+        """
+        roles = dict.fromkeys(self.bell_calendars, "bell")
+        roles.update(dict.fromkeys(self.district_calendars, "district"))
+        return roles
+
+
 CONSUMED = "consumed"
 M1, M2, M3, M4, M5 = "M1", "M2", "M3", "M4", "M5"
 
@@ -159,6 +251,7 @@ FIELD_STATUS: dict[str, str] = {
     "collect_days_ahead": CONSUMED,
     "source_max_staleness_minutes": CONSUMED,
     "ha_token": CONSUMED,
+    "ha_schools": M2,
     "apprise_url": CONSUMED,
     "apprise_config_key": M3,
     "apprise_tag_report": M3,
@@ -238,6 +331,10 @@ class Settings(BaseSettings):
         source_max_staleness_minutes: A calendar whose last complete
             collection is older than this raises DATA-011 (incomplete).
         ha_token: Bearer token Home Assistant presents to the HA-only routes.
+        ha_schools: Schools whose schedules Home Assistant pushes (JSON list
+            of ``HaSchool``): each maps calendar entities to a registry
+            location and the people who attend it. Only these calendars are
+            accepted by the snapshot ingest; empty, the default, accepts none.
         apprise_url: Apprise API base URL (http or https, no embedded credentials).
         apprise_config_key: Key of the saved Apprise configuration that holds the
             app's notification services; sent as ``POST /notify/{key}``.
@@ -337,6 +434,7 @@ class Settings(BaseSettings):
     source_max_staleness_minutes: int = Field(default=120, ge=15)
 
     ha_token: SecretStr | None = None
+    ha_schools: tuple[HaSchool, ...] = Field(default=(), max_length=MAX_HA_SCHOOLS)
 
     apprise_url: str | None = None
     # The saved Apprise configuration the app posts to (``/notify/{KEY}``).
@@ -573,6 +671,28 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _ha_schools_are_distinct(self) -> Self:
+        """Require one entry per school and one school per person.
+
+        Returns:
+            The validated settings.
+
+        Raises:
+            ValueError: If two entries name the same location, or one person
+                is listed under two schools (a person has one school day per
+                date). The message never echoes a value.
+        """
+        locations = [school.location_id for school in self.ha_schools]
+        if len(set(locations)) != len(locations):
+            msg = "FL_HA_SCHOOLS lists one location twice"
+            raise ValueError(msg)
+        people = [pid for school in self.ha_schools for pid in school.person_ids]
+        if len(set(people)) != len(people):
+            msg = "FL_HA_SCHOOLS lists one person under two schools"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def _tags_are_distinct(self) -> Self:
         """Require six different tags so audiences can never be merged.
 
@@ -774,6 +894,13 @@ def load_settings() -> Settings:
             f"FL_{'_'.join(str(part) for part in error['loc']).upper()}: {error['msg']}"
             for error in exc.errors(include_input=False, include_url=False)
         ]
+    except SettingsError as exc:
+        # A JSON-valued setting (FL_HA_SCHOOLS) that is not JSON. The message
+        # names the field; the decoder error, which can quote the text, is
+        # neither kept nor chained.
+        field = re.search(r'field "([a-z_]+)"', str(exc))
+        name = field.group(1).upper() if field else "SETTINGS"
+        problems = [f"FL_{name}: value is not valid JSON"]
     # Raised outside the handler so the pydantic error, which carries the
     # rejected input, is neither the cause nor the context of this one.
     msg = "Invalid configuration: " + "; ".join(problems)
