@@ -17,11 +17,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
-from sqlalchemy import delete, func, literal, or_, update
+from sqlalchemy import delete, func, literal, or_, select, update
 
 from family_logistics.core.exceptions import ValidationError
 from family_logistics.db import schema
 from family_logistics.db.column_types import UtcDateTime
+from family_logistics.db.school_snapshots import PURGED_CONTENT_HASH
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Connection
@@ -95,9 +96,12 @@ def purge_raw_source_text(connection: Connection, *, now: datetime) -> int:
 def purge_expired_school_days(connection: Connection, *, now: datetime) -> int:
     """Delete parsed school days that ended more than the retention period ago.
 
-    Only ``school_day`` rows are deleted; the ``school_snapshot`` freshness row
-    is kept, so the snapshot still ages out through the staleness check
-    (DATA-011) rather than disappearing. The caller owns the transaction.
+    The ``school_snapshot`` freshness row is kept, so the snapshot still ages
+    out through the staleness check (DATA-011) rather than disappearing. When
+    any day is deleted, the same transaction updates the row's ``day_count``
+    and replaces its ``content_hash`` with ``PURGED_CONTENT_HASH``, so the row
+    never describes days that are gone and an identical re-post is not
+    reported as unchanged. The caller owns the transaction.
 
     Args:
         connection: An open connection, normally inside ``engine.begin()``.
@@ -118,4 +122,16 @@ def purge_expired_school_days(connection: Connection, *, now: datetime) -> int:
     expired = func.julianday(table.c.end_utc) < func.julianday(
         literal(cutoff, UtcDateTime())
     )
-    return connection.execute(delete(table).where(expired)).rowcount
+    purged = connection.execute(delete(table).where(expired)).rowcount
+    if purged:
+        # #CRITICAL: Data integrity: the snapshot row must describe exactly the
+        # rows left, or an identical re-post would read as "unchanged" and
+        # leave the purged days missing.
+        # #VERIFY: tests/unit/test_school_snapshot_repo.py::TestRetention.
+        remaining = select(func.count()).select_from(table).scalar_subquery()
+        connection.execute(
+            update(schema.school_snapshot).values(
+                day_count=remaining, content_hash=PURGED_CONTENT_HASH
+            )
+        )
+    return purged
