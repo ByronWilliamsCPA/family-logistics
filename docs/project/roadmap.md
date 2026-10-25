@@ -37,21 +37,32 @@ MVP is the M4 exit gate: both parents use the calendar as the only ride
 editor, with findings running in shadow mode. M5 (LLM narrative and
 hardening) and M6 (meals) follow MVP.
 
-Status as of 2026-10-25. Merged: pilot contracts and core schema (#4), registry
-and seed loader (#5), review fixes (#13, #14). Open PRs that complete the
-remaining M1 and M2 work are listed first, then the PRs still to be written.
+Status as of 2026-10-25. Merged: pilot contracts and core schema (#4),
+registry and seed loader (#5), review fixes (#13, #14), the engine (#6), the
+collector (#7) and a base-image digest update (#8).
 
-### Step 1: Merge the open PRs
+### Step 1: Close out M1 and M2
 
-| Order | PR | Completes | Remaining before its milestone gate closes |
-|-------|----|-----------|--------------------------------------------|
-| 1 | #7 `feat/m1-collector`: read-only CalDAV collector, recurrence expansion, `collect` CLI | M1 ingestion half (collector, recurrence, source persistence) | Merge-conflict reconciliation with #5 (`config.py`, `.env.example`, guides, README). Live iCloud validation (M0 checks 1 and 2): partition host, ctag and sync tokens, `writable=no` for View Only calendars, stable calendar IDs, DESCRIPTION intact, RECURRENCE-ID and TZID formats, cancellations. |
-| 2 | #6 `feat/m2-engine`: location timeline and deterministic rule engine | M2 engine (timeline, coverage, driver, feasibility, lifecycle, `assess()`) | Merge-conflict reconciliation with #5 (`config.py` `FIELD_STATUS`, `.env.example`, configuration guide). Owner review of the default thresholds (merge gap, buffers, capacity, bus and school rules, DEST-004). Acceptance scenarios 18 (M5) and 20 (M4) stay skipped. |
-| 3 | #8, #10, #11 Renovate updates | Dependency hygiene only | #11 is a major pre-commit bump. Run `pre-commit run --all-files` before merging. |
+| PR | State | What it completed |
+|----|-------|-------------------|
+| #7 `feat/m1-collector` | Merged | M1 ingestion half: read-only CalDAV collector, recurrence expansion, source persistence, `collect` CLI |
+| #6 `feat/m2-engine` | Merged | M2 engine: location timeline, coverage, driver and feasibility rules, finding lifecycle, `assess()` |
+| #8 Renovate base image digest | Merged | Dependency hygiene |
+| #10 Renovate pre-commit hooks (minor) | Open | Dependency hygiene. Needs a rebase on `main`, then CI. |
+| #11 Renovate pre-commit hooks (major) | Open, behind `main` | Dependency hygiene. Major bumps of `pre-commit-hooks` (v6 drops two hooks) and `conventional-pre-commit` (v4 skips merge commits by default). Run `pre-commit run --all-files` before merging. |
 
-Exit gates closed by Step 1: **M1** (fixtures pass, zero write calls to iCloud)
-once #7 merges, and **M2** (acceptance matrix passes) once #6 merges, with
-scenarios 18 and 20 deferred to the milestones that own them.
+Open items that block the M1 and M2 exit gates, none of which is a PR yet:
+
+- **M1 gate (zero write calls to iCloud, fixtures pass):** the code is merged but
+  has not run against live iCloud. M0 checks 1 and 2 must confirm the partition
+  host, sync tokens, `writable=no` on View Only calendars, stable calendar IDs,
+  an intact DESCRIPTION, the RECURRENCE-ID and TZID formats, and how
+  cancellations arrive.
+- **M2 gate (acceptance matrix passes):** the matrix runs except scenario 18
+  (M5, LLM) and scenario 20 (M4, on-demand idempotency).
+- **Owner review of the engine defaults:** merge gap, travel and stop buffers,
+  pickup tolerance, unknown-capacity threshold, bus and school rules, and
+  DEST-004 severity. Verify registry addresses before the shadow pilot.
 
 ### Step 2: PRs still to be written
 
