@@ -392,8 +392,11 @@ analysis_run = Table(
         "julianday(window_end) >= julianday(window_start)",
         name="ck_analysis_run_window",
     ),
+    # Added by revision 0003_trip_snapshot (the table itself is from 0002).
+    Index("ix_analysis_run_started_at", "started_at"),
 )
-"""One assessment run (hourly, daily, weekly or on demand)."""
+"""One assessment run; ``trigger`` is weekly, daily, incremental or on_demand
+(``services.assessments.TRIGGERS``; the database has no CHECK on it)."""
 
 finding = Table(
     "finding",
@@ -419,6 +422,30 @@ finding = Table(
     ),
     Index("ix_finding_lifecycle", "lifecycle"),
     Index("ix_finding_rule", "rule_id"),
+    # Added by revision 0003_trip_snapshot (the table itself is from 0002).
+    Index("ix_finding_run_id", "run_id"),
 )
 """Current state of every finding by stable ``issue_id``; ``lifecycle`` is
 new, ongoing, resolved or regressed."""
+
+# ---------------------------------------------------------------------------
+# Trip snapshot (revision 0003_trip_snapshot)
+# ---------------------------------------------------------------------------
+# The rides of the latest run that did not fail, for change impact. Revision 0003 also
+# adds ``ix_analysis_run_started_at`` and ``ix_finding_run_id``, declared above
+# on the 0002 tables they index.
+
+trip_snapshot = Table(
+    "trip_snapshot",
+    metadata,
+    Column("trip_key", String(512), primary_key=True),
+    Column("payload", JSON, nullable=False),
+    Column("run_id", String(36), ForeignKey("analysis_run.run_id"), nullable=True),
+    Column("updated_at", UtcDateTime(), nullable=False),
+)
+"""Rides accepted by the latest completed run, keyed by the source occurrence.
+
+The next run compares its rides to these to find a passenger removed or a
+destination changed (change impact). ``complete_run`` replaces the whole table
+with the rides of the latest run that did not fail; a failed run leaves it
+untouched."""

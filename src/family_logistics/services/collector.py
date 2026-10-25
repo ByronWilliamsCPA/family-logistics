@@ -150,6 +150,47 @@ class CollectorConfig:
     max_staleness: timedelta
 
 
+def selected_names(config: CollectorConfig) -> set[str]:
+    """Return the configured display names or IDs plus the transport calendar.
+
+    Args:
+        config: Collector settings.
+
+    Returns:
+        The names and IDs the collector collects.
+    """
+    return {*config.selected, config.transport_calendar}
+
+
+def enabled_selected_sources(
+    sources: Iterable[CalendarSource],
+    config: CollectorConfig,
+    only: Collection[str] | None = None,
+) -> list[CalendarSource]:
+    """Return the enabled sources the collector actually collects.
+
+    A stored source dropped from ``FL_CALDAV_CALENDARS`` (or seeded by the
+    registry but never listed) is not collected, so it has no collection
+    freshness to judge.
+
+    Args:
+        sources: Stored calendar sources.
+        config: Collector settings.
+        only: Limit to these display names or IDs; None keeps all selected.
+
+    Returns:
+        Enabled sources that are selected (and in ``only`` when given).
+    """
+    selected = selected_names(config)
+    return [
+        s
+        for s in sources
+        if s.enabled
+        and {s.display_name, s.calendar_id} & selected
+        and (only is None or {s.display_name, s.calendar_id} & set(only))
+    ]
+
+
 @dataclass(frozen=True, slots=True)
 class CalendarRun:
     """Outcome for one calendar.
@@ -310,7 +351,7 @@ class Collector:
 
     def _selected(self) -> set[str]:
         """Return the configured display names or IDs plus the transport calendar."""
-        return {*self.config.selected, self.config.transport_calendar}
+        return selected_names(self.config)
 
     def _wanted(self, info: CalendarInfo, only: Collection[str] | None) -> bool:
         """Report whether a discovered calendar is selected for collection."""
@@ -326,14 +367,7 @@ class Collector:
         registry but never listed) is not collected, so it must not be
         reported as a lost share on every run either.
         """
-        selected = self._selected()
-        return [
-            s
-            for s in self.sources.all()
-            if s.enabled
-            and {s.display_name, s.calendar_id} & selected
-            and (only is None or {s.display_name, s.calendar_id} & set(only))
-        ]
+        return enabled_selected_sources(self.sources.all(), self.config, only)
 
     @staticmethod
     def _missing(
