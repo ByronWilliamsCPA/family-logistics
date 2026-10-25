@@ -51,7 +51,7 @@ repos:
   # Fast File Checks (Lightweight, run on every commit)
   # ============================================================================
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: 2c9f875913ee60ca25ce70243dc24d5b6415598c  # v4.6.0  # pragma: allowlist secret
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # v6.0.0  # pragma: allowlist secret
     hooks:
       - id: trailing-whitespace
         stages: [pre-commit]
@@ -149,7 +149,7 @@ repos:
   # Conventional Commits Enforcement
   # ============================================================================
   - repo: https://github.com/compilerla/conventional-pre-commit
-    rev: fab6a95091c567b872099a98cad586c122f55dc8  # v3.6.0  # pragma: allowlist secret
+    rev: 91ab4bf57e58b32adf1a122681f6ebe164d081c8  # v4.4.0  # pragma: allowlist secret
     hooks:
       - id: conventional-pre-commit
         stages: [commit-msg]
@@ -159,7 +159,7 @@ repos:
   # pyproject.toml and GitHub Workflow Validation
   # ============================================================================
   - repo: https://github.com/abravalheri/validate-pyproject
-    rev: 17e12779811926f000bdfa1795f9e3735dd71ac3  # 0.26  # pragma: allowlist secret
+    rev: 82d21874c3242e4dc27bb47641c996902ef64eef  # v0.27  # pragma: allowlist secret
     hooks:
       - id: validate-pyproject
         stages: [pre-commit]
