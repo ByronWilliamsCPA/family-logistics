@@ -99,12 +99,22 @@ carry children's schedules. Signal and SMS are future options only.
   plaintext write; they do not prove a value is encrypted, because only the key
   can show that.
 - Routing uses location IDs internally; plaintext addresses are decrypted only
-  in the routing adapter call and the registry UI.
+  in the routing adapter call, the `ha_relay` route-request fallback described
+  below, and the registry UI.
 - The routing provider is the only external party that receives an address:
   Google Routes directly, or Home Assistant's Waze action through the
-  `ha_relay` route-request endpoint (which returns origin and destination for
-  the legs HA must estimate, over the token-authenticated HA-only route). Only
-  the two endpoints of a leg are sent, never names or ride purpose.
+  `ha_relay` route-request endpoint (the token-authenticated HA-only route that
+  lists the legs HA must estimate). Only the two endpoints of a leg are sent,
+  never names or ride purpose.
+- `ha_relay` leg endpoints are zone identifiers by default: a location with an
+  `ha_zone_entity_id` is sent as that entity id. A location with no zone is
+  sent as its decrypted address, the documented fallback. **This means
+  plaintext addresses can reach Home Assistant for zone-less locations.** The
+  owner chose this trade-off (ADR 0006, decision of 2026-10-25); the way to
+  keep an address off the relay is to give the location a Home Assistant zone.
+- The `ha_relay` route cache is keyed by location id and time bucket (weekday
+  and 15-minute time of day), never by address, so the cache holds no address
+  text.
 - Logs pass through a redaction filter that drops fields tagged `R` and
   replaces external names with passenger IDs. A unit test asserts no
   address-shaped string reaches a log record.

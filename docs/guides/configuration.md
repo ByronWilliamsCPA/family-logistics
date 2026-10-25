@@ -97,7 +97,7 @@ used.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `FL_ROUTE_PROVIDER` | `ha_relay` | `ha_relay`, `google_routes` or `static` |
+| `FL_ROUTE_PROVIDER` | `ha_relay` | `ha_relay`, `google_routes` or `static`. Until the relay lands (ADR 0006, PR 2), `ha_relay` yields a provider whose every estimate is unknown (ROUTE-010, run incomplete), `google_routes` is refused as not implemented, and `static` is for tests and needs an explicit travel-time table |
 | `FL_GOOGLE_ROUTES_API_KEY` | unset | **Secret.** Optional paid routing key |
 | `FL_ROUTES_MONTHLY_BUDGET_USD` | `10` | Hard monthly cap enforced by the application |
 | `FL_ROUTES_BUDGET_WARN_USD` | `8` | Spend that triggers an operator warning |

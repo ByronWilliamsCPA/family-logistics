@@ -9,8 +9,9 @@ and every authentication failure returns the same 401.
 first business route. Once the body is read, its errors are built by hand
 (``_error``) rather than raised as ``HTTPException``, so no body can echo the
 rejected input: the snapshot is children's school data. Later milestones add
-the others to this router: M3 adds the route relay, GET /api/v1/route-requests and POST /api/v1/route-results
-(ADR 0006); M4 adds GET /api/v1/status, POST /api/v1/assessments and
+the others to this router: M3 adds the route relay routes
+(GET /api/v1/route-requests and POST /api/v1/route-results, ADR 0006); M4 adds
+GET /api/v1/status, POST /api/v1/assessments and
 GET /api/v1/assessments/{run_id}. They inherit the dependency and must not be
 registered on any other router.
 """
