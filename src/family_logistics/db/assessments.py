@@ -180,12 +180,12 @@ class AssessmentRepository:
     def load_history(self) -> StoredHistory:
         """Read the finding state and the previous run's rides.
 
+        A corrupt or unknown-version trip snapshot row makes
+        ``trip_from_json`` raise ``ValidationError`` out of this method; rows
+        are never skipped, so the caller records a failed run.
+
         Returns:
             Open findings, resolved issue IDs and the stored trips.
-
-        Raises:
-            ValidationError: A stored trip snapshot row is corrupt or has an
-                unknown version (rows are never skipped).
         """
         with self._engine.connect() as connection:
             rows = [
