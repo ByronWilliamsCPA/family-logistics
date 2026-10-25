@@ -1,5 +1,8 @@
 """Trip snapshot: the previous run's accepted rides, for change impact.
 
+Also indexes ``analysis_run.started_at`` (newest-first run listing) and
+``finding.run_id`` (findings of a run); both tables come from revision 0002.
+
 Revision ID: 0003_trip_snapshot
 Revises: 0002_pilot_core
 Create Date: 2026-10-25
@@ -21,7 +24,7 @@ _TZ = sa.DateTime(timezone=True)
 
 
 def upgrade() -> None:
-    """Create ``trip_snapshot``."""
+    """Create ``trip_snapshot`` and the run and finding indexes."""
     op.create_table(
         "trip_snapshot",
         sa.Column("trip_key", sa.String(512), primary_key=True),
@@ -34,8 +37,12 @@ def upgrade() -> None:
         ),
         sa.Column("updated_at", _TZ, nullable=False),
     )
+    op.create_index("ix_analysis_run_started_at", "analysis_run", ["started_at"])
+    op.create_index("ix_finding_run_id", "finding", ["run_id"])
 
 
 def downgrade() -> None:
-    """Drop ``trip_snapshot``; the next run then has no previous rides."""
+    """Drop the indexes and ``trip_snapshot``; the next run has no previous rides."""
+    op.drop_index("ix_finding_run_id", table_name="finding")
+    op.drop_index("ix_analysis_run_started_at", table_name="analysis_run")
     op.drop_table("trip_snapshot")
