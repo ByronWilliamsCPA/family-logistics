@@ -52,24 +52,59 @@ class TestRoundTrip:
         assert decoded.key.recurrence_id is None
 
 
+class TestVersion:
+    def test_payload_carries_the_format_version(self):
+        payload = trip_to_json(sample())
+        assert payload["version"] == 1
+        assert json.loads(json.dumps(payload))["version"] == 1
+
+    def test_an_older_payload_without_a_version_is_rejected(self):
+        data = json.loads(json.dumps(trip_to_json(sample())))
+        del data["version"]
+        with pytest.raises(ValidationError, match="Stored trip field version is"):
+            trip_from_json(data)
+
+    @pytest.mark.parametrize(
+        "version",
+        [0, 2, True, "1", 1.0, None],
+        ids=["zero", "unknown", "bool", "text", "float", "null"],
+    )
+    def test_an_unsupported_version_is_rejected(self, version):
+        data = json.loads(json.dumps(trip_to_json(sample())))
+        data["version"] = version
+        with pytest.raises(ValidationError, match="Stored trip field version is"):
+            trip_from_json(data)
+
+    @pytest.mark.parametrize("payload", [[], ["version", 1], None, "text", 1], ids=repr)
+    def test_a_payload_that_is_not_an_object_is_rejected(self, payload):
+        with pytest.raises(ValidationError, match="Stored trip field payload is"):
+            trip_from_json(payload)
+
+    def test_the_error_does_not_echo_the_payload(self):
+        with pytest.raises(ValidationError) as caught:
+            trip_from_json({"version": "secret-street-1"})
+        assert "secret-street-1" not in str(caught.value)
+        assert "secret-street-1" not in repr(caught.value.details)
+
+
 class TestRejectsCorruption:
     @pytest.mark.parametrize(
-        "mutate",
+        ("mutate", "field"),
         [
-            lambda d: d.pop("driver_id"),
-            lambda d: d.update(status="maybe"),
-            lambda d: d.update(start="2026-10-23T15:30:00"),
-            lambda d: d.update(start="not a time"),
-            lambda d: d.update(key=["only", "two"]),
-            lambda d: d.update(key=[1, 2, None]),
-            lambda d: d.update(passengers=["x"]),
-            lambda d: d.update(passengers="x"),
-            lambda d: d.update(stop_order=[1]),
-            lambda d: d.update(confirm_code=5),
+            (lambda d: d.pop("driver_id"), "driver_id"),
+            (lambda d: d.update(status="maybe"), "status"),
+            (lambda d: d.update(start="2026-10-23T15:30:00"), "start"),
+            (lambda d: d.update(start="not a time"), "start"),
+            (lambda d: d.update(key=["only", "two"]), "key"),
+            (lambda d: d.update(key=[1, 2, None]), "key"),
+            (lambda d: d.update(passengers=["x"]), "passengers"),
+            (lambda d: d.update(passengers="x"), "passengers"),
+            (lambda d: d.update(stop_order=[1]), "stop_order"),
+            (lambda d: d.update(confirm_code=5), "confirm_code"),
         ],
     )
-    def test_malformed_snapshot_raises_validation_error(self, mutate):
+    def test_malformed_snapshot_raises_validation_error(self, mutate, field):
         data = json.loads(json.dumps(trip_to_json(sample())))
         mutate(data)
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match=f"Stored trip field {field} is"):
             trip_from_json(data)

@@ -1,9 +1,19 @@
 """JSON-safe encoding of ``Trip`` for the previous-run snapshot.
 
-Only the fields change impact needs to compare are kept in full. ``free_notes``
-is dropped because it is free text that may name people or places and no rule
-reads it from a stored trip. Decoding validates every field, so a corrupted
-snapshot raises ``ValidationError`` instead of yielding a half-formed trip.
+Every ``Trip`` field is stored except ``free_notes``, which is dropped because
+it is free text that may name people or places and no rule reads it from a
+stored trip. That includes the pickup text, passenger display names and each
+passenger's raw destination text. The payload carries a ``version`` key
+(``TRIP_JSON_VERSION``). Decoding validates the version and every field, so a
+corrupted or unknown-version snapshot raises ``ValidationError`` instead of
+yielding a half-formed trip.
+
+#EDGE: Data integrity: a permanently corrupt snapshot row makes every run read
+its history fail, so runs stay FAILED (never clear) until a human decides the
+snapshot healing policy; undecodable rows are deliberately not skipped, because
+skipping would hide a ride and risk a false clear.
+#VERIFY: tests/unit/test_assessment_service.py::TestFailedRuns pins the failed
+run for a corrupt row; the healing policy is an open design decision.
 """
 
 from __future__ import annotations
@@ -25,6 +35,9 @@ from family_logistics.domain.models import (
 )
 
 JsonObject = dict[str, object]
+
+TRIP_JSON_VERSION = 1
+"""Format version written by ``trip_to_json`` and required by ``trip_from_json``."""
 
 
 def _bad(name: str) -> NoReturn:
@@ -87,9 +100,12 @@ def trip_to_json(trip: Trip) -> JsonObject:
         trip: The accepted trip.
 
     Returns:
-        A JSON-safe mapping (no ``free_notes``).
+        A JSON-safe mapping carrying ``version``. Every ``Trip`` field is
+        stored (including pickup text, passenger display names and raw
+        destination text) except ``free_notes``.
     """
     return {
+        "version": TRIP_JSON_VERSION,
         "key": [trip.key.calendar_id, trip.key.uid, trip.key.recurrence_id],
         "trip_type": trip.trip_type.value,
         "status": trip.status.value,
@@ -140,16 +156,27 @@ def _passenger(raw: object) -> TripPassenger:
     )
 
 
-def trip_from_json(data: JsonObject) -> Trip:
+def trip_from_json(payload: object) -> Trip:
     """Decode a stored trip.
 
     Args:
-        data: Mapping produced by ``trip_to_json``.
+        payload: Mapping produced by ``trip_to_json``.
 
     Returns:
-        The trip, with empty ``free_notes``. A missing or malformed field
-        raises ``ValidationError``.
+        The trip, with empty ``free_notes``. A non-mapping payload, a missing
+        or unknown ``version``, or a missing or malformed field raises
+        ``ValidationError``.
     """
+    if not isinstance(payload, dict):
+        _bad("payload")
+    data = cast("JsonObject", payload)
+    version = data.get("version")
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version != TRIP_JSON_VERSION
+    ):
+        _bad("version")
     stops = data.get("stop_order")
     if stops is not None and not (
         isinstance(stops, list)
