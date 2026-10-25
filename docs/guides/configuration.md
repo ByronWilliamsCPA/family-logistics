@@ -70,7 +70,11 @@ shows non-secret values only.
 | `FL_NOTIFICATION_MODE` | `shadow` | `shadow` or `production`; production needs both parents' approval |
 | `FL_QUIET_HOURS_START` | `22:00` | Start of quiet hours (local time) |
 | `FL_QUIET_HOURS_END` | `06:00` | End of quiet hours (local time) |
-| `FL_IMMINENT_WINDOW_MINUTES` | `180` | Rides starting within this window may bypass quiet hours |
+| `FL_IMMINENT_WINDOW_MINUTES` | `180` | Rides starting within this window may bypass quiet hours; an unverified destination on them is critical |
+| `FL_SAME_LOCATION_GAP_MINUTES` | `60` | Largest idle gap between activities at one place that still counts as one stay (no ride needed) |
+| `FL_OVERNIGHT_GAP_HOURS` | `14` | Largest idle gap between stays at one place on consecutive days that still counts as an overnight (no return home, no morning trip) |
+| `FL_TRAVEL_BUFFER_MINUTES` | `10` | Arrive this long before a passenger's next activity |
+| `FL_STOP_BUFFER_MINUTES` | `5` | Loading or unloading time per ride stop |
 
 The client sends through one saved Apprise configuration: `POST
 /notify/{FL_APPRISE_CONFIG_KEY}` with a JSON body of `title`, `body` and the

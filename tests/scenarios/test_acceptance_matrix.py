@@ -1,8 +1,8 @@
 """Acceptance scenario matrix (handoff section 16).
 
-Scenarios the current domain modules can prove run here. The rest are
-explicit skips naming their milestone, so the matrix stays visible and nothing
-is silently dropped. External children are pseudonymized ("Passenger E",
+Scenarios the current domain modules and the M2 engine can prove run here.
+The rest are explicit skips naming their milestone, so the matrix stays visible
+and nothing is silently dropped. External children are pseudonymized ("Passenger E",
 "Passenger R"); the "two children with the same first name" case uses
 "Passenger J".
 """
@@ -13,6 +13,8 @@ import dataclasses
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from fl_engine import NOW as ENGINE_NOW
+from fl_engine import PEOPLE, activity, assessment, at, default, routes, school
 from fl_factories import FRIDAY_END, FRIDAY_START, key, notes, parse, trip
 
 from family_logistics.adapters.routing.base import RouteConstraints, StaticRouteProvider
@@ -22,7 +24,13 @@ from family_logistics.domain.confirmation import (
     confirmation_code,
     evaluate_confirmation,
 )
-from family_logistics.domain.models import RunStatus, Severity
+from family_logistics.domain.engine import AssessmentHistory, assess
+from family_logistics.domain.events import (
+    SchoolDayKind,
+    TransportDirection,
+    TransportMode,
+)
+from family_logistics.domain.models import Person, PersonRole, RunStatus, Severity
 from family_logistics.domain.rules import make_finding
 from family_logistics.domain.run_status import SourceFreshness, compute_run_status
 from family_logistics.domain.stop_order import OrderStatus, Stop
@@ -31,7 +39,7 @@ pytestmark = pytest.mark.unit
 NOW = FRIDAY_START - timedelta(hours=6)
 
 
-def test_shared_ride_projects_to_each_passenger():
+def test_shared_ride_projects_to_each_passenger():  # scenario 1
     """External Driver S collects Sam and Jordan Tuesday from the music studio."""
     t = trip(
         notes(
@@ -177,43 +185,7 @@ def test_event_moved_to_new_time_single_occurrence_no_duplicate():
     assert analyze_change_impact(before, moved).removed_family_legs == ()
 
 
-M2 = "M2: needs location timeline, school overlays and rule engine"
-M3 = "M3: needs routing adapter, notifications or scheduler"
 M4 = "M4: needs HA endpoints"
-
-
-@pytest.mark.skip(reason=f"{M2}: consecutive classes at one studio form one stay")
-def test_consecutive_same_location_is_one_stay(): ...
-
-
-@pytest.mark.skip(reason=f"{M2}: pickup at sports end, not bell end")
-def test_school_sports_extends_stay(): ...
-
-
-@pytest.mark.skip(reason=f"{M2}: early release / late start bell overlay from HA")
-def test_school_specific_bell_overlay(): ...
-
-
-@pytest.mark.skip(reason=f"{M2}: district no-school day suppresses school baseline")
-def test_no_school_day(): ...
-
-
-@pytest.mark.skip(reason=f"{M2}: one-day exception overrides bike baseline")
-def test_bike_baseline_exception(): ...
-
-
-@pytest.mark.skip(reason=f"{M2}: team bus outbound, parent return only if confirmed")
-def test_away_meet_team_bus(): ...
-
-
-@pytest.mark.skip(
-    reason=f"{M2}: DRIVER-006 for all passengers of an unavailable driver"
-)
-def test_driver_unavailable_flags_every_passenger(): ...
-
-
-@pytest.mark.skip(reason=f"{M3}: per-passenger destination override re-routed")
-def test_destination_override_rerouted(): ...
 
 
 @pytest.mark.skip(
@@ -224,3 +196,300 @@ def test_llm_unavailable(): ...
 
 @pytest.mark.skip(reason=f"{M4}: double on-demand press coalesced or idempotent")
 def test_on_demand_idempotent(): ...
+
+
+# --- M2 engine scenarios (handoff matrix 4-10, 12 and the Friday rule) -----
+
+
+def engine_rules(inp, *, provider=None, history=None):
+    result = assess(inp, provider or routes(10), now=ENGINE_NOW, history=history)
+    return result, sorted(t.finding.rule_id for t in result.findings)
+
+
+def confirmed(t):
+    return dataclasses.replace(t, confirm_code=confirmation_code(t))
+
+
+def test_consecutive_same_location_is_one_stay():  # scenario 4
+    lessons = (
+        activity("l1", ("sam",), "studio", at(16), at(17)),
+        activity("l2", ("sam",), "studio", at(17), at(18)),
+    )
+    home = confirmed(trip(notes(), uid="home", start=at(18), end=at(18, 30)))
+    there = confirmed(
+        trip(
+            notes(pickup="Home", destinations=(("Sam", "Music Studio"),)),
+            uid="there",
+            start=at(15, 30),
+            end=at(16),
+        )
+    )
+    result, found = engine_rules(assessment(activities=lessons, trips=(there, home)))
+    assert len(result.timelines[0].stays) == 1
+    assert found == []
+
+
+def test_school_sports_extends_stay():  # scenario 5
+    inp = assessment(
+        school_days=(school("alex", at(8), at(15)),),
+        activities=(activity("xc", ("alex",), "high-school", at(15), at(17, 30)),),
+        defaults=(default("alex", TransportDirection.TO_SCHOOL, TransportMode.BIKE),),
+    )
+    at_bell = confirmed(
+        trip(
+            notes(
+                family="Alex", pickup="High School", destinations=(("Alex", "HOME"),)
+            ),
+            uid="bell",
+            start=at(15),
+            end=at(15, 20),
+        )
+    )
+    _, found = engine_rules(dataclasses.replace(inp, trips=(at_bell,)))
+    assert found == ["RIDE-005"]
+    at_end = dataclasses.replace(
+        at_bell, start=at(17, 30), end=at(17, 50), confirm_code=None
+    )
+    _, found = engine_rules(dataclasses.replace(inp, trips=(confirmed(at_end),)))
+    assert found == []
+
+
+def test_school_specific_bell_overlay():  # scenario 6
+    release = school("alex", at(8), at(12, 30), SchoolDayKind.EARLY_RELEASE)
+    pickup = confirmed(
+        trip(
+            notes(
+                family="Alex", pickup="High School", destinations=(("Alex", "HOME"),)
+            ),
+            uid="early",
+            start=at(15),
+            end=at(15, 20),
+        )
+    )
+    inp = assessment(
+        school_days=(release,),
+        trips=(pickup,),
+        defaults=(default("alex", TransportDirection.TO_SCHOOL, TransportMode.BIKE),),
+    )
+    result, found = engine_rules(inp)
+    assert found == ["RIDE-005"]
+    assert "12:30" in result.findings[0].finding.message
+
+
+def test_no_school_day():  # scenario 7
+    lesson = activity("lesson", ("alex",), "studio", at(10), at(11))
+    rides = (
+        confirmed(
+            trip(
+                notes(
+                    family="Alex",
+                    pickup="Home",
+                    destinations=(("Alex", "Music Studio"),),
+                ),
+                uid="to",
+                start=at(9, 30),
+                end=at(9, 50),
+            )
+        ),
+        confirmed(
+            trip(
+                notes(family="Alex", destinations=(("Alex", "HOME"),)),
+                uid="back",
+                start=at(11),
+                end=at(11, 20),
+            )
+        ),
+    )
+    inp = assessment(
+        school_days=(school("alex", at(8), at(8), SchoolDayKind.NO_SCHOOL),),
+        activities=(lesson,),
+        trips=rides,
+        defaults=(
+            default("alex", TransportDirection.TO_SCHOOL, TransportMode.BUS),
+            default("alex", TransportDirection.FROM_SCHOOL, TransportMode.BUS),
+        ),
+    )
+    result, found = engine_rules(inp)
+    assert found == []
+    assert [s.key for s in result.timelines[0].stays] == ["studio"]
+
+
+def test_bike_baseline_exception():  # scenario 8
+    bike = (
+        default("alex", TransportDirection.TO_SCHOOL, TransportMode.BIKE),
+        default("alex", TransportDirection.FROM_SCHOOL, TransportMode.BIKE),
+    )
+    meet_day = assessment(
+        school_days=(school("alex", at(8), at(15)),),
+        trips=(
+            confirmed(
+                trip(
+                    notes(
+                        family="Alex",
+                        driver="Morgan",
+                        pickup="High School",
+                        destinations=(("Alex", "HOME"),),
+                    ),
+                    uid="drive",
+                    start=at(15),
+                    end=at(15, 20),
+                )
+            ),
+        ),
+        defaults=bike,
+    )
+    _, found = engine_rules(meet_day)
+    assert found == []
+    assert all(d.mode is TransportMode.BIKE for d in meet_day.transport_defaults)
+    _, plain = engine_rules(dataclasses.replace(meet_day, trips=()))
+    assert plain == []
+
+
+TEAM_BUS = Person("team-bus", "Team Bus", PersonRole.CONTACT, can_drive=True)
+
+
+def _meet_day(*returns):
+    outbound = confirmed(
+        dataclasses.replace(
+            trip(
+                notes(
+                    family="Alex",
+                    pickup="High School",
+                    destinations=(("Alex", "Away Meet Park"),),
+                ),
+                uid="team-bus",
+                start=at(15),
+                end=at(15, 30),
+            ),
+            driver_id="team-bus",
+        )
+    )
+    return assessment(
+        people=(*PEOPLE, TEAM_BUS),
+        school_days=(school("alex", at(8), at(15)),),
+        activities=(activity("meet", ("alex",), "away-meet", at(15, 40), at(18)),),
+        trips=(outbound, *returns),
+        defaults=(default("alex", TransportDirection.TO_SCHOOL, TransportMode.BIKE),),
+    )
+
+
+def test_away_meet_team_bus():  # scenario 9
+    _, without_return = engine_rules(_meet_day())
+    assert without_return == ["RIDE-005"]
+    tentative_return = trip(
+        notes(
+            family="Alex",
+            driver="Morgan",
+            status="tentative",
+            pickup="Away Meet Park",
+            destinations=(("Alex", "HOME"),),
+        ),
+        uid="return",
+        start=at(18),
+        end=at(18, 30),
+    )
+    _, with_return = engine_rules(_meet_day(tentative_return))
+    assert with_return == ["CONF-008"]
+
+
+def test_driver_unavailable_flags_every_passenger():  # scenario 10
+    spectator = activity("watch", ("riley",), "away-meet", at(15), at(19))
+    lesson = activity("lesson", ("sam",), "studio", at(16), at(17))
+    shared = confirmed(
+        trip(
+            notes(
+                external="Passenger E",
+                destinations=(("Sam", "HOME"), ("Passenger E", "DEFAULT")),
+            ),
+            uid="shared",
+            start=at(17),
+            end=at(17, 30),
+        )
+    )
+    to_lesson = confirmed(
+        trip(
+            notes(
+                driver="Morgan", pickup="Home", destinations=(("Sam", "Music Studio"),)
+            ),
+            uid="to",
+            start=at(15, 30),
+            end=at(15, 50),
+        )
+    )
+    result, _ = engine_rules(
+        assessment(activities=(spectator, lesson), trips=(to_lesson, shared))
+    )
+    flagged = {
+        t.finding.entity_keys[1]
+        for t in result.findings
+        if t.finding.rule_id == "DRIVER-006"
+    }
+    assert flagged == {"passenger:sam", "passenger:ext-e"}
+
+
+def test_destination_override_resolved_per_passenger():  # scenario 12
+    def ride_to(place):
+        return confirmed(
+            trip(
+                notes(
+                    external="Passenger E",
+                    destinations=(("Sam", "HOME"), ("Passenger E", place)),
+                ),
+                uid="game",
+                start=at(17),
+                end=at(17, 45),
+            )
+        )
+
+    _, found = engine_rules(assessment(trips=(ride_to("Sibling Game"),)))
+    assert "DEST-004" not in found
+    _, unverified = engine_rules(assessment(trips=(ride_to("New Place"),)))
+    assert unverified == ["DEST-004"]
+
+
+def test_friday_rule_through_the_engine():  # scenario 11 (engine view)
+    before = confirmed(
+        trip(
+            notes(
+                family="Sam",
+                external="Passenger E",
+                pickup="High School",
+                destinations=(("Sam", "HOME"), ("Passenger E", "DEFAULT")),
+            ),
+            uid="friday",
+            start=at(15),
+            end=at(15, 30),
+        )
+    )
+    e_only = confirmed(
+        trip(
+            notes(
+                family="",
+                external="Passenger E",
+                pickup="High School",
+                destinations=(("Passenger E", "DEFAULT"),),
+            ),
+            uid="friday",
+            start=at(15),
+            end=at(15, 30),
+        )
+    )
+    teacher = confirmed(
+        trip(
+            notes(driver="Teacher A", pickup="High School"),
+            uid="teacher",
+            start=at(17),
+            end=at(17, 30),
+        )
+    )
+    inp = assessment(
+        school_days=(school("sam", at(8), at(15)),),
+        activities=(activity("volunteer", ("sam",), "high-school", at(15), at(17)),),
+        trips=(e_only, teacher),
+        defaults=(default("sam", TransportDirection.TO_SCHOOL, TransportMode.BIKE),),
+    )
+    history = AssessmentHistory(previous_trips=(before,))
+    _, found = engine_rules(inp, history=history)
+    assert "PASS-003" not in found
+    assert "RIDE-005" not in found
+    assert "ext-e" in {leg.passenger_id for leg in e_only.legs()}
