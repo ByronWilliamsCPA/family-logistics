@@ -50,9 +50,13 @@ from family_logistics.services.registry_seed import (
 from family_logistics.utils.logging import setup_logging
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from sqlalchemy.engine import Engine
 
     from family_logistics.core.config import Settings
+    from family_logistics.domain.events import CalendarSource
+    from family_logistics.domain.models import Location, Vehicle
 
 HEALTHCHECK_TIMEOUT_SECONDS = 3
 EXIT_CONFIG = 2
@@ -434,6 +438,44 @@ def _yes(flag: bool) -> str:
     return "yes" if flag else "no"
 
 
+def _print_locations(
+    locations: Sequence[Location], presence: Mapping[str, tuple[bool, bool]]
+) -> None:
+    """Print the locations section; addresses and coordinates only as flags."""
+    click.echo(f"Locations ({len(locations)}):")
+    for x in locations:
+        has_address, has_coordinates = presence.get(x.location_id, (False, False))
+        _row(
+            f"{x.location_id:<16}",
+            f"{x.name:<24}",
+            f"verified={_yes(x.verified)}",
+            f"address={'stored' if has_address else 'none'}",
+            f"coordinates={'stored' if has_coordinates else 'none'}",
+        )
+
+
+def _print_vehicles(vehicles: Sequence[Vehicle]) -> None:
+    """Print the vehicles section."""
+    click.echo(f"Vehicles ({len(vehicles)}):")
+    for v in vehicles:
+        seats = "unverified" if v.seat_capacity is None else str(v.seat_capacity)
+        _row(f"{v.vehicle_id:<16}", f"{v.display_name:<24}", f"seats={seats}")
+
+
+def _print_calendars(calendars: Sequence[CalendarSource]) -> None:
+    """Print the calendars section."""
+    click.echo(f"Calendars ({len(calendars)}):")
+    for c in calendars:
+        last = c.last_success.isoformat() if c.last_success else "never"
+        _row(
+            f"{c.calendar_id:<16}",
+            f"{c.kind.value:<10}",
+            f"owner={c.person_id or '-'}",
+            f"enabled={_yes(c.enabled)}",
+            f"last_success={last}",
+        )
+
+
 @registry.command("show")
 def registry_show() -> None:
     """List the registry. Addresses and coordinates are never printed."""
@@ -469,30 +511,9 @@ def registry_show() -> None:
             f"household={e.household_id}",
             f"active={_yes(e.active)}",
         )
-    click.echo(f"Locations ({len(locations)}):")
-    for x in locations:
-        has_address, has_coordinates = presence.get(x.location_id, (False, False))
-        _row(
-            f"{x.location_id:<16}",
-            f"{x.name:<24}",
-            f"verified={_yes(x.verified)}",
-            f"address={'stored' if has_address else 'none'}",
-            f"coordinates={'stored' if has_coordinates else 'none'}",
-        )
-    click.echo(f"Vehicles ({len(vehicles)}):")
-    for v in vehicles:
-        seats = "unverified" if v.seat_capacity is None else str(v.seat_capacity)
-        _row(f"{v.vehicle_id:<16}", f"{v.display_name:<24}", f"seats={seats}")
-    click.echo(f"Calendars ({len(calendars)}):")
-    for c in calendars:
-        last = c.last_success.isoformat() if c.last_success else "never"
-        _row(
-            f"{c.calendar_id:<16}",
-            f"{c.kind.value:<10}",
-            f"owner={c.person_id or '-'}",
-            f"enabled={_yes(c.enabled)}",
-            f"last_success={last}",
-        )
+    _print_locations(locations, presence)
+    _print_vehicles(vehicles)
+    _print_calendars(calendars)
     per_person: dict[str, int] = {}
     for t in defaults:
         per_person[t.person_id] = per_person.get(t.person_id, 0) + 1
