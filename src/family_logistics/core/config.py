@@ -678,18 +678,27 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _budget_and_quiet_hours_are_coherent(self) -> Self:
-        """Reject a warning above the hard cap and an empty quiet-hours window.
+        """Reject a warning above the hard cap and an unusable quiet-hours window.
 
         Returns:
             The validated settings.
 
         Raises:
-            ValueError: If the budget warning exceeds the monthly cap, or quiet
-                hours start and end at the same time.
+            ValueError: If the budget warning exceeds the monthly cap, a quiet
+                hours time carries a UTC offset, or quiet hours start and end
+                at the same time.
         """
         if self.routes_budget_warn_usd > self.routes_monthly_budget_usd:
             msg = (
                 "FL_ROUTES_BUDGET_WARN_USD must not exceed FL_ROUTES_MONTHLY_BUDGET_USD"
+            )
+            raise ValueError(msg)
+        if self.quiet_hours_start.tzinfo is not None or (
+            self.quiet_hours_end.tzinfo is not None
+        ):
+            msg = (
+                "FL_QUIET_HOURS_START and FL_QUIET_HOURS_END are local wall "
+                "times and must not carry a UTC offset"
             )
             raise ValueError(msg)
         if self.quiet_hours_start == self.quiet_hours_end:
