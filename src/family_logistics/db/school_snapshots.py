@@ -48,7 +48,11 @@ from typing import TYPE_CHECKING, cast
 from sqlalchemy import delete, insert, select
 from sqlalchemy.exc import DBAPIError, OperationalError, StatementError
 
-from family_logistics.core.database import BUSY_TIMEOUT_MS, is_lock_contention
+from family_logistics.core.database import (
+    BUSY_TIMEOUT_MS,
+    immediate_transaction,
+    is_lock_contention,
+)
 from family_logistics.core.exceptions import (
     BusinessLogicError,
     DatabaseError,
@@ -231,6 +235,23 @@ def content_hash(days: Iterable[SchoolDay], fetched_at: datetime) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _snapshot_busy(exc: OperationalError) -> SchoolSnapshotBusyError | None:
+    """Translate lock contention into the busy error; ignore other faults.
+
+    Args:
+        exc: The driver error from ``BEGIN IMMEDIATE``.
+
+    Returns:
+        The busy error for SQLITE_BUSY or SQLITE_LOCKED, else None so that
+        any other fault (read-only database, disk I/O error) is re-raised
+        unchanged and never reported as busy.
+    """
+    if not is_lock_contention(exc.orig):
+        return None
+    msg = "the database is locked by another writer; nothing stored"
+    return SchoolSnapshotBusyError(msg, operation="replace", error_code="SNAPSHOT_BUSY")
+
+
 @contextmanager
 def _write_locked(engine: Engine, lock_timeout_ms: int) -> Generator[Connection]:
     """Yield a connection inside ``BEGIN IMMEDIATE``; commit on success.
@@ -254,29 +275,10 @@ def _write_locked(engine: Engine, lock_timeout_ms: int) -> Generator[Connection]
     # (a migration, a long scheduler run) must not turn into a 500; the
     # ingest reports busy and Home Assistant retries, and nothing is written.
     # #VERIFY: tests/unit/test_school_snapshot_repo.py::TestWriteLock.
-    with engine.connect() as connection:
-        connection.exec_driver_sql(f"PRAGMA busy_timeout={int(lock_timeout_ms)}")
-        try:
-            try:
-                connection.exec_driver_sql("BEGIN IMMEDIATE")
-            except OperationalError as exc:
-                if not is_lock_contention(exc.orig):
-                    raise
-                msg = "the database is locked by another writer; nothing stored"
-                raise SchoolSnapshotBusyError(
-                    msg, operation="replace", error_code="SNAPSHOT_BUSY"
-                ) from exc
-            committed = False
-            try:
-                yield connection
-                connection.commit()
-                committed = True
-            finally:
-                if not committed:
-                    connection.rollback()
-        finally:
-            connection.exec_driver_sql(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
-            connection.commit()
+    with immediate_transaction(
+        engine, lock_timeout_ms=lock_timeout_ms, on_begin_error=_snapshot_busy
+    ) as connection:
+        yield connection
 
 
 @contextmanager

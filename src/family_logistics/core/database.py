@@ -23,20 +23,22 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import URL
-from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, OperationalError, SQLAlchemyError
 
 from family_logistics.utils.logging import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Generator
     from pathlib import Path
     from sqlite3 import Connection as SQLiteConnection
     from sqlite3 import Cursor
 
-    from sqlalchemy.engine import Engine
+    from sqlalchemy.engine import Connection, Engine
     from sqlalchemy.pool import ConnectionPoolEntry
 
 BUSY_TIMEOUT_MS = 5000
@@ -71,6 +73,66 @@ def is_lock_contention(error: BaseException | None) -> bool:
     # #VERIFY: tests/unit/test_school_snapshot_repo.py::TestWriteLock.
     code = getattr(error, "sqlite_errorcode", None)
     return isinstance(code, int) and (code & _PRIMARY_CODE_MASK) in _BUSY_CODES
+
+
+@contextmanager
+def immediate_transaction(
+    engine: Engine,
+    *,
+    lock_timeout_ms: int = BUSY_TIMEOUT_MS,
+    on_begin_error: Callable[[OperationalError], BaseException | None] | None = None,
+) -> Generator[Connection]:
+    """Yield a connection inside ``BEGIN IMMEDIATE``; commit on success.
+
+    ``engine.begin()`` issues a deferred ``BEGIN``, and in WAL mode a read that
+    later upgrades to a write fails with SQLITE_BUSY_SNAPSHOT without waiting.
+    ``BEGIN IMMEDIATE`` takes the write lock first (waiting up to
+    ``lock_timeout_ms``), so the writers queue and each one sees the previous
+    commit. Any exception from the caller's block rolls the transaction back.
+    The connection's busy timeout is restored to ``BUSY_TIMEOUT_MS`` on exit,
+    whatever happened.
+
+    Args:
+        engine: The application engine.
+        lock_timeout_ms: How long to wait for the write lock.
+        on_begin_error: Optional translator, consulted only when ``BEGIN
+            IMMEDIATE`` itself fails (never for an error in the caller's
+            block). It returns the exception to raise in place of the driver
+            error (chained to it), or ``None`` to re-raise the driver error
+            unchanged.
+
+    Yields:
+        A connection holding the database's write lock.
+
+    Raises:
+        OperationalError: If the lock is not granted in time or ``BEGIN``
+            fails, and ``on_begin_error`` is absent or returns ``None``.
+    """
+    # #CRITICAL: Concurrency: every read-then-write sequence that must not
+    # interleave with another writer (a claim, a replace, a migration) runs in
+    # this one transaction type, so SQLite serializes the writers.
+    # #VERIFY: tests/unit/test_immediate_transaction.py::test_two_writers_are_serialized.
+    with engine.connect() as connection:
+        connection.exec_driver_sql(f"PRAGMA busy_timeout={int(lock_timeout_ms)}")
+        try:
+            try:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+            except OperationalError as exc:
+                translated = None if on_begin_error is None else on_begin_error(exc)
+                if translated is None:
+                    raise
+                raise translated from exc
+            committed = False
+            try:
+                yield connection
+                connection.commit()
+                committed = True
+            finally:
+                if not committed:
+                    connection.rollback()
+        finally:
+            connection.exec_driver_sql(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+            connection.commit()
 
 
 def _enable_wal(cursor: Cursor) -> object:

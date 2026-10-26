@@ -41,7 +41,7 @@ from alembic.script import ScriptDirectory
 from alembic.util import CommandError
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
-from family_logistics.core.database import BUSY_TIMEOUT_MS
+from family_logistics.core.database import immediate_transaction
 from family_logistics.core.exceptions import DatabaseError
 
 if TYPE_CHECKING:
@@ -192,6 +192,22 @@ def ahead_message(current: str | None) -> str:
     )
 
 
+def _lock_refused(_exc: OperationalError) -> MigrationLockError:
+    """Describe a refused migration lock for the operator.
+
+    Args:
+        _exc: The driver error from ``BEGIN IMMEDIATE``, not needed.
+
+    Returns:
+        The error to raise in its place.
+    """
+    msg = (
+        "database is locked by another process (another instance "
+        "may be migrating); schema unchanged"
+    )
+    return MigrationLockError(msg, operation="migrate")
+
+
 @contextmanager
 def _locked_transaction(engine: Engine) -> Generator[Connection]:
     """Yield a connection inside ``BEGIN IMMEDIATE``; commit on success.
@@ -207,28 +223,12 @@ def _locked_transaction(engine: Engine) -> Generator[Connection]:
     Raises:
         MigrationLockError: If the write lock is not granted in time.
     """
-    with engine.connect() as connection:
-        connection.exec_driver_sql(f"PRAGMA busy_timeout={MIGRATION_LOCK_TIMEOUT_MS}")
-        try:
-            try:
-                connection.exec_driver_sql("BEGIN IMMEDIATE")
-            except OperationalError as exc:
-                msg = (
-                    "database is locked by another process (another instance "
-                    "may be migrating); schema unchanged"
-                )
-                raise MigrationLockError(msg, operation="migrate") from exc
-            committed = False
-            try:
-                yield connection
-                connection.commit()
-                committed = True
-            finally:
-                if not committed:
-                    connection.rollback()
-        finally:
-            connection.exec_driver_sql(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
-            connection.commit()
+    with immediate_transaction(
+        engine,
+        lock_timeout_ms=MIGRATION_LOCK_TIMEOUT_MS,
+        on_begin_error=_lock_refused,
+    ) as connection:
+        yield connection
 
 
 def _migrate(engine: Engine, revision: str, *, downgrade: bool) -> None:
