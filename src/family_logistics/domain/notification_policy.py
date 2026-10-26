@@ -43,15 +43,24 @@ from typing import TYPE_CHECKING, Final, Literal
 from zoneinfo import ZoneInfo
 
 from family_logistics.domain.context import EngineSettings
-from family_logistics.domain.models import Severity
+from family_logistics.domain.lifecycle import Lifecycle
+from family_logistics.domain.models import RunStatus, Severity
+from family_logistics.domain.notification_subjects import (
+    Resolution,
+    is_imminent,
+    resolve_subject,
+    run_imminent,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime, time
 
     from family_logistics.core.config import Settings
+    from family_logistics.domain.engine import AssessmentResult
     from family_logistics.domain.lifecycle import TrackedFinding
-    from family_logistics.domain.models import Finding, RunStatus
-    from family_logistics.domain.notification_subjects import Subject
+    from family_logistics.domain.models import Finding
+    from family_logistics.domain.notification_subjects import RideIndex, Subject
+    from family_logistics.domain.timeline import DayTimeline
 
 
 class PushKind(StrEnum):
@@ -369,6 +378,354 @@ def delivery_tag(kind: PushKind, policy: NotificationPolicy) -> str:
     return production_tag(kind, policy.tags)
 
 
+_RUN_FAILED: Final = "run-failed"
+_OPS_FAILED: Final = "ops:run_failed"
+_OPS_INCOMPLETE: Final = "ops:run_incomplete"
+_STATUS_TRIGGERS: Final = frozenset({"daily", "on_demand"})
+_REPORT_TRIGGERS: Final = frozenset({"weekly"})
+_KIND_ORDER: Final = {
+    PushKind.URGENT: 0,
+    PushKind.NOTICE: 1,
+    PushKind.STATUS: 2,
+    PushKind.REPORT: 2,
+    PushKind.OPS: 3,
+}
+_RUN_LEVEL_KINDS: Final = frozenset({PushKind.STATUS, PushKind.REPORT})
+
+
+@dataclass(frozen=True, slots=True)
+class _Context:
+    """What planning one outcome needs besides the findings."""
+
+    now: datetime
+    policy: NotificationPolicy
+    rides: RideIndex | None
+    timelines: tuple[DayTimeline, ...]
+    run_wide_imminent: bool
+
+
+def _finding_imminent(resolution: Resolution, subject: Subject, ctx: _Context) -> bool:
+    """Decide imminence from a resolved subject (unresolved counts as imminent)."""
+    if resolution is Resolution.RUN_WIDE:
+        return ctx.run_wide_imminent
+    if resolution is Resolution.DAY:
+        return subject.day == ctx.now.astimezone(ctx.policy.zone).date()
+    if subject.due_at is None or subject.due_end is None:
+        return True
+    return is_imminent(
+        subject.due_at, subject.due_end, ctx.now, ctx.policy.imminent_window
+    )
+
+
+def _plan_finding(tracked: TrackedFinding, ctx: _Context) -> tuple[PlannedPush, bool]:
+    """Plan one finding's push; also report whether its subject was unresolved."""
+    finding = tracked.finding
+    resolution, subject = resolve_subject(
+        finding,
+        rides=ctx.rides,
+        timelines=ctx.timelines,
+        pickup_tolerance=ctx.policy.pickup_tolerance,
+    )
+    kind = finding_kind(finding, imminent=_finding_imminent(resolution, subject, ctx))
+    pushed = PlannedPush(
+        subject_key=f"issue:{finding.issue_id}",
+        kind=kind,
+        intended_tag=production_tag(kind, ctx.policy.tags),
+        episode_start=tracked.lifecycle in {Lifecycle.NEW, Lifecycle.REGRESSED},
+        run_wide=resolution is Resolution.RUN_WIDE,
+        rule_id=finding.rule_id,
+        severity=finding.severity,
+        tracked=tracked,
+        subject=subject,
+    )
+    return pushed, resolution is Resolution.UNRESOLVED
+
+
+def _run_wide_push(key: str, kind: PushKind, policy: NotificationPolicy) -> PlannedPush:
+    return PlannedPush(
+        subject_key=key,
+        kind=kind,
+        intended_tag=production_tag(kind, policy.tags),
+        run_wide=key == _RUN_FAILED,
+    )
+
+
+def _failed_run_pushes(
+    imminent: bool, policy: NotificationPolicy
+) -> tuple[PlannedPush, PlannedPush]:
+    """Return the ``run-failed`` and ``ops:run_failed`` pushes of a failed run."""
+    kind = PushKind.URGENT if imminent else PushKind.NOTICE
+    return (
+        _run_wide_push(_RUN_FAILED, kind, policy),
+        _run_wide_push(_OPS_FAILED, PushKind.OPS, policy),
+    )
+
+
+def _ordered(pushes: list[PlannedPush]) -> tuple[PlannedPush, ...]:
+    return tuple(sorted(pushes, key=lambda p: _KIND_ORDER[p.kind]))
+
+
+def _plan_failed(
+    *,
+    result: AssessmentResult,
+    rides: RideIndex | None,
+    now: datetime,
+    policy: NotificationPolicy,
+) -> Plan:
+    """Plan a failed run: ``run-failed``, ``ops:run_failed`` and retries only."""
+    imminent = run_imminent(
+        rides,
+        (),
+        now=now,
+        window=policy.imminent_window,
+        pickup_tolerance=policy.pickup_tolerance,
+    )
+    pushes = list(_failed_run_pushes(imminent, policy))
+    ctx = _Context(now, policy, rides, (), imminent)
+    keys: set[str] = set()
+    for tracked in result.findings:
+        resolution, subject = resolve_subject(
+            tracked.finding,
+            rides=rides,
+            timelines=(),
+            pickup_tolerance=policy.pickup_tolerance,
+        )
+        # The row's own kind decides a retry; this one only labels the plan.
+        kind = finding_kind(
+            tracked.finding, imminent=_finding_imminent(resolution, subject, ctx)
+        )
+        key = f"issue:{tracked.finding.issue_id}"
+        keys.add(key)
+        pushes.append(
+            PlannedPush(
+                subject_key=key,
+                kind=kind,
+                intended_tag=production_tag(kind, policy.tags),
+                retry_only=True,
+                rule_id=tracked.finding.rule_id,
+                severity=tracked.finding.severity,
+                tracked=tracked,
+                subject=subject,
+            )
+        )
+    return Plan(_ordered(pushes), frozenset(keys), completed=False, incomplete=False)
+
+
+def _run_level_pushes(
+    run_id: str, trigger: str, result: AssessmentResult, ctx: _Context
+) -> tuple[list[PlannedPush], bool]:
+    """Plan the status or report and the ops push; flag a stale status."""
+    pushes: list[PlannedPush] = []
+    stale = False
+    status_kind = (
+        PushKind.STATUS
+        if trigger in _STATUS_TRIGGERS
+        else PushKind.REPORT
+        if trigger in _REPORT_TRIGGERS
+        else None
+    )
+    if status_kind is not None:
+        if ctx.now - result.evaluated_at > ctx.policy.status_max_age:
+            stale = True
+        else:
+            pushes.append(
+                PlannedPush(
+                    subject_key=f"run:{run_id}",
+                    kind=status_kind,
+                    intended_tag=production_tag(status_kind, ctx.policy.tags),
+                    run_status=result.run_status,
+                )
+            )
+    if result.run_status is RunStatus.INCOMPLETE:
+        pushes.append(_run_wide_push(_OPS_INCOMPLETE, PushKind.OPS, ctx.policy))
+    return pushes, stale
+
+
+def plan(  # noqa: PLR0913 - everything but the outcome is keyword-only
+    *,
+    run_id: str,
+    trigger: str,
+    result: AssessmentResult,
+    rides: RideIndex | None,
+    now: datetime,
+    policy: NotificationPolicy,
+) -> Plan:
+    """Plan the pushes one run outcome asks for (D3 and D4).
+
+    Args:
+        run_id: The run's ID (the status subject and the episode owner).
+        trigger: ``daily``, ``weekly``, ``on_demand`` or ``incremental``; any
+            other value plans no status or report.
+        result: The run's result. A failed result plans retries only.
+        rides: The run's ride index, or None when unknown (counts as imminent).
+        now: The dispatch clock (aware).
+        policy: The resolved policy.
+
+    Returns:
+        The plan: urgent pushes first, then notices, the status or report and
+        ops pushes, with the unresolved findings counted by rule ID.
+
+    Raises:
+        ValueError: ``now`` is naive.
+    """
+    _aware(now, "now")
+    if result.run_status is RunStatus.FAILED:
+        return _plan_failed(result=result, rides=rides, now=now, policy=policy)
+    run_wide_imminent = run_imminent(
+        rides,
+        result.timelines,
+        now=now,
+        window=policy.imminent_window,
+        pickup_tolerance=policy.pickup_tolerance,
+    )
+    ctx = _Context(now, policy, rides, result.timelines, run_wide_imminent)
+    pushes: list[PlannedPush] = []
+    unresolved: list[str] = []
+    for tracked in result.findings:
+        pushed, was_unresolved = _plan_finding(tracked, ctx)
+        pushes.append(pushed)
+        if was_unresolved:
+            unresolved.append(tracked.finding.rule_id)
+    run_pushes, stale = _run_level_pushes(run_id, trigger, result, ctx)
+    return Plan(
+        _ordered([*pushes, *run_pushes]),
+        frozenset(p.subject_key for p in pushes),
+        completed=True,
+        incomplete=result.run_status is RunStatus.INCOMPLETE,
+        unresolved_rule_ids=tuple(unresolved),
+        status_stale=stale,
+    )
+
+
+def plan_unavailable(*, now: datetime, policy: NotificationPolicy) -> Plan:
+    """Plan the pushes for a run that never produced an outcome (D4).
+
+    Args:
+        now: The dispatch clock (aware).
+        policy: The resolved policy.
+
+    Returns:
+        ``run-failed`` (urgent, since the ride set is unknown) and
+        ``ops:run_failed``; nothing is closed.
+
+    Raises:
+        ValueError: ``now`` is naive.
+    """
+    _aware(now, "now")
+    return Plan(
+        _ordered(list(_failed_run_pushes(imminent=True, policy=policy))),
+        frozenset(),
+        completed=False,
+        incomplete=False,
+    )
+
+
+def _owed_in_episode(push: PlannedPush, row: StateView, *, new_day: bool) -> bool:
+    """Report whether an open episode's row is owed another push."""
+    if not row.delivered:
+        return True
+    escalated = (
+        row.severity is not None
+        and push.severity is not None
+        and severity_rank(push.severity) > severity_rank(row.severity)
+    )
+    kind_rose = push.kind is PushKind.URGENT and row.kind is PushKind.NOTICE
+    rearmed = push.run_wide and push.kind is PushKind.URGENT and new_day
+    return escalated or kind_rose or rearmed
+
+
+def _owed(
+    push: PlannedPush, row: StateView | None, run_id: str, *, new_day: bool
+) -> tuple[bool, bool]:
+    """Return ``(owed, starts_new_episode)`` for a push against its row."""
+    if push.retry_only:
+        return row is not None and row.is_open and not row.delivered, False
+    if row is None:
+        return True, True
+    if push.kind in _RUN_LEVEL_KINDS:
+        return not row.delivered, True
+    if not row.is_open or (push.episode_start and row.episode_run_id != run_id):
+        return True, True
+    return _owed_in_episode(push, row, new_day=new_day), False
+
+
+def _in_cooldown(
+    push: PlannedPush, row: StateView | None, now: datetime, kind: PushKind
+) -> bool:
+    """Report whether a new episode's notice is held by the cooldown."""
+    return (
+        push.episode_start
+        and kind is PushKind.NOTICE
+        and row is not None
+        and row.last_sent_at is not None
+        and now - row.last_sent_at < RENOTIFY_COOLDOWN
+    )
+
+
+def _is_new_day(row: StateView | None, now: datetime, zone: ZoneInfo) -> bool:
+    """Report whether ``now`` is a later local calendar day than the last send."""
+    if row is None or row.last_sent_at is None:
+        return False
+    return now.astimezone(zone).date() > row.last_sent_at.astimezone(zone).date()
+
+
+def decide(  # noqa: PLR0913 - the clock and quiet flag are keyword-only
+    push: PlannedPush,
+    state: StateView | None,
+    *,
+    run_id: str,
+    now: datetime,
+    quiet: bool,
+    policy: NotificationPolicy,
+) -> Decision:
+    """Decide what to do with one planned push (D4 to D6).
+
+    The order is: in flight, duplicate, cooldown, quiet hours or a used
+    bypass, send. A retry uses the kind stored on its row. The cooldown holds
+    only a notice that starts a new episode (``episode_start``), so an
+    undelivered notice of the same episode is never held by it.
+
+    Args:
+        push: The planned push.
+        state: Its ``notification_state`` row, if any.
+        run_id: The run being dispatched (a different one reopens an episode).
+        now: The dispatch clock (aware).
+        quiet: Whether ``now`` is inside quiet hours.
+        policy: The resolved policy (the local zone for the daily re-arm).
+
+    Returns:
+        The decision. ``STALE`` is never returned here: ``plan`` drops a late
+        status or report, because only the plan knows when the run was
+        evaluated.
+
+    Raises:
+        ValueError: ``now`` is naive.
+    """
+    _aware(now, "now")
+    if (
+        state is not None
+        and state.claimed_at is not None
+        and now - state.claimed_at < CLAIM_TTL
+    ):
+        return Decision.IN_FLIGHT
+    owed, new_episode = _owed(
+        push, state, run_id, new_day=_is_new_day(state, now, policy.zone)
+    )
+    if not owed:
+        return Decision.DUPLICATE
+    kind = state.kind if push.retry_only and state is not None else push.kind
+    if new_episode and _in_cooldown(push, state, now, kind):
+        return Decision.COOLDOWN
+    if not quiet:
+        return Decision.SEND
+    # #CRITICAL: Timing: only an urgent push bypasses quiet hours, once per episode.
+    # #VERIFY: tests/unit/test_notification_policy.py::test_only_urgent_bypasses_and_only_once.
+    if kind is not PushKind.URGENT:
+        return Decision.QUIET_HOURS
+    spent = not new_episode and state is not None and state.bypass_used
+    return Decision.BYPASS_USED if spent else Decision.SEND
+
+
 __all__ = [
     "CLAIM_LOCK_RETRIES",
     "CLAIM_TTL",
@@ -384,9 +741,12 @@ __all__ = [
     "PushKind",
     "StateView",
     "TagSet",
+    "decide",
     "delivery_tag",
     "finding_kind",
     "in_quiet_hours",
+    "plan",
+    "plan_unavailable",
     "production_tag",
     "severity_rank",
 ]
