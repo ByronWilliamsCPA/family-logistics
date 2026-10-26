@@ -10,6 +10,11 @@ ends or is deleted from its calendar.
 (Confidential). Every ingest replaces them, but if Home Assistant stops posting
 the last snapshot would stay forever, so days that ended more than
 ``SCHOOL_DAY_RETENTION_DAYS`` ago are deleted.
+
+``route_cache`` holds the ``ha_relay`` travel times (Confidential, keyed by
+location id) and ``route_request`` the queue behind them. Entries older than
+``ROUTE_CACHE_RETENTION_DAYS`` and requests past their expiry are deleted
+(privacy spec, section 7).
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from sqlalchemy import delete, func, literal, or_, select, update
 from family_logistics.core.exceptions import ValidationError
 from family_logistics.db import schema
 from family_logistics.db.column_types import UtcDateTime
+from family_logistics.db.route_relay import CACHE_VALIDITY
 from family_logistics.db.school_snapshots import PURGED_CONTENT_HASH
 
 if TYPE_CHECKING:
@@ -36,6 +42,9 @@ RAW_TEXT_RETENTION_DAYS = 30
 # #VERIFY: owner approves the period; the scheduler (M3) must call
 # ``purge_expired_school_days`` with ``purge_raw_source_text``.
 SCHOOL_DAY_RETENTION_DAYS = 30
+
+ROUTE_CACHE_RETENTION_DAYS = CACHE_VALIDITY.days
+"""Route cache entries are kept for the 28 days they can still be served."""
 
 
 def purge_raw_source_text(connection: Connection, *, now: datetime) -> int:
@@ -135,3 +144,75 @@ def purge_expired_school_days(connection: Connection, *, now: datetime) -> int:
             )
         )
     return purged
+
+
+def purge_expired_route_cache(connection: Connection, *, now: datetime) -> int:
+    """Delete route cache entries observed more than 28 days before ``now``.
+
+    An entry exactly 28 days old is kept: the provider still serves it. The
+    caller owns the transaction. Not scheduled yet; the scheduler (M3) must call
+    it with the other purges.
+
+    Args:
+        connection: An open connection, normally inside ``engine.begin()``.
+        now: The reference instant. It must be timezone-aware.
+
+    Returns:
+        The number of entries deleted.
+
+    Raises:
+        ValidationError: If ``now`` is a naive datetime. The message does not
+            contain the value.
+    """
+    # #ASSUME: Security: cached travel times between named places are
+    # Confidential (privacy spec); the retention period equals the validity
+    # window, so nothing is kept that could no longer be served.
+    # #VERIFY: the scheduler (M3) must call this on every run; tests pin the
+    # 28-day boundary.
+    _require_aware(now)
+    cutoff = now - timedelta(days=ROUTE_CACHE_RETENTION_DAYS)
+    table = schema.route_cache
+    expired = func.julianday(table.c.observed_at) < func.julianday(
+        literal(cutoff, UtcDateTime())
+    )
+    return connection.execute(delete(table).where(expired)).rowcount
+
+
+def purge_expired_route_requests(connection: Connection, *, now: datetime) -> int:
+    """Delete route requests whose expiry has passed, answered or not.
+
+    Answered rows only serve to recognise an identical re-post, which is moot
+    once the request has expired. The caller owns the transaction. Not
+    scheduled yet.
+
+    Args:
+        connection: An open connection, normally inside ``engine.begin()``.
+        now: The reference instant. It must be timezone-aware.
+
+    Returns:
+        The number of requests deleted.
+
+    Raises:
+        ValidationError: If ``now`` is a naive datetime. The message does not
+            contain the value.
+    """
+    _require_aware(now)
+    table = schema.route_request
+    expired = func.julianday(table.c.expires_at) < func.julianday(
+        literal(now, UtcDateTime())
+    )
+    return connection.execute(delete(table).where(expired)).rowcount
+
+
+def _require_aware(now: datetime) -> None:
+    """Refuse a naive reference instant without echoing it.
+
+    Args:
+        now: The reference instant.
+
+    Raises:
+        ValidationError: If ``now`` is naive.
+    """
+    if now.tzinfo is None or now.utcoffset() is None:
+        msg = "now must be a timezone-aware datetime"
+        raise ValidationError(msg, field="now")

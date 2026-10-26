@@ -594,10 +594,12 @@ route_request = Table(
         name="ck_route_request_expiry_after_creation",
     ),
     CheckConstraint(
-        "(status = 'pending' AND answered_duration_seconds IS NULL"
-        " AND answered_at IS NULL)"
-        " OR (status = 'answered' AND answered_at IS NOT NULL"
-        f" AND answered_duration_seconds BETWEEN 1 AND {MAX_ROUTE_DURATION_SECONDS})",
+        (
+            "(status = 'pending' AND answered_duration_seconds IS NULL"
+            " AND answered_at IS NULL)"
+            " OR (status = 'answered' AND answered_at IS NOT NULL"
+            f" AND answered_duration_seconds BETWEEN 1 AND {MAX_ROUTE_DURATION_SECONDS})"
+        ),
         name="ck_route_request_answer",
     ),
     Index(
