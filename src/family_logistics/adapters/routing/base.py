@@ -3,7 +3,7 @@
 Providers:
 
 - ``ha_relay`` (M3): estimates come from Home Assistant, which polls
-  ``GET /api/v1/route-requests``, runs ``waze_travel_time.get_travel_times`` and
+  ``GET /api/v1/route-requests``, runs ``google_travel_time.get_travel_times`` and
   posts the results back. The app never calls Home Assistant.
 - ``google_routes`` (M3, optional): Routes API ``computeRoutes`` with an
   in-app monthly budget cap.
@@ -12,7 +12,7 @@ Providers:
 Every estimate records its source and age. A missing estimate is ``None``,
 which the domain treats as unknown (ROUTE-010 / incomplete), never as zero.
 
-#ASSUME: External resources: Waze (via HA) and Google Routes may be
+#ASSUME: External resources: Google travel time (via HA) and Google Routes may be
 unavailable or rate-limited at any time; callers must handle ``None``.
 #VERIFY: tests/unit/test_stop_order.py::TestStopOrder pins that an unknown
 estimate yields an INCOMPLETE order, never a zero-length leg; every future

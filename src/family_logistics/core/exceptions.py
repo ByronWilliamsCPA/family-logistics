@@ -154,8 +154,8 @@ class RouteProviderUnavailableError(ConfigurationError):
     provider that is not implemented yet, lacks required input, or is not a
     known provider at all. The factory never falls back to another provider
     silently. ``error_code`` tells the causes apart:
-    ``ROUTE_PROVIDER_NOT_IMPLEMENTED`` (the default), ``ROUTE_PROVIDER_MATRIX_REQUIRED``
-    and ``ROUTE_PROVIDER_UNKNOWN``.
+    ``ROUTE_PROVIDER_NOT_IMPLEMENTED`` (the default), ``ROUTE_PROVIDER_MATRIX_REQUIRED``,
+    ``ROUTE_PROVIDER_ENGINE_REQUIRED`` and ``ROUTE_PROVIDER_UNKNOWN``.
 
     Args:
         message: Why the provider cannot be built.

@@ -1,17 +1,18 @@
-"""NullRouteProvider and the route provider factory (ADR 0006, PR 1 of 3)."""
+"""NullRouteProvider and the route provider factory (ADR 0006)."""
 
 from __future__ import annotations
 
 import dataclasses
-import threading
 from datetime import timedelta
 
 import pytest
 from fl_engine import NOW, activity, assessment, at, routes
 from fl_factories import notes, trip
+from fl_relay import make_engine
 
 from family_logistics.adapters import routing
 from family_logistics.adapters.routing import (
+    HaRelayRouteProvider,
     NullRouteProvider,
     RouteConstraints,
     RouteProvider,
@@ -36,17 +37,15 @@ MATRIX = {
 }
 
 
-@pytest.fixture(autouse=True)
-def _fresh_warning_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reset the warn-once flag so each test sees the first call."""
-    monkeypatch.setattr(
-        "family_logistics.adapters.routing.factory._ha_relay_warned",
-        threading.Event(),
-    )
-
-
 def settings(route_provider: RouteProviderName = "ha_relay") -> Settings:
     return Settings(route_provider=route_provider)
+
+
+@pytest.fixture
+def engine(tmp_path):
+    engine = make_engine(tmp_path)
+    yield engine
+    engine.dispose()
 
 
 class TestNullProvider:
@@ -132,44 +131,32 @@ class TestFactory:
         monkeypatch.setenv("FL_ROUTE_PROVIDER", "google_routes")
         assert Settings(_env_file=None).route_provider == "google_routes"
 
-    def test_ha_relay_yields_null_provider_and_warns(self, caplog):
-        with caplog.at_level("WARNING"):
-            provider = build_route_provider(settings("ha_relay"))
-        assert isinstance(provider, NullRouteProvider)
-        assert provider.estimate("a", "b", NOW, "driving") is None
-        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-        assert len(warnings) == 1
-        message = warnings[0].getMessage()
-        assert "routing.ha_relay_not_implemented" in message
-        assert "ha_relay" in message
-        assert "ROUTE-010" in message
+    def test_ha_relay_yields_the_real_provider(self, engine):
+        provider = build_route_provider(settings("ha_relay"), engine=engine)
+        assert isinstance(provider, HaRelayRouteProvider)
+        assert provider.name == "ha_relay"
 
-    def test_the_ha_relay_warning_is_logged_once_per_process(self, caplog):
-        with caplog.at_level("WARNING"):
-            build_route_provider(settings("ha_relay"))
-            build_route_provider(settings("ha_relay"))
-        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-        assert len(warnings) == 1
+    def test_ha_relay_without_an_engine_is_refused_not_replaced(self):
+        relay_settings = settings("ha_relay")
+        with pytest.raises(RouteProviderUnavailableError) as caught:
+            build_route_provider(relay_settings)
+        assert "ha_relay" in str(caught.value)
+        assert caught.value.provider == "ha_relay"
+        assert caught.value.details["provider"] == "ha_relay"
+        assert caught.value.error_code == "ROUTE_PROVIDER_ENGINE_REQUIRED"
 
-    def test_concurrent_builds_log_the_ha_relay_warning_once(self, caplog):
-        # Probabilistic evidence only: the barrier releases all threads at
-        # once, but a missing lock would not always lose the race.
-        threads_count = 8
-        barrier = threading.Barrier(threads_count)
-        cfg = settings("ha_relay")
-
-        def build() -> None:
-            barrier.wait()
-            build_route_provider(cfg)
-
-        threads = [threading.Thread(target=build) for _ in range(threads_count)]
-        with caplog.at_level("WARNING"):
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
-        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-        assert len(warnings) == 1
+    def test_the_provider_uses_the_configured_time_zone(self, engine):
+        provider = build_route_provider(
+            Settings(route_provider="ha_relay", timezone="Pacific/Auckland"),
+            engine=engine,
+        )
+        assert provider.estimate("home", "high-school", NOW, "driving") is None
+        # Friday 07:00 in Los Angeles is Saturday 03:00 in Auckland: bucket 12.
+        with engine.connect() as connection:
+            row = connection.exec_driver_sql(
+                "SELECT weekday, bucket FROM route_request"
+            ).one()
+        assert tuple(row) == (5, 12)
 
     def test_google_routes_is_refused_not_silently_replaced(self):
         cfg = settings("google_routes")
@@ -218,13 +205,12 @@ class TestFactory:
         assert provider.estimate("P", "A", NOW, "driving") is None
 
     @pytest.mark.parametrize("name", ["ha_relay", "google_routes"])
-    def test_a_table_with_a_non_static_provider_is_rejected(self, name, caplog):
+    def test_a_table_with_a_non_static_provider_is_rejected(self, name, engine):
+        # Rejected before any provider is chosen, even with an engine supplied:
+        # the table would otherwise be ignored without a hint.
         cfg = settings(name)
-        caplog.set_level("WARNING")
         with pytest.raises(ValueError, match="static_matrix"):
-            build_route_provider(cfg, static_matrix=MATRIX)
-        # Rejected before any provider is chosen: no placeholder warning.
-        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+            build_route_provider(cfg, engine=engine, static_matrix=MATRIX)
 
     def test_an_unknown_provider_name_fails_closed(self):
         unvalidated = Settings.model_construct(route_provider="bogus")
@@ -235,6 +221,7 @@ class TestFactory:
 
     def test_factory_is_exported_from_the_package(self):
         assert set(routing.__all__) >= {
+            "HaRelayRouteProvider",
             "NullRouteProvider",
             "RouteProviderUnavailableError",
             "build_route_provider",
@@ -262,13 +249,15 @@ def ride(uid, start, end, *, pickup, destinations):
     )
 
 
-def default_provider() -> RouteProvider:
-    """The provider an unconfigured deployment gets (the factory's output)."""
-    return build_route_provider(settings("ha_relay"))
+def default_provider(engine) -> RouteProvider:
+    """The provider an unconfigured deployment gets, on an empty route cache."""
+    return build_route_provider(settings("ha_relay"), engine=engine)
 
 
 class TestEngineFailsClosed:
-    def test_a_run_on_the_null_provider_is_incomplete_with_route_010(self):
+    def test_a_run_on_the_relay_with_an_empty_cache_is_incomplete_with_route_010(
+        self, engine
+    ):
         lesson = activity("lesson", ("sam",), "studio", at(16), at(17))
         to_lesson = ride(
             "to",
@@ -289,12 +278,12 @@ class TestEngineFailsClosed:
         with_data = assess(inp, routes(), now=NOW)
         assert with_data.run_status is RunStatus.CLEAR
 
-        result = assess(inp, default_provider(), now=NOW)
+        result = assess(inp, default_provider(engine), now=NOW)
         rule_ids = [t.finding.rule_id for t in result.findings]
         assert "ROUTE-010" in rule_ids
         assert result.run_status is RunStatus.INCOMPLETE
 
-    def test_the_driver_path_with_the_null_provider_is_incomplete(self):
+    def test_the_driver_path_with_an_empty_relay_cache_is_incomplete(self, engine):
         # Riley drops Sam at home at 16:30, then must reach the studio pickup
         # at 16:50 with a 10 minute buffer. With a 5 minute drive that is
         # judged normally; with no travel time at all the check cannot pass,
@@ -322,7 +311,7 @@ class TestEngineFailsClosed:
         slow = assess(inp, routes(30), now=NOW)
         assert [t.finding.rule_id for t in slow.findings] == ["DRIVER-006"]
 
-        result = assess(inp, default_provider(), now=NOW)
+        result = assess(inp, default_provider(engine), now=NOW)
         route_gaps = [
             t.finding for t in result.findings if t.finding.rule_id == "ROUTE-010"
         ]

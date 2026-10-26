@@ -35,6 +35,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 
 from family_logistics.db.column_types import FernetToken, UtcDateTime
@@ -505,3 +506,113 @@ school_day = Table(
 to ``person`` or ``location``: the rows are derived data, replaced wholesale on
 every ingest and checked against the registry when they are built, so a
 registry edit is never blocked by a stale snapshot row."""
+
+# ---------------------------------------------------------------------------
+# Route relay (revision 0005_route_relay)
+# ---------------------------------------------------------------------------
+# The ``ha_relay`` route provider (ADR 0006): Home Assistant prices legs and
+# posts the results back, and the app caches them. Both tables are keyed by
+# location id, never by address text, so a location edit invalidates exactly
+# the right rows. No address, zone or endpoint text is stored: the endpoint
+# sent to Home Assistant is resolved from the registry when a request is
+# served. The ``trg_location_route_relay_invalidate`` trigger and the
+# ``ON DELETE CASCADE`` keys (migration only) drop a location's rows when it
+# changes or is deleted.
+
+MAX_ROUTE_DURATION_SECONDS = 12 * 60 * 60
+"""Largest travel time a cache row or an answered request may hold (12 hours).
+The migration repeats the number in its CHECK constraints."""
+
+route_cache = Table(
+    "route_cache",
+    metadata,
+    Column(
+        "origin_location_id",
+        String(64),
+        ForeignKey(_LOCATION_ID_FK, ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "destination_location_id",
+        String(64),
+        ForeignKey(_LOCATION_ID_FK, ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("weekday", Integer, primary_key=True),
+    Column("bucket", Integer, primary_key=True),
+    Column("duration_seconds", Integer, nullable=False),
+    Column("observed_at", UtcDateTime(), nullable=False),
+    CheckConstraint("weekday BETWEEN 0 AND 6", name="ck_route_cache_weekday"),
+    CheckConstraint("bucket BETWEEN 0 AND 95", name="ck_route_cache_bucket"),
+    CheckConstraint(
+        f"duration_seconds BETWEEN 1 AND {MAX_ROUTE_DURATION_SECONDS}",
+        name="ck_route_cache_duration",
+    ),
+    CheckConstraint(
+        "origin_location_id <> destination_location_id",
+        name="ck_route_cache_distinct_endpoints",
+    ),
+)
+"""One observed driving time per origin, destination, weekday (Monday is 0) and
+15-minute bucket of local time of day (0 to 95). ``observed_at`` is the server's
+receipt time, so the age rule never trusts the sender's clock."""
+
+route_request = Table(
+    "route_request",
+    metadata,
+    Column("request_id", String(36), primary_key=True),
+    Column(
+        "origin_location_id",
+        String(64),
+        ForeignKey(_LOCATION_ID_FK, ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column(
+        "destination_location_id",
+        String(64),
+        ForeignKey(_LOCATION_ID_FK, ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("weekday", Integer, nullable=False),
+    Column("bucket", Integer, nullable=False),
+    Column("created_at", UtcDateTime(), nullable=False),
+    Column("expires_at", UtcDateTime(), nullable=False),
+    Column("status", String(8), nullable=False),
+    Column("answered_duration_seconds", Integer, nullable=True),
+    Column("answered_at", UtcDateTime(), nullable=True),
+    CheckConstraint(
+        "status IN ('pending', 'answered')", name="ck_route_request_status"
+    ),
+    CheckConstraint("weekday BETWEEN 0 AND 6", name="ck_route_request_weekday"),
+    CheckConstraint("bucket BETWEEN 0 AND 95", name="ck_route_request_bucket"),
+    CheckConstraint(
+        "origin_location_id <> destination_location_id",
+        name="ck_route_request_distinct_endpoints",
+    ),
+    CheckConstraint(
+        "julianday(expires_at) > julianday(created_at)",
+        name="ck_route_request_expiry_after_creation",
+    ),
+    CheckConstraint(
+        (
+            "(status = 'pending' AND answered_duration_seconds IS NULL"
+            " AND answered_at IS NULL)"
+            " OR (status = 'answered' AND answered_at IS NOT NULL"
+            f" AND answered_duration_seconds BETWEEN 1 AND {MAX_ROUTE_DURATION_SECONDS})"
+        ),
+        name="ck_route_request_answer",
+    ),
+    Index(
+        "uq_route_request_pending",
+        "origin_location_id",
+        "destination_location_id",
+        "weekday",
+        "bucket",
+        unique=True,
+        sqlite_where=text("status = 'pending'"),
+    ),
+)
+"""A leg the app needs priced. The app, not Home Assistant, decides what an
+answer means: the cache key comes from this row, never from the sender. At most
+one pending row exists per leg, weekday and bucket; answered rows stay until
+they expire so an identical re-post is a no-op."""

@@ -51,7 +51,8 @@ send more than a channel needs, and treat other families' data as on loan.
 | Analysis run | run_id, trigger, window, freshness, rules version, state, counts, output | I (output C) | Report HTML stored as an artifact with run-log retention. |
 | Audit | timestamp, actor, object, prior hash, new hash, hash key version, action, correlation ID | I | Hashes only, never content. The hashes are HMAC-SHA256 of a canonical state under `FL_AUDIT_KEY` (kept in the secret store, never in the database), and each row records the key version. Holding the table alone does not let anyone confirm a guessed state; whoever also holds the key can, so rows stay pseudonymous, not anonymous. The table is append-only: the database rejects updates, overwrites and deletes of rows younger than 365 days. |
 | HA snapshot | parsed school days (person, date, location, start, end, kind), fetched_at, received_at, content hash, day count | C | Event text, descriptions, calendar entity IDs and zones are checked or classified on arrival and never stored or logged. Only the configured school calendars and zones are accepted; no person-tracker or device-location entities are ever accepted. |
-| Route cache | endpoints (location IDs), weekday and 15-minute bucket, duration, source, age | C | Keyed by location ID, weekday and bucket, not address. |
+| Route cache | endpoints (location IDs), weekday and 15-minute bucket, duration, observed_at | C | Keyed by location ID, weekday and bucket, not address. |
+| Route request | request_id, endpoints (location IDs), weekday and bucket, created_at, expires_at, status, answered duration | C | Queue of legs Home Assistant should price; location IDs only, never address text. The address is decrypted only while the poll response is built and is not stored in the row. |
 
 Not collected, ever: GPS or device location of children, phone numbers of
 minors, school records, health data, photos, Riley's unrelated Google work
@@ -105,13 +106,18 @@ carry children's schedules. Signal and SMS are future options only.
 - Outside the app, only the routing path receives a place: Google Routes
   directly, or, through the `ha_relay` route-request endpoint (the
   token-authenticated HA-only route that lists the legs HA must estimate), Home
-  Assistant, whose Waze action passes each endpoint on to Waze (a zone is
+  Assistant, whose Google travel time action passes each endpoint on to Google (a zone is
   resolved by Home Assistant to its coordinates). Only the two endpoints of a
   leg are sent, never names or ride purpose.
 - `ha_relay` leg endpoints follow the owner decision of 2026-10-25 (ADR 0006),
-  **other families' homes need a zone**, enforced by
-  `family_logistics.domain.address_release.ha_relay_endpoint` and
-  `is_other_family_home`:
+  **other families' homes need a zone**. The policy is
+  `family_logistics.domain.address_release` (`ha_relay_endpoint` and
+  `is_other_family_home`), and the `ha_relay` provider implements the gate at two
+  points: it does not queue a leg with a withheld endpoint, and
+  `GET /api/v1/route-requests` re-evaluates every endpoint against the registry
+  as it is when the poll is served and omits a withheld request before any
+  address is decrypted, so a contact registered after a request was queued still
+  stops its release:
   - a location with an `ha_zone_entity_id` is sent as that entity id, never as
     an address;
   - another family's home with no zone is withheld: its address never leaves
@@ -130,7 +136,7 @@ carry children's schedules. Signal and SMS are future options only.
     give the home a Home Assistant zone, before enabling `ha_relay`.
 - Once an endpoint reaches Home Assistant it is outside this app's encryption
   and retention: Home Assistant may keep it in automation traces, the logbook,
-  recorder history and its backups, and Waze receives it to compute the route.
+  recorder history and its backups, and Google receives it to compute the route.
   The deployment excludes the relay automation from the recorder or shortens
   its trace retention (runbook in the private deployment repository).
   `#VERIFY` Home Assistant's trace, logbook and recorder behaviour for the
@@ -178,7 +184,8 @@ Before any call to the local inference server:
 | Confirmed passenger legs after event deletion | 90 days after the trip date | supports change-impact comparison |
 | Resolved findings | 90 days after resolution | |
 | Inactive external passenger and household | removed or anonymised 180 days after the carpool ends (measured from the last trip, or a recorded carpool end date), or on request; audit hashes keep their own retention | registry review prompt at 165 days; the removal job arrives with the scheduler (M3), and until then rows are kept |
-| Route cache entries | 28 days after the last observation for that weekday and 15-minute bucket, a fixed value rather than an `FL_` setting because it is also a correctness rule (changing it amends ADR 0006); also dropped at once when the location's address, coordinates or zone change, or the location is merged into another or re-verified (ADR 0006) | the purge and invalidation mechanism arrives with the `ha_relay` cache in PR 2 of the routing series, as migration `0005`; that number assumes migration `0004` from the school snapshot storage PR (#27) merges first, and until then there is no cache |
+| Route cache entries (`route_cache`) | 28 days after the last observation for that weekday and 15-minute bucket; also dropped at once, with the location's pending requests, when the location's id, address, coordinates, zone or verification state change or the location is deleted (ADR 0006) | invalidation is in the database (cascading keys and a trigger from migration `0005`), so no code path can skip it; the age purge is the database function `purge_expired_route_cache`, and the daily job that calls it arrives with the scheduler (M3), and until then entries are kept (a stale entry is never served: a hit needs an observation within 28 days) |
+| Route requests (`route_request`) | a request expires 8 days after it is queued and is then deleted, answered or not (an answered row only serves to recognise an identical re-post) | the database function `purge_expired_route_requests`; the daily job that calls it arrives with the scheduler (M3), and until then rows are kept (an expired request is never served or accepted) |
 | Route endpoints held by Home Assistant | outside this app's control (automation traces, logbook, recorder history, HA backups) | Home Assistant configuration in the deployment: the relay automation is excluded from the recorder or has short trace retention (section 5) |
 | Backups | 14 days rolling (proposed) | backup sidecar |
 
@@ -198,7 +205,7 @@ in the registry that the household uses a private scheduling system holding the
 child's first name, the agreed pickup and drop-off places, and ride times, and
 that it is deleted 180 days after the carpool ends or sooner on request. No
 data about them is shared outside the household's systems, with one exception:
-to estimate travel time, a routing service (Waze, through the household's Home
+to estimate travel time, a routing service (Google travel time, through the household's Home
 Assistant, or Google Routes) receives the location of a pickup or drop-off
 place, never a name or the ride's purpose. Before `ha_relay` is enabled, their
 home is registered as the home of a contact from their household or given a

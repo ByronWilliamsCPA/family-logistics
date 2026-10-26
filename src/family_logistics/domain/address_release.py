@@ -9,6 +9,9 @@ the leg's travel time is unknown, and the engine reports ROUTE-010 so the run
 is ``incomplete``, never clear. The household's own home and venues (a school,
 a music studio) may be sent as addresses.
 
+The ``ha_relay`` provider applies it when it queues a leg and again when the
+route-request poll is served (ADR 0006).
+
 Another family's home reuses the registry's existing ownership notion: the
 ``home_location_id`` of any ``CONTACT`` person (an adult from another family,
 such as Driver S), even when a household member lists the same home. An
@@ -78,12 +81,19 @@ def ha_relay_endpoint(*, has_ha_zone: bool, other_family_home: bool) -> HaRelayE
         with no zone, and ``ADDRESS`` for any other zone-less stop.
     """
     # #CRITICAL: Security: this is the only gate that keeps other families'
-    # home addresses (privacy class R) inside the app. The future ha_relay
-    # provider must call it for every leg endpoint before building a route
-    # request, and must turn WITHHELD into an unknown estimate (ROUTE-010).
-    # #VERIFY: PR 2 of the routing series tests that a zone-less other-family
-    # home never appears in a route-request payload and yields ROUTE-010, and
-    # that a stop with a zone is sent as its zone id, never as an address.
+    # home addresses (privacy class R) inside the app. The ha_relay provider
+    # applies it to every leg endpoint through
+    # ``RouteRelayRepository.location_sources``: at enqueue time (a leg with a
+    # WITHHELD endpoint is not queued, so it is unknown, ROUTE-010) and again
+    # when ``GET /api/v1/route-requests`` serves a request, against the registry
+    # as it is then, before any address is decrypted.
+    # #VERIFY: tests/unit/test_route_relay_api.py::TestAddressRelease (a
+    # zone-less other-family home never appears in a route-request payload, a
+    # registry change after enqueue stops release at GET time, a stop with a
+    # zone is sent as its zone id) and
+    # tests/unit/test_ha_relay_provider.py::TestAddressRelease and
+    # ::TestEngine::test_a_zone_less_other_family_home_is_withheld_and_the_run_incomplete
+    # (ROUTE-010 and an INCOMPLETE run through the provider and the engine).
     if has_ha_zone:
         return HaRelayEndpoint.ZONE
     if other_family_home:

@@ -173,6 +173,7 @@ nav:
       - Configuration: guides/configuration.md
       - Home Assistant School Snapshot: guides/ha-school-snapshot.md
       - Usage: guides/usage.md
+      - Home Assistant route relay: guides/ha-route-relay.md
 
   - Operations:
       - Runbook: runbook.md

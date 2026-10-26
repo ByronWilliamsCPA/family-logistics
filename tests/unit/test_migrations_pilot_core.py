@@ -45,7 +45,13 @@ PILOT_TABLES = {
     "transport_default",
     "vehicle",
 }
-LATER_TABLES = {"trip_snapshot", "school_day", "school_snapshot"}
+LATER_TABLES = {
+    "trip_snapshot",
+    "school_day",
+    "school_snapshot",
+    "route_cache",
+    "route_request",
+}
 """Tables added by revisions after 0002 (0003 and 0004)."""
 AUDIT_TRIGGERS = {
     "audit_log_no_update",
@@ -58,6 +64,8 @@ ALIAS_TRIGGERS = {
     "trg_person_delete_alias",
     "trg_location_delete_alias",
 }
+# Migration-only trigger that drops a changed location's route relay rows (0005).
+LATER_TRIGGERS = {"trg_location_route_relay_invalidate"}
 NOW = datetime(2026, 10, 21, 18, 0, tzinfo=UTC)
 LATER = NOW + timedelta(hours=1)
 EARLIER = NOW - timedelta(minutes=1)
@@ -545,7 +553,10 @@ class TestPilotCoreMigration:
             assert row_count(engine, name) >= 1, name
 
         assert row_count(engine, "alias") == 3
-        assert object_names(engine, "trigger") == AUDIT_TRIGGERS | ALIAS_TRIGGERS
+        assert (
+            object_names(engine, "trigger")
+            == AUDIT_TRIGGERS | ALIAS_TRIGGERS | LATER_TRIGGERS
+        )
 
         # Dropping a parent before its children raises "FOREIGN KEY constraint
         # failed" here because the engine enforces foreign keys.
@@ -562,14 +573,20 @@ class TestPilotCoreMigration:
 
         assert migrations_api.is_at_head(engine)
         assert table_names(engine) == PILOT_TABLES | {"audit_log"} | LATER_TABLES
-        assert object_names(engine, "trigger") == AUDIT_TRIGGERS | ALIAS_TRIGGERS
+        assert (
+            object_names(engine, "trigger")
+            == AUDIT_TRIGGERS | ALIAS_TRIGGERS | LATER_TRIGGERS
+        )
         for name in PILOT_TABLES:
             assert row_count(engine, name) == 0, name
         assert row_count(engine, "audit_log") == 1
 
     def test_alias_triggers_exist_after_upgrade_and_not_after_downgrade(self, engine):
         migrations_api.upgrade(engine)
-        assert object_names(engine, "trigger") == AUDIT_TRIGGERS | ALIAS_TRIGGERS
+        assert (
+            object_names(engine, "trigger")
+            == AUDIT_TRIGGERS | ALIAS_TRIGGERS | LATER_TRIGGERS
+        )
         with engine.connect() as connection:
             rows = connection.exec_driver_sql(
                 "SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger'"

@@ -360,6 +360,54 @@ class RegistryStore:
             return None
         return self._cipher.decrypt(token)
 
+    def _stored_tokens(self, location_id: str) -> dict[str, str | None]:
+        """Return a location's stored ciphertext columns, still encrypted."""
+        rows = _rows(
+            self._conn,
+            select(location.c.address_ciphertext, location.c.latlon_ciphertext).where(
+                location.c.location_id == location_id
+            ),
+        )
+        if not rows:
+            return {}
+        return {
+            "address_ciphertext": _opt_token(rows[0], "address_ciphertext"),
+            "latlon_ciphertext": _opt_token(rows[0], "latlon_ciphertext"),
+        }
+
+    def _token_for(
+        self,
+        stored: str | None,
+        value: SensitiveStr | None,
+        field_name: str,
+    ) -> str | None:
+        """Return the token to store, keeping the stored one when it still fits.
+
+        Fernet encrypts the same plaintext differently every time. Re-encrypting
+        an unchanged address on every upsert would change the column, and the
+        route relay's invalidation trigger (migration 0005) treats a changed
+        column as an edit, so re-applying an unchanged seed would flush the
+        route cache. A stored token that decrypts to ``value`` is therefore kept.
+
+        Args:
+            stored: The ciphertext already in the row, if any.
+            value: The plaintext to store.
+            field_name: Field name for the error when no cipher is available.
+
+        Returns:
+            The stored token when it decrypts to ``value``, otherwise a fresh
+            encryption; None when ``value`` is None.
+        """
+        if value is None:
+            return None
+        if stored is not None and self._cipher is not None:
+            try:
+                if self._cipher.decrypt(stored) == value:
+                    return stored
+            except ProtectedDataError:
+                pass  # An undecryptable token is replaced, as before.
+        return self._encrypt(value, field_name)
+
     def upsert_location(self, item: Location) -> None:
         """Insert or update a location and its aliases.
 
@@ -369,12 +417,17 @@ class RegistryStore:
         Args:
             item: The location; protected fields are encrypted before storage.
         """
+        stored = self._stored_tokens(item.location_id)
         values = {
             "location_id": item.location_id,
             "name": item.name,
             "ha_zone_entity_id": item.ha_zone_entity_id,
-            "address_ciphertext": self._encrypt(item.address, "address"),
-            "latlon_ciphertext": self._encrypt(item.coordinates, "coordinates"),
+            "address_ciphertext": self._token_for(
+                stored.get("address_ciphertext"), item.address, "address"
+            ),
+            "latlon_ciphertext": self._token_for(
+                stored.get("latlon_ciphertext"), item.coordinates, "coordinates"
+            ),
             "verification_state": VERIFIED if item.verified else UNVERIFIED,
         }
         stmt = sqlite_insert(location).values(values)
