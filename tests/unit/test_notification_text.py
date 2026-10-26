@@ -206,19 +206,23 @@ class TestTemplates:
         assert rendered.title == (
             "[shadow] [CRITICAL] Urgent ride check: needs attention"
         )
+        item = (
+            f"- [CRITICAL] A ride check needs attention, at {FRIDAY_LOCAL}. "
+            f"Rule {rule_id}, ref {found.issue_id}."
+        )
         assert rendered.body.splitlines() == [
             "SHADOW: production would send this to fl-urgent (bypasses quiet hours).",
-            f"- [CRITICAL] A ride check needs attention, at {FRIDAY_LOCAL}. "
-            f"Rule {rule_id}, ref {found.issue_id}.",
+            item,
         ]
 
     def test_the_fallback_prints_a_rule_id_only_if_it_is_in_the_catalog(self):
         bogus = Finding("ZZZ-999 CANARYRULE", Severity.WARNING, "m", ("k",))
         rendered = render_one(push(bogus, kind=PushKind.NOTICE), mode="production")
-        assert rendered.body.splitlines() == [
+        item = (
             f"- [WARNING] A ride check needs attention, at {FRIDAY_LOCAL}. "
             f"Ref {bogus.issue_id}."
-        ]
+        )
+        assert rendered.body.splitlines() == [item]
         assert "ZZZ" not in all_text(rendered)
         assert "CANARYRULE" not in all_text(rendered)
 
