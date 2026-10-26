@@ -384,9 +384,10 @@ def delivery_tag(kind: PushKind, policy: NotificationPolicy) -> str:
     return production_tag(kind, policy.tags)
 
 
-_RUN_FAILED: Final = "run-failed"
-_OPS_FAILED: Final = "ops:run_failed"
-_OPS_INCOMPLETE: Final = "ops:run_incomplete"
+ISSUE_PREFIX: Final = "issue:"
+RUN_FAILED: Final = "run-failed"
+OPS_FAILED: Final = "ops:run_failed"
+OPS_INCOMPLETE: Final = "ops:run_incomplete"
 _STATUS_TRIGGERS: Final = frozenset({"daily", "on_demand"})
 _REPORT_TRIGGERS: Final = frozenset({"weekly"})
 _KIND_ORDER: Final = {
@@ -396,7 +397,7 @@ _KIND_ORDER: Final = {
     PushKind.REPORT: 2,
     PushKind.OPS: 3,
 }
-_RUN_LEVEL_KINDS: Final = frozenset({PushKind.STATUS, PushKind.REPORT})
+RUN_LEVEL_KINDS: Final = frozenset({PushKind.STATUS, PushKind.REPORT})
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,7 +435,7 @@ def _plan_finding(tracked: TrackedFinding, ctx: _Context) -> tuple[PlannedPush, 
     )
     kind = finding_kind(finding, imminent=_finding_imminent(resolution, subject, ctx))
     pushed = PlannedPush(
-        subject_key=f"issue:{finding.issue_id}",
+        subject_key=f"{ISSUE_PREFIX}{finding.issue_id}",
         kind=kind,
         intended_tag=production_tag(kind, ctx.policy.tags),
         episode_start=tracked.lifecycle in {Lifecycle.NEW, Lifecycle.REGRESSED},
@@ -452,7 +453,7 @@ def _run_wide_push(key: str, kind: PushKind, policy: NotificationPolicy) -> Plan
         subject_key=key,
         kind=kind,
         intended_tag=production_tag(kind, policy.tags),
-        run_wide=key == _RUN_FAILED,
+        run_wide=key == RUN_FAILED,
     )
 
 
@@ -462,8 +463,8 @@ def _failed_run_pushes(
     """Return the ``run-failed`` and ``ops:run_failed`` pushes of a failed run."""
     kind = PushKind.URGENT if imminent else PushKind.NOTICE
     return (
-        _run_wide_push(_RUN_FAILED, kind, policy),
-        _run_wide_push(_OPS_FAILED, PushKind.OPS, policy),
+        _run_wide_push(RUN_FAILED, kind, policy),
+        _run_wide_push(OPS_FAILED, PushKind.OPS, policy),
     )
 
 
@@ -500,7 +501,7 @@ def _plan_failed(
         kind = finding_kind(
             tracked.finding, imminent=_finding_imminent(resolution, subject, ctx)
         )
-        key = f"issue:{tracked.finding.issue_id}"
+        key = f"{ISSUE_PREFIX}{tracked.finding.issue_id}"
         keys.add(key)
         pushes.append(
             PlannedPush(
@@ -541,7 +542,7 @@ def _run_level_pushes(
                 )
             )
     if result.run_status is RunStatus.INCOMPLETE:
-        pushes.append(_run_wide_push(_OPS_INCOMPLETE, PushKind.OPS, ctx.policy))
+        pushes.append(_run_wide_push(OPS_INCOMPLETE, PushKind.OPS, ctx.policy))
     return pushes, stale
 
 
@@ -634,17 +635,42 @@ def _owed_in_episode(push: PlannedPush, row: StateView, *, new_day: bool) -> boo
     return escalated or kind_rose or rearmed
 
 
+def starts_new_episode(push: PlannedPush, row: StateView | None, run_id: str) -> bool:
+    """Say whether sending this push starts a new episode of its subject.
+
+    This is the one definition of the rule: ``decide`` uses it to judge the
+    push and the notification state repository uses it to decide which columns
+    a claim resets, so the two cannot drift apart. A retry never starts one; a
+    missing or closed row does; a run-level push always does; an open row does
+    when a ``new`` or ``regressed`` finding comes from another run (F4).
+
+    Args:
+        push: The planned push (for a retry, the effective push).
+        row: The subject's stored row, if any.
+        run_id: The run being dispatched.
+
+    Returns:
+        True when a send (or a held push on an open row) resets the episode.
+    """
+    if push.retry_only:
+        return False
+    if row is None or push.kind in RUN_LEVEL_KINDS or not row.is_open:
+        return True
+    return push.episode_start and row.episode_run_id != run_id
+
+
 def _owed(
     push: PlannedPush, row: StateView | None, run_id: str, *, new_day: bool
 ) -> tuple[bool, bool]:
     """Return ``(owed, starts_new_episode)`` for a push against its row."""
+    new_episode = starts_new_episode(push, row, run_id)
     if push.retry_only:
         return row is not None and row.is_open and not row.delivered, False
     if row is None:
         return True, True
-    if push.kind in _RUN_LEVEL_KINDS:
+    if push.kind in RUN_LEVEL_KINDS:
         return not row.delivered, True
-    if not row.is_open or (push.episode_start and row.episode_run_id != run_id):
+    if new_episode:
         return True, True
     return _owed_in_episode(push, row, new_day=new_day), False
 
@@ -733,8 +759,13 @@ __all__ = [
     "CLAIM_LOCK_RETRIES",
     "CLAIM_TTL",
     "CLEAR_PHRASES",
+    "ISSUE_PREFIX",
     "MAX_ITEMS_PER_PUSH",
+    "OPS_FAILED",
+    "OPS_INCOMPLETE",
     "RENOTIFY_COOLDOWN",
+    "RUN_FAILED",
+    "RUN_LEVEL_KINDS",
     "SEND_DEADLINE",
     "URGENT_RETRY_DELAY",
     "Decision",
@@ -752,4 +783,5 @@ __all__ = [
     "plan_unavailable",
     "production_tag",
     "severity_rank",
+    "starts_new_episode",
 ]

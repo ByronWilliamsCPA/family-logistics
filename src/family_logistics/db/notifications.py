@@ -42,6 +42,16 @@ the claim to expire after ``CLAIM_TTL``; the next dispatch sends again
 claim in place, so the late ``complete`` marks a closed row delivered; the
 next episode resets it.
 #VERIFY: tests/unit/test_notification_state_repo.py::TestClose and TestClaim.
+
+#EDGE: Timing: a ``regressed`` push from a later run that reaches a subject
+whose earlier claim is still in flight (younger than ``CLAIM_TTL``) is
+``IN_FLIGHT`` and writes nothing. Once that send completes the row is
+delivered under the old episode, so the next scan's ``ongoing`` push is a
+``DUPLICATE`` and the regression is not sent. It needs three runs inside one
+claim TTL plus a missed dispatch, which a 60 minute scan interval makes
+improbable; incremental scans could make it possible.
+#VERIFY: PR 6 (scheduler) must keep the scan interval above ``CLAIM_TTL`` or
+revisit this; ``TestClaim`` pins the IN_FLIGHT decision itself.
 """
 
 from __future__ import annotations
@@ -63,11 +73,17 @@ from family_logistics.db.column_types import UtcDateTime
 from family_logistics.domain.models import Severity
 from family_logistics.domain.notification_policy import (
     CLAIM_LOCK_RETRIES,
+    ISSUE_PREFIX,
+    OPS_FAILED,
+    OPS_INCOMPLETE,
+    RUN_FAILED,
+    RUN_LEVEL_KINDS,
     Decision,
     PlannedPush,
     PushKind,
     StateView,
     decide,
+    starts_new_episode,
 )
 from family_logistics.utils.logging import get_logger
 
@@ -90,12 +106,6 @@ logger = get_logger(__name__)
 CLAIM_LOCK_BACKOFF_SECONDS: Final = 0.1
 """Base wait between claim attempts on a busy database; it grows per attempt."""
 
-_RUN_LEVEL_KINDS: Final = frozenset({PushKind.STATUS, PushKind.REPORT})
-_ISSUE_PREFIX: Final = "issue:"
-_RUN_FAILED: Final = "run-failed"
-_OPS_FAILED: Final = "ops:run_failed"
-_OPS_INCOMPLETE: Final = "ops:run_incomplete"
-
 _table = schema.notification_state
 _watermark = schema.notification_watermark
 _WATERMARK_ID: Final = 1
@@ -104,8 +114,8 @@ _WATERMARK_ID: Final = 1
 class NotificationStateBusyError(DatabaseError):
     """Another writer held the write lock past the lock timeout.
 
-    Nothing was written. ``claim`` retries it up to ``CLAIM_LOCK_RETRIES``
-    times before letting it propagate.
+    Nothing was written. ``claim``, ``complete`` and ``release`` retry it up to
+    ``CLAIM_LOCK_RETRIES`` times before letting it propagate.
     """
 
 
@@ -237,32 +247,6 @@ def _stored(row: Row[tuple[object, ...]]) -> _Stored:
     )
 
 
-def _starts_new_episode(push: PlannedPush, view: StateView | None, run_id: str) -> bool:
-    """Say whether sending this push starts a new episode of its subject.
-
-    This mirrors the second value of ``notification_policy._owed``: a retry
-    never does; a missing or closed row does; a run-level push always does; an
-    open row does when a ``new`` or ``regressed`` finding comes from another
-    run (F4).
-
-    Args:
-        push: The effective planned push.
-        view: The subject's stored row, if any.
-        run_id: The run being dispatched.
-
-    Returns:
-        True when a send (or a held push) resets the episode.
-    """
-    # #ASSUME: Data integrity: this stays equal to the policy's rule; the
-    # claim and the policy disagreeing would reset or keep the wrong fields.
-    # #VERIFY: tests/unit/test_notification_state_repo.py::TestNewEpisodes.
-    if push.retry_only:
-        return False
-    if view is None or push.kind in _RUN_LEVEL_KINDS or not view.is_open:
-        return True
-    return push.episode_start and view.episode_run_id != run_id
-
-
 def _episode_reset(push: PlannedPush, run_id: str) -> dict[str, object]:
     """Return the column values that start a fresh episode (D9)."""
     return {
@@ -270,7 +254,7 @@ def _episode_reset(push: PlannedPush, run_id: str) -> dict[str, object]:
         "tag": push.intended_tag,
         "rule_id": push.rule_id,
         "severity": None,
-        "is_open": push.kind not in _RUN_LEVEL_KINDS,
+        "is_open": push.kind not in RUN_LEVEL_KINDS,
         "delivered": False,
         "bypass_used": False,
         "send_count": 0,
@@ -281,7 +265,7 @@ def _episode_reset(push: PlannedPush, run_id: str) -> dict[str, object]:
 def _is_late_status(push: PlannedPush, ctx: _ClaimContext) -> bool:
     """Say whether a status or report is older than one scan interval (F2)."""
     return (
-        push.kind in _RUN_LEVEL_KINDS
+        push.kind in RUN_LEVEL_KINDS
         and ctx.now - ctx.evaluated_at > ctx.policy.status_max_age
     )
 
@@ -367,10 +351,29 @@ class NotificationStateRepository:
         _require_aware("now", now)
         _require_aware("evaluated_at", evaluated_at)
         ctx = _ClaimContext(mode, token, run_id, evaluated_at, now, quiet, policy)
+        return self._retrying(lambda: self._claim_once(plan, ctx))
+
+    def _retrying[T](self, operation: Callable[[], T]) -> T:
+        """Run one write transaction, retrying while the database is busy.
+
+        A busy error only ever comes from ``BEGIN IMMEDIATE``, before anything
+        is written, so repeating the whole operation is safe. Only lock
+        contention is retried; any other fault propagates at once.
+
+        Args:
+            operation: One complete write transaction.
+
+        Returns:
+            Whatever ``operation`` returns.
+
+        Raises:
+            NotificationStateBusyError: The database stayed busy through
+                ``CLAIM_LOCK_RETRIES`` retries.
+        """
         attempt = 0
         while True:
             try:
-                return self._claim_once(plan, ctx)
+                return operation()
             except NotificationStateBusyError:
                 attempt += 1
                 if attempt > CLAIM_LOCK_RETRIES:
@@ -475,7 +478,7 @@ class NotificationStateRepository:
             quiet=ctx.quiet,
             policy=ctx.policy,
         )
-        new_episode = _starts_new_episode(effective, view, ctx.run_id)
+        new_episode = starts_new_episode(effective, view, ctx.run_id)
         if decision is Decision.SEND:
             self._write_claim(connection, effective, row, ctx)
         elif (
@@ -515,7 +518,7 @@ class NotificationStateRepository:
             )
             return
         values = dict(claim)
-        if _starts_new_episode(push, row.view(), ctx.run_id):
+        if starts_new_episode(push, row.view(), ctx.run_id):
             values |= _episode_reset(push, ctx.run_id)
         elif not row.delivered and not push.retry_only:
             # Undelivered: the kind is only "planned". A delivered row keeps
@@ -550,15 +553,15 @@ class NotificationStateRepository:
         ``ops:run_incomplete`` unless this run is incomplete. ``last_sent_at``
         is kept for the notice cooldown.
         """
-        is_issue = func.substr(_table.c.subject_key, 1, len(_ISSUE_PREFIX)) == (
-            _ISSUE_PREFIX
+        is_issue = func.substr(_table.c.subject_key, 1, len(ISSUE_PREFIX)) == (
+            ISSUE_PREFIX
         )
         ended = [
             and_(is_issue, _table.c.subject_key.not_in(sorted(plan.open_issue_keys))),
-            _table.c.subject_key.in_([_RUN_FAILED, _OPS_FAILED]),
+            _table.c.subject_key.in_([RUN_FAILED, OPS_FAILED]),
         ]
         if not plan.incomplete:
-            ended.append(_table.c.subject_key == _OPS_INCOMPLETE)
+            ended.append(_table.c.subject_key == OPS_INCOMPLETE)
         connection.execute(
             update(_table)
             .where(_table.c.mode == ctx.mode, _table.c.is_open.is_(True), or_(*ended))
@@ -602,29 +605,51 @@ class NotificationStateRepository:
                 the episode's bypass).
 
         Note:
-            A write lock that stays held raises ``NotificationStateBusyError``
-            and a naive ``now`` raises ``ValidationError``; nothing is written
-            in either case.
+            A busy database is retried like ``claim``; a lock that stays held
+            through every retry raises ``NotificationStateBusyError``, and a
+            naive ``now`` raises ``ValidationError``. Nothing is written in
+            either case.
         """
         _require_aware("now", now)
+        writes = [
+            (push.subject_key, self._outcome_values(push, now, delivered, quiet))
+            for push in pushes
+        ]
+        self._retrying(
+            lambda: self._complete_once(writes, mode=mode, token=token, now=now)
+        )
+
+    def _complete_once(
+        self,
+        writes: Sequence[tuple[str, dict[str, object]]],
+        *,
+        mode: str,
+        token: str,
+        now: datetime,
+    ) -> None:
+        """Run the completion transaction once, one update per ``(key, values)``."""
         with self._transaction() as connection:
-            for push in pushes:
-                values = (
-                    self._delivered_values(push, now, quiet=quiet)
-                    if delivered
-                    else {
-                        "failed_attempts": _table.c.failed_attempts + 1,
-                        "last_attempt_at": now,
-                    }
-                )
+            for subject_key, values in writes:
                 connection.execute(
                     update(_table)
                     .where(
-                        _key_mode(push.subject_key, mode),
+                        _key_mode(subject_key, mode),
                         _table.c.claim_token == token,
                     )
                     .values(claim_token=None, claimed_at=None, updated_at=now, **values)
                 )
+
+    @classmethod
+    def _outcome_values(
+        cls, push: PlannedPush, now: datetime, delivered: bool, quiet: bool
+    ) -> dict[str, object]:
+        """Return the column values of one send's outcome."""
+        if delivered:
+            return cls._delivered_values(push, now, quiet=quiet)
+        return {
+            "failed_attempts": _table.c.failed_attempts + 1,
+            "last_attempt_at": now,
+        }
 
     @staticmethod
     def _delivered_values(
@@ -660,10 +685,19 @@ class NotificationStateRepository:
             mode: ``shadow`` or ``production``.
             token: This dispatch's claim token.
 
+        ``updated_at`` is not touched: a release is not a change of state.
+
         Note:
-            A write lock that stays held raises ``NotificationStateBusyError``
-            and nothing is released.
+            A busy database is retried like ``claim``; a lock that stays held
+            through every retry raises ``NotificationStateBusyError`` and
+            nothing is released.
         """
+        self._retrying(lambda: self._release_once(pushes, mode=mode, token=token))
+
+    def _release_once(
+        self, pushes: Sequence[PlannedPush], *, mode: str, token: str
+    ) -> None:
+        """Run the release transaction once."""
         with self._transaction() as connection:
             for push in pushes:
                 connection.execute(

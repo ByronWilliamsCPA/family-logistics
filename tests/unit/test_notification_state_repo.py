@@ -273,6 +273,21 @@ class TestClaim:
                 policy=policy(),
             )
 
+    def test_a_naive_outcome_time_is_refused(self, repo):
+        naive = T0.replace(tzinfo=None)
+        plan = make_plan(push())
+        with pytest.raises(ValidationError, match="timezone-aware"):
+            repo.claim(
+                plan,
+                mode="shadow",
+                token="t",
+                run_id="run-1",
+                evaluated_at=naive,
+                now=T0,
+                quiet=False,
+                policy=policy(),
+            )
+
 
 class TestEscalationAndRetry:
     def test_an_escalation_keeps_the_delivered_kind_until_completion(
@@ -456,6 +471,42 @@ class TestHeldPushes:
             NIGHT,
         )
         assert (row.claim_token, row.claimed_at) == (None, None)
+
+    def test_a_held_ops_push_on_an_open_row_of_another_run_records_nothing(
+        self, repo, engine
+    ):
+        put_row(
+            engine,
+            **delivered_row(
+                subject_key=OPS_FAILED,
+                kind="ops",
+                tag="fl-ops",
+                rule_id=None,
+                severity=None,
+            ),
+        )
+        before = get_row(engine, OPS_FAILED)
+        result = claim(
+            repo,
+            push(OPS_FAILED, PushKind.OPS),
+            run_id="run-2",
+            evaluated_at=NIGHT,
+            quiet=True,
+            now=NIGHT,
+            completed=False,
+        )
+        assert decisions(result) == [Decision.DUPLICATE]
+        assert get_row(engine, OPS_FAILED) == before
+
+    def test_the_same_run_redispatched_at_night_writes_nothing(self, repo, engine):
+        put_row(engine, **delivered_row())
+        claim(repo, push(episode_start=True), run_id="run-2", quiet=True, now=NIGHT)
+        after_first = get_row(engine)
+        result = claim(
+            repo, push(episode_start=True), run_id="run-2", quiet=True, now=NIGHT
+        )
+        assert decisions(result) == [Decision.QUIET_HOURS]
+        assert get_row(engine) == after_first
 
     def test_the_held_reopen_is_sent_by_the_next_scan(self, repo, engine):
         put_row(engine, **delivered_row())
@@ -881,6 +932,89 @@ class TestLockRetries:
         finally:
             event.remove(engine, "before_cursor_execute", fail)
         assert sleeps == []
+
+    def test_complete_retries_a_lock_released_within_the_retries(self, engine):
+        sleeps: list[float] = []
+        claimer = NotificationStateRepository(engine, sleep=lambda _s: None)
+        claim(claimer, push(episode_start=True))
+        with self.held_write_lock(engine) as holder:
+
+            def release_then_record(seconds: float) -> None:
+                sleeps.append(seconds)
+                if holder.in_transaction:
+                    holder.execute("ROLLBACK")
+
+            repo = NotificationStateRepository(
+                engine, lock_timeout_ms=20, sleep=release_then_record
+            )
+            repo.complete(
+                [push()],
+                mode="shadow",
+                token="tok-a",
+                delivered=True,
+                now=T0,
+                quiet=False,
+            )
+        assert len(sleeps) == 1
+        row = get_row(engine)
+        assert (row.delivered, row.claim_token) == (True, None)
+
+    def test_release_retries_a_lock_released_within_the_retries(self, engine):
+        sleeps: list[float] = []
+        claimer = NotificationStateRepository(engine, sleep=lambda _s: None)
+        claim(claimer, push(episode_start=True))
+        with self.held_write_lock(engine) as holder:
+
+            def release_then_record(seconds: float) -> None:
+                sleeps.append(seconds)
+                if holder.in_transaction:
+                    holder.execute("ROLLBACK")
+
+            repo = NotificationStateRepository(
+                engine, lock_timeout_ms=20, sleep=release_then_record
+            )
+            repo.release([push()], mode="shadow", token="tok-a")
+        assert len(sleeps) == 1
+        assert get_row(engine).claim_token is None
+
+    def test_a_non_lock_fault_in_complete_is_not_retried(self, engine):
+        sleeps: list[float] = []
+        claimer = NotificationStateRepository(engine, sleep=lambda _s: None)
+        claim(claimer, push(episode_start=True))
+        repo = NotificationStateRepository(engine, sleep=sleeps.append)
+
+        def fail(_conn, _cursor, statement, parameters, _context, _executemany):
+            if statement == "BEGIN IMMEDIATE":
+                orig = sqlite3.OperationalError("simulated")
+                orig.sqlite_errorcode = sqlite3.SQLITE_READONLY
+                raise OperationalError(statement, parameters, orig)
+
+        event.listen(engine, "before_cursor_execute", fail)
+        try:
+            with pytest.raises(OperationalError):
+                repo.complete(
+                    [push()],
+                    mode="shadow",
+                    token="tok-a",
+                    delivered=True,
+                    now=T0,
+                    quiet=False,
+                )
+        finally:
+            event.remove(engine, "before_cursor_execute", fail)
+        assert sleeps == []
+
+    def test_complete_refuses_a_naive_clock(self, repo):
+        claim(repo, push(episode_start=True))
+        with pytest.raises(ValidationError, match="timezone-aware"):
+            repo.complete(
+                [push()],
+                mode="shadow",
+                token="tok-a",
+                delivered=True,
+                now=T0.replace(tzinfo=None),
+                quiet=False,
+            )
 
     def test_complete_reports_busy_when_the_lock_stays_held(self, engine):
         repo = NotificationStateRepository(
