@@ -6,8 +6,10 @@ cannot forget authentication. Failed attempts are throttled per client address
 and every authentication failure returns the same 401.
 
 ``POST /api/v1/ingest/ha-snapshot`` (the school snapshot, ADR 0007) is the
-first business route. Later milestones add the others to this router: M3 adds
-the route relay, GET /api/v1/route-requests and POST /api/v1/route-results
+first business route. Once the body is read, its errors are built by hand
+(``_error``) rather than raised as ``HTTPException``, so no body can echo the
+rejected input: the snapshot is children's school data. Later milestones add
+the others to this router: M3 adds the route relay, GET /api/v1/route-requests and POST /api/v1/route-results
 (ADR 0006); M4 adds GET /api/v1/status, POST /api/v1/assessments and
 GET /api/v1/assessments/{run_id}. They inherit the dependency and must not be
 registered on any other router.
@@ -16,17 +18,20 @@ registered on any other router.
 from __future__ import annotations
 
 import hmac
+import json
 import math
 import re
 import threading
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.concurrency import run_in_threadpool
 
 from family_logistics.adapters.home_assistant.schemas import (
@@ -34,16 +39,22 @@ from family_logistics.adapters.home_assistant.schemas import (
     HaSnapshotPayload,
     safe_error_locations,
 )
-from family_logistics.core.exceptions import ConfigurationError, ValidationError
+from family_logistics.adapters.home_assistant.school_days import SnapshotMappingError
+from family_logistics.core.exceptions import (
+    ConfigurationError,
+    DatabaseError,
+    ValidationError,
+)
 from family_logistics.db.school_snapshots import (
     SchoolSnapshotBusyError,
     SchoolSnapshotConflictError,
 )
 from family_logistics.middleware.correlation import get_correlation_id
+from family_logistics.services.school_snapshot import IngestRejectedError
 from family_logistics.utils.logging import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from pydantic import SecretStr
 
@@ -450,8 +461,106 @@ class _BodyTooLargeError(Exception):
     """The request body exceeds ``MAX_SNAPSHOT_BYTES``."""
 
 
+class _DuplicateKeyError(ValueError):
+    """A JSON object repeats a key; the message never names the key."""
+
+
 INVALID_SNAPSHOT = "Invalid snapshot"
 """``detail`` of every 422 from the snapshot ingest."""
+
+DUPLICATE_JSON_KEY = "DUPLICATE_JSON_KEY"
+"""Code of the 422 for a JSON object that repeats a key at any depth."""
+
+_PUBLIC_VALIDATION_CODES = frozenset({"INVALID_TIME"})
+"""Codes of a plain ``ValidationError`` from the store that mean bad input.
+
+Any other plain ``ValidationError`` beneath the ingest (an audit field outside
+its column, a repeated person and day the mapper should have prevented) is a
+server-side fault, not a client error."""
+
+
+class ErrorLocation(BaseModel):
+    """One redacted validation location (never an input value).
+
+    Attributes:
+        loc: Schema field names and list indexes; any other part is ``"*"``.
+        type: Pydantic error type.
+    """
+
+    loc: list[str | int]
+    type: str
+
+
+class ErrorBody(BaseModel):
+    """Body of every non-200 answer from the snapshot ingest.
+
+    Attributes:
+        detail: Fixed, payload-free sentence.
+        code: Machine-readable reason, when there is one.
+        errors: Redacted validation locations, for a schema rejection.
+    """
+
+    detail: str
+    code: str | None = None
+    errors: list[ErrorLocation] | None = None
+
+
+class IngestAckBody(BaseModel):
+    """Body of a 200 from the snapshot ingest (counts and freshness only).
+
+    Attributes:
+        status: ``stored``, or ``unchanged`` for an identical re-post.
+        schools: Configured schools covered by the snapshot.
+        days: School-day rows in the stored snapshot.
+        schools_without_days: ``location_id`` of each configured school that
+            got no day rows (reported as uncertain, never blocking), in
+            configuration order.
+        fetched_at: Stored freshness, ISO 8601 with a UTC offset.
+        received_at: Server time the stored snapshot arrived, ISO 8601.
+    """
+
+    status: Literal["stored", "unchanged"]
+    schools: int
+    days: int
+    schools_without_days: list[str]
+    fetched_at: str
+    received_at: str
+
+
+def _error(
+    status_code: int, body: ErrorBody, headers: dict[str, str] | None = None
+) -> JSONResponse:
+    """Build an error answer that carries no payload text.
+
+    Args:
+        status_code: HTTP status.
+        body: The fixed, payload-free body.
+        headers: Extra response headers, if any.
+
+    Returns:
+        The response.
+    """
+    return JSONResponse(
+        status_code=status_code,
+        content=body.model_dump(mode="json", exclude_none=True),
+        headers=headers,
+    )
+
+
+def _plain(
+    status_code: int, detail: str, headers: dict[str, str] | None = None
+) -> JSONResponse:
+    """Build an error answer that has only a ``detail`` sentence.
+
+    Args:
+        status_code: HTTP status.
+        detail: Fixed sentence for the client.
+        headers: Extra response headers, if any.
+
+    Returns:
+        The response.
+    """
+    return _error(status_code, ErrorBody(detail=detail), headers)
 
 
 async def _read_bounded_body(request: Request, limit: int) -> bytes:
@@ -471,21 +580,25 @@ async def _read_bounded_body(request: Request, limit: int) -> bytes:
     # #CRITICAL: security: the size limit is enforced before any parsing, on
     # the declared length and again on the bytes actually streamed, so a
     # chunked or lying client cannot make the app buffer more than ``limit``.
+    # A chunk is counted before it is kept, so the buffer never exceeds it.
     # The route reads the body itself (no FastAPI body parameter), so the
     # router-level token check runs before a single body byte is read.
     # #VERIFY: tests/unit/test_ha_snapshot_route.py::TestSize and
-    # TestAuthentication.test_authentication_comes_before_the_size_limit.
+    # TestAuthentication.
     declared = request.headers.get("content-length")
     if declared is not None:
         if not (declared.isascii() and declared.isdigit()):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Bad Request")
-        if int(declared) > limit:
+        # Digits are bounded before int(): a header of thousands of digits
+        # would exceed Python's int conversion limit and raise ValueError.
+        digits = declared.lstrip("0")
+        if len(digits) > len(str(limit)) or int(digits or "0") > limit:
             raise _BodyTooLargeError
     body = bytearray()
     async for chunk in request.stream():
-        body.extend(chunk)
-        if len(body) > limit:
+        if len(body) + len(chunk) > limit:
             raise _BodyTooLargeError
+        body.extend(chunk)
     return bytes(body)
 
 
@@ -514,14 +627,10 @@ def _invalid(
     Returns:
         The response.
     """
-    content: dict[str, object] = {"detail": INVALID_SNAPSHOT}
-    if code is not None:
-        content["code"] = code
-    if errors is not None:
-        content["errors"] = errors
-    return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, content=content
+    body = ErrorBody.model_validate(
+        {"detail": INVALID_SNAPSHOT, "code": code, "errors": errors}
     )
+    return _error(status.HTTP_422_UNPROCESSABLE_CONTENT, body)
 
 
 def _unavailable(reason: str | None = None) -> JSONResponse:
@@ -531,13 +640,185 @@ def _unavailable(reason: str | None = None) -> JSONResponse:
         reason: Error code for the operator log; None when no service exists.
 
     Returns:
-        The response; its body names no configuration value.
+        The response; its body names no configuration value and, unlike the
+        busy 503, carries no ``Retry-After``.
     """
     logger.error("ha_snapshot.unavailable", reason=reason or "NOT_WIRED")
-    return JSONResponse(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        content={"detail": "School snapshot ingest is not available"},
+    return _plain(
+        status.HTTP_503_SERVICE_UNAVAILABLE, "School snapshot ingest is not available"
     )
+
+
+def _store_failed(exc: BaseException) -> JSONResponse:
+    """Build the 500 for a storage or internal fault, logging only its class.
+
+    Args:
+        exc: The fault. Its message is never logged or returned: a database
+            error carries statement text and an internal one may carry input.
+
+    Returns:
+        A fixed, payload-free 500 with no ``Retry-After``.
+    """
+    driver_error = cast("BaseException | None", getattr(exc, "orig", None))
+    logger.error(
+        "ha_snapshot.failed",
+        error_class=type(exc).__name__,
+        driver_class=type(driver_error).__name__ if driver_error else None,
+        sqlite_errorcode=getattr(driver_error, "sqlite_errorcode", None),
+        reason=getattr(exc, "error_code", None),
+    )
+    return _plain(
+        status.HTTP_500_INTERNAL_SERVER_ERROR, "School snapshot ingest failed"
+    )
+
+
+def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Build a JSON object, refusing a key that appears twice.
+
+    ``json.loads`` keeps only the last of two equal keys, so a repeated
+    ``events`` list or calendar entity would silently drop the earlier one.
+
+    Args:
+        pairs: The key and value pairs of one JSON object, in document order.
+
+    Returns:
+        The object as a dict.
+
+    Raises:
+        _DuplicateKeyError: If a key repeats. The message never names it.
+    """
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            msg = "a JSON object repeats a key"
+            raise _DuplicateKeyError(msg)
+        result[key] = value
+    return result
+
+
+def _parse_snapshot(body: bytes) -> HaSnapshotPayload:
+    """Parse a snapshot body, refusing a repeated JSON key at any depth.
+
+    Args:
+        body: The raw request body, already size-checked.
+
+    Returns:
+        The validated payload. A repeated key raises ``_DuplicateKeyError``;
+        a body that is not JSON (invalid UTF-8, a number beyond Python's int
+        conversion limit) raises ``ValueError``, and one nested past the parser
+        limit ``RecursionError``; a schema mismatch raises pydantic's
+        ``ValidationError``.
+    """
+    # #CRITICAL: data integrity: the schema cannot see duplicate keys (the last
+    # one wins), so a repeated key would silently drop an earlier calendar or
+    # event list from a snapshot that then reads as a complete one.
+    # #VERIFY: TestDuplicateKeys in tests/unit/test_ha_snapshot_route.py.
+    document = cast(
+        "object",
+        json.loads(body.decode("utf-8"), object_pairs_hook=_no_duplicate_keys),
+    )
+    return HaSnapshotPayload.model_validate(document)
+
+
+def _parse_or_reject(body: bytes) -> HaSnapshotPayload | JSONResponse:
+    """Parse a snapshot body, or build the 422 that refuses it.
+
+    Args:
+        body: The raw request body, already size-checked.
+
+    Returns:
+        The validated payload, or the 422 response (no payload text in it).
+    """
+    try:
+        return _parse_snapshot(body)
+    except _DuplicateKeyError:
+        logger.warning("ha_snapshot.rejected", reason="duplicate_key")
+        return _invalid(code=DUPLICATE_JSON_KEY)
+    except PydanticValidationError as exc:
+        errors = safe_error_locations(exc)
+        logger.warning("ha_snapshot.rejected", reason="schema", errors=len(errors))
+        return _invalid(errors=errors)
+    except (ValueError, RecursionError):
+        logger.warning("ha_snapshot.rejected", reason="json_invalid")
+        return _invalid(errors=[{"loc": [], "type": "json_invalid"}])
+
+
+def _fault_response(exc: Exception) -> JSONResponse:
+    """Map an ingest fault other than conflict and busy to a response.
+
+    Args:
+        exc: A project validation or configuration error, or a database error.
+
+    Returns:
+        422 for bad input (a closed set of codes), 503 for a configuration
+        fault, otherwise a 500. A database fault is a 500 without
+        ``Retry-After``: only genuine lock contention is
+        ``SchoolSnapshotBusyError`` (the store narrows it), so no other fault
+        is ever reported as busy.
+    """
+    if isinstance(exc, ConfigurationError):
+        return _unavailable(exc.error_code)
+    if isinstance(exc, ValidationError) and (
+        isinstance(exc, IngestRejectedError | SnapshotMappingError)
+        or exc.error_code in _PUBLIC_VALIDATION_CODES
+    ):
+        logger.warning("ha_snapshot.rejected", reason=exc.error_code)
+        return _invalid(code=exc.error_code)
+    return _store_failed(exc)
+
+
+def _store_snapshot(
+    service: SchoolSnapshotIngest,
+    snapshot: HaSnapshotPayload,
+    correlation_id: str | None,
+) -> JSONResponse:
+    """Store a validated snapshot and map every outcome to a response.
+
+    Args:
+        service: The ingest service.
+        snapshot: The validated payload.
+        correlation_id: Request correlation ID for the audit row.
+
+    Returns:
+        200 with the acknowledgement, or the 409, 422, 500 or 503 for the
+        fault (``Retry-After`` only for genuine lock contention).
+    """
+    try:
+        ack = service.ingest(snapshot, correlation_id=correlation_id)
+    except SchoolSnapshotConflictError:
+        logger.warning("ha_snapshot.rejected", reason="older_than_stored")
+        return _plain(
+            status.HTTP_409_CONFLICT, "The snapshot is not newer than the stored one"
+        )
+    except SchoolSnapshotBusyError as exc:
+        # #ASSUME: timing: the write lock is held briefly (another ingest, a
+        # purge or a migration). Home Assistant pushes on its automation
+        # schedule, so its next push retries; Retry-After is advisory for a
+        # client that honours it. Nothing was stored and no audit row written.
+        # #VERIFY: TestBusy in tests/unit/test_ha_snapshot_route.py.
+        logger.warning("ha_snapshot.rejected", reason=exc.error_code)
+        return _plain(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "School snapshot store is busy",
+            headers={"Retry-After": str(exc.retry_after)},
+        )
+    except (
+        ValidationError,
+        ConfigurationError,
+        DatabaseError,
+        SQLAlchemyError,
+    ) as exc:
+        return _fault_response(exc)
+    logger.info(
+        "ha_snapshot.ingested",
+        status=ack.status.value,
+        schools=ack.schools,
+        days=ack.days,
+        schools_without_days=list(ack.schools_without_days),
+        fetched_at=ack.fetched_at.isoformat(),
+    )
+    content = ack.as_dict() | {"schools_without_days": list(ack.schools_without_days)}
+    return JSONResponse(content=content)
 
 
 def _ingest_snapshot(
@@ -551,53 +832,103 @@ def _ingest_snapshot(
         correlation_id: Request correlation ID for the audit row.
 
     Returns:
-        The response: 200 with the acknowledgement, 409, 422 or 503 (with
-        ``Retry-After`` while another writer holds the database).
+        The response: 200 with the acknowledgement, 409, 422, 500 (a storage
+        or internal fault, never reported as busy) or 503 (with
+        ``Retry-After`` only while another writer holds the database).
     """
     # #CRITICAL: security: neither a response nor a log line may echo the
     # payload (children's school calendars, calendar entity IDs). Errors are
-    # reduced to codes and redacted locations; logs carry only the reason.
-    # #VERIFY: tests/unit/test_ha_snapshot_route.py::TestMalformed and
-    # TestUnknownReferences assert a marker string never reaches the
-    # response or caplog.
-    try:
-        snapshot = HaSnapshotPayload.model_validate_json(body)
-    except PydanticValidationError as exc:
-        errors = safe_error_locations(exc)
-        logger.warning("ha_snapshot.rejected", reason="schema", errors=len(errors))
-        return _invalid(errors=errors)
-    try:
-        ack = service.ingest(snapshot, correlation_id=correlation_id)
-    except SchoolSnapshotConflictError:
-        logger.warning("ha_snapshot.rejected", reason="older_than_stored")
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content={"detail": "A newer school snapshot is already stored"},
-        )
-    except SchoolSnapshotBusyError as exc:
-        # #ASSUME: timing: the write lock is held briefly (another ingest, a
-        # purge or a migration); Home Assistant retries on its next poll or
-        # after Retry-After. Nothing was stored and no audit row was written.
-        # #VERIFY: TestBusy in tests/unit/test_ha_snapshot_route.py.
-        logger.warning("ha_snapshot.rejected", reason=exc.error_code)
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"detail": "School snapshot store is busy"},
-            headers={"Retry-After": str(exc.retry_after)},
-        )
-    except ValidationError as exc:
-        logger.warning("ha_snapshot.rejected", reason=exc.error_code)
-        return _invalid(code=exc.error_code)
-    except ConfigurationError as exc:
-        return _unavailable(exc.error_code)
-    logger.info(
-        "ha_snapshot.ingested",
-        status=ack.status.value,
-        schools=ack.schools,
-        days=ack.days,
-        fetched_at=ack.fetched_at.isoformat(),
-    )
-    return JSONResponse(content=ack.as_dict())
+    # reduced to codes and redacted locations; logs carry only the reason and
+    # exception class names, never an exception message.
+    # #VERIFY: tests/unit/test_ha_snapshot_route.py::TestMalformed,
+    # TestUnknownReferences and TestStorageFaults assert a marker string never
+    # reaches the response or caplog.
+    parsed = _parse_or_reject(body)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+    return _store_snapshot(service, parsed, correlation_id)
+
+
+def _inline_refs(schema: object, definitions: Mapping[str, object]) -> object:
+    """Resolve every ``$ref`` into ``definitions`` so a schema stands alone.
+
+    Args:
+        schema: A JSON Schema fragment.
+        definitions: The ``$defs`` of the document it came from.
+
+    Returns:
+        The fragment with each ``#/$defs/<name>`` reference replaced by its
+        definition. The models used here are not recursive.
+    """
+    if isinstance(schema, dict):
+        fragment = cast("dict[str, object]", schema)
+        ref = fragment.get("$ref")
+        if isinstance(ref, str):
+            return _inline_refs(definitions[ref.rsplit("/", 1)[-1]], definitions)
+        return {
+            key: _inline_refs(value, definitions)
+            for key, value in fragment.items()
+            if key != "$defs"
+        }
+    if isinstance(schema, list):
+        return [
+            _inline_refs(item, definitions) for item in cast("list[object]", schema)
+        ]
+    return schema
+
+
+def _request_body_schema() -> dict[str, object]:
+    """Describe the JSON body for OpenAPI without making FastAPI parse it.
+
+    Returns:
+        An OpenAPI ``requestBody`` object for ``openapi_extra``. The route
+        keeps reading the body itself so the size limit and the duplicate key
+        check run before any parsing.
+    """
+    schema = cast("dict[str, object]", HaSnapshotPayload.model_json_schema())
+    definitions = cast("Mapping[str, object]", schema.get("$defs", {}))
+    return {
+        "required": True,
+        "content": {"application/json": {"schema": _inline_refs(schema, definitions)}},
+    }
+
+
+def _error_response(description: str, **extra: object) -> dict[str, object]:
+    """Build one ``responses=`` entry for an :class:`ErrorBody` answer.
+
+    Args:
+        description: What the status means for this route.
+        **extra: Further OpenAPI response keys, such as ``headers``.
+
+    Returns:
+        The entry.
+    """
+    return {"model": ErrorBody, "description": description, **extra}
+
+
+_RESPONSES: dict[int | str, dict[str, object]] = {
+    200: {
+        "model": IngestAckBody,
+        "description": "Stored, or unchanged for an identical re-post.",
+    },
+    400: _error_response("Malformed Content-Length header."),
+    401: _error_response("Missing or wrong bearer token (router dependency)."),
+    409: _error_response("Not newer than the stored snapshot (equal freshness too)."),
+    413: _error_response("Body larger than the size limit."),
+    415: _error_response("Content-Type is not application/json."),
+    422: _error_response("Invalid snapshot: schema, repeated key, bad reference."),
+    429: _error_response("Too many failed authentications (router dependency)."),
+    500: _error_response("Storage or internal fault; not retryable as busy."),
+    503: _error_response(
+        "Not available as configured, or the store is busy (Retry-After then).",
+        headers={
+            "Retry-After": {
+                "description": "Seconds to wait; present only when the store is busy.",
+                "schema": {"type": "integer"},
+            }
+        },
+    ),
+}
 
 
 def _add_snapshot_route(
@@ -613,27 +944,28 @@ def _add_snapshot_route(
     async def ingest_ha_snapshot(request: Request) -> JSONResponse:
         """Accept a Home Assistant school snapshot (ADR 0007).
 
+        The JSON body is described in the OpenAPI document but read here, not
+        by FastAPI, so the size limit and the duplicate key check come first.
+
         Args:
             request: The incoming request; the body is read here, bounded.
 
         Returns:
-            200 with counts and freshness; 409, 413, 415, 422 or 503 otherwise.
+            200 with counts, freshness and the schools that got no days. Errors
+            are 400 (bad Content-Length), 409, 413, 415, 422, 500 and 503; the
+            router dependency adds 401 and 429.
         """
         if school_ingest is None:
             return _unavailable()
         if not _is_json(request):
-            return JSONResponse(
-                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-                content={"detail": "Expected application/json"},
+            return _plain(
+                status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Expected application/json"
             )
         try:
             body = await _read_bounded_body(request, MAX_SNAPSHOT_BYTES)
         except _BodyTooLargeError:
             logger.warning("ha_snapshot.rejected", reason="too_large")
-            return JSONResponse(
-                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                content={"detail": "Payload too large"},
-            )
+            return _plain(status.HTTP_413_CONTENT_TOO_LARGE, "Payload too large")
         return await run_in_threadpool(
             _ingest_snapshot, school_ingest, body, get_correlation_id()
         )
@@ -643,6 +975,8 @@ def _add_snapshot_route(
         ingest_ha_snapshot,
         methods=["POST"],
         name="ingest_ha_snapshot",
+        responses=_RESPONSES,
+        openapi_extra={"requestBody": _request_body_schema()},
     )
 
 
@@ -654,8 +988,8 @@ def build_ha_router(
 ) -> APIRouter:
     """Build the Home Assistant router with authentication at router level.
 
-    Every route listed in the module docstring is registered on this router
-    and inherits the bearer-token dependency automatically.
+    The school snapshot ingest route is registered here; routes added later
+    inherit the bearer-token dependency automatically.
 
     Args:
         settings: Application settings carrying ``ha_token``.
