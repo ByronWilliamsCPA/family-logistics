@@ -97,7 +97,7 @@ used.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `FL_ROUTE_PROVIDER` | `ha_relay` | `ha_relay`, `google_routes` or `static` |
+| `FL_ROUTE_PROVIDER` | `ha_relay` | `ha_relay`, `google_routes` or `static`. **Not wired in yet:** the provider factory exists, but no service calls it, so this setting has no runtime effect on assessments until the M3 wiring (ADR 0006 Delivery); the CLI `config` command only echoes it. Once a service uses the factory, and until the relay lands (ADR 0006, PR 2), `ha_relay` will yield a provider whose every estimate is unknown, so any ride that needs an estimate is incomplete (ROUTE-010); see privacy spec section 5 for which zone-less addresses the relay may send (never another family's home), `google_routes` will be refused as not implemented, and `static` is for tests and needs an explicit travel-time table |
 | `FL_GOOGLE_ROUTES_API_KEY` | unset | **Secret.** Optional paid routing key |
 | `FL_ROUTES_MONTHLY_BUDGET_USD` | `10` | Hard monthly cap enforced by the application |
 | `FL_ROUTES_BUDGET_WARN_USD` | `8` | Spend that triggers an operator warning |

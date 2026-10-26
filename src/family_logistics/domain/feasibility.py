@@ -168,6 +168,10 @@ def route_findings(ctx: AssessmentContext, trip: Trip) -> list[Finding]:
 
     Returns:
         Route findings; empty when feasible or nothing constrains the ride.
+        A ride with no deadline and no STOP_ORDER is never routed, so an empty
+        result does not mean a route was computed: a CLEAR run on a provider
+        with no travel times (``NullRouteProvider``) is not proof that routing
+        works.
     """
     stops, labels, unresolved = _stops(ctx, trip)
     has_deadline = any(s.deadline is not None for s in stops)
