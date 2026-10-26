@@ -565,8 +565,6 @@ def plan(  # noqa: PLR0913 - everything but the outcome is keyword-only
         The plan: urgent pushes first, then notices, the status or report and
         ops pushes, with the unresolved findings counted by rule ID.
 
-    Raises:
-        ValueError: ``now`` is naive.
     """
     _aware(now, "now")
     if result.run_status is RunStatus.FAILED:
@@ -608,8 +606,6 @@ def plan_unavailable(*, now: datetime, policy: NotificationPolicy) -> Plan:
         ``run-failed`` (urgent, since the ride set is unknown) and
         ``ops:run_failed``; nothing is closed.
 
-    Raises:
-        ValueError: ``now`` is naive.
     """
     _aware(now, "now")
     return Plan(
@@ -698,8 +694,6 @@ def decide(  # noqa: PLR0913 - the clock and quiet flag are keyword-only
         status or report, because only the plan knows when the run was
         evaluated.
 
-    Raises:
-        ValueError: ``now`` is naive.
     """
     _aware(now, "now")
     if (
