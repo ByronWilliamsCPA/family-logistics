@@ -68,9 +68,10 @@ def request_row(**overrides):
     return values | overrides
 
 
-def test_head_follows_the_school_snapshot(engine):
-    assert migrations_api.head_revision() == "0005_route_relay"
+def test_the_route_relay_revision_follows_the_school_snapshot(engine):
     assert migrations_api.is_at_head(engine)
+    migrations_api.downgrade(engine, "0005_route_relay")
+    assert migrations_api.current_revision(engine) == "0005_route_relay"
     migrations_api.downgrade(engine, "0004_school_snapshot")
     assert migrations_api.current_revision(engine) == "0004_school_snapshot"
 
