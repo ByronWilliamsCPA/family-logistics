@@ -3,8 +3,8 @@
 Pure functions: the same payload, schools, zone and window always give the
 same rows, and nothing here reads a clock, the database or the network.
 
-Each event summary is classified by :data:`SCHOOL_DAY_KEYWORDS` and
-:data:`CONTEXT_WORDS`, then each school's events are clipped to the window,
+Each event summary is classified by :data:`SCHOOL_DAY_KEYWORDS`,
+:data:`CONTEXT_WORDS` and :data:`NEUTRAL_WORDS`, then each school's events are clipped to the window,
 grouped by local day and decided:
 
 * Kind: any unrecognized event makes the day UNKNOWN; a closure that does not
@@ -21,7 +21,8 @@ grouped by local day and decided:
   school schedule (SCHOOL-009) rather than assuming a normal day.
 
 An event is never assumed to be a normal school day: a summary the table
-does not recognize, or one qualified by a context word, yields UNKNOWN.
+does not recognize, one qualified by a context word, or one with any word the
+tables do not account for, yields UNKNOWN.
 
 #CRITICAL: Data integrity: a false NO_SCHOOL is the dangerous direction (the
 engine builds no school block and suppresses transport defaults, so a child
@@ -34,9 +35,11 @@ reviewed regression summaries; TestNoSchool pins the closure rules.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from itertools import combinations
 from typing import TYPE_CHECKING, Final
 
 from family_logistics.core.exceptions import ValidationError
@@ -55,6 +58,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CONTEXT_WORDS",
+    "NEUTRAL_WORDS",
     "SCHOOL_DAY_KEYWORDS",
     "DayWindow",
     "SnapshotMappingError",
@@ -64,10 +68,13 @@ __all__ = [
 
 # #ASSUME: external resources: school and district calendars title their
 # events in English with one of these phrases. Matching is on whole words of
-# the summary after case folding and replacing every non-alphanumeric
-# character with a space ("No-School Day" reads as "no school day"). The
-# words a matched phrase covers are set aside, and if any CONTEXT_WORDS entry
-# remains among the other words the summary is UNKNOWN. Otherwise a summary
+# the summary after NFKC normalization, case folding and replacing every
+# non-word character with a space ("No-School Day" reads as "no school day").
+# The words a matched phrase covers are set aside; if any CONTEXT_WORDS entry
+# remains among the other words, or any remaining word is not neutral
+# (NEUTRAL_WORDS, a number, an ordinal or a clock time), or two matched phrases
+# overlap without one containing the other, the summary is UNKNOWN. Otherwise
+# a summary
 # matching exactly one adjusted kind (no school, early release, late start)
 # and no NORMAL phrase takes that kind; one matching several kinds, or an
 # adjusted kind and a NORMAL phrase together ("Regular Day (no school
@@ -192,7 +199,130 @@ CONTEXT_WORDS: Final = frozenset(
 """Words (or word pairs) that, outside the matched phrase, make a summary
 UNKNOWN. Entries are normalized like summaries."""
 
-_NON_ALNUM = re.compile(r"[^0-9a-z]+")
+# #ASSUME: external resources: outside the matched phrases, a plain closure,
+# short-day or regular-day title adds only filler, a weekday, a date, a clock
+# time or the name of the holiday or break ("No School - Labor Day", "Early
+# Release 12:30 PM", "Winter Break Dec 22 - Jan 2"). Every other leftover word
+# makes the summary UNKNOWN: a veto list can never name every qualifier
+# ("Tentative", "Grades 6-8", "Celebration", "Drill"), so the default is
+# inverted and only these reviewed words, plus plain numbers, ordinals and
+# clock times (see _NEUTRAL_NUMBER), are allowed to remain. An entry here can
+# only keep a summary's kind; leaving a word out can only make it UNKNOWN (a
+# SCHOOL-009 warning). "break" and "holiday" are deliberately absent: the
+# phrase table already covers them where they name a closure, and outside a
+# phrase they would let "Regular Day Holiday" read as a regular day.
+# "may" is listed as the month; a sentence using it as a verb carries other,
+# non-neutral words.
+# #VERIFY: before the shadow period, run the deployment's real calendars
+# through classify_summary and review every UNKNOWN; add a word here only
+# when it cannot change which day kind a title names.
+NEUTRAL_WORDS: Final = frozenset(
+    {
+        # filler
+        "a",
+        "an",
+        "the",
+        "of",
+        "and",
+        "or",
+        "all",
+        "day",
+        "days",
+        "school",
+        "schools",
+        "student",
+        "students",
+        "district",
+        # weekdays
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+        "mon",
+        "tue",
+        "tues",
+        "wed",
+        "weds",
+        "thu",
+        "thur",
+        "thurs",
+        "fri",
+        "sat",
+        "sun",
+        # months
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+        "jan",
+        "feb",
+        "mar",
+        "apr",
+        "jun",
+        "jul",
+        "aug",
+        "sep",
+        "sept",
+        "oct",
+        "nov",
+        "dec",
+        # clock-time fragments ("12:30 p.m." reads "12 30 p m")
+        "am",
+        "pm",
+        "p",
+        "m",
+        "noon",
+        # holiday and break names
+        "labor",
+        "columbus",
+        "indigenous",
+        "peoples",
+        "veterans",
+        "thanksgiving",
+        "christmas",
+        "new",
+        "year",
+        "years",
+        "eve",
+        "martin",
+        "luther",
+        "king",
+        "jr",
+        "dr",
+        "mlk",
+        "presidents",
+        "president",
+        "memorial",
+        "independence",
+        "juneteenth",
+        "easter",
+        "good",
+        "spring",
+        "winter",
+        "fall",
+        "summer",
+        "midwinter",
+        "mid",
+        # possessive fragment ("New Year's" reads "new year s")
+        "s",
+    }
+)
+"""Single words that may remain beside a matched phrase without making the
+summary UNKNOWN. Plain numbers, ordinals and clock times are neutral too."""
+
+_SEPARATOR = re.compile(r"\W+")
+_NEUTRAL_NUMBER = re.compile(r"[0-9]+(?:st|nd|rd|th|am|pm)?")
 _BELL = "bell"
 
 
@@ -240,7 +370,29 @@ class DayWindow:
 
 
 def _normalize(text: str) -> str:
-    return " ".join(_NON_ALNUM.sub(" ", text.casefold()).split())
+    """Case-fold and split on every non-word character.
+
+    NFKC first composes accents, so a letter outside ASCII stays inside its
+    word ("Scho\u00f3l") and makes that word unknown instead of vanishing.
+    Punctuation, symbols and emoji are separators.
+    """
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    return " ".join(_SEPARATOR.sub(" ", folded).split())
+
+
+def _is_neutral(token: str) -> bool:
+    return token in NEUTRAL_WORDS or _NEUTRAL_NUMBER.fullmatch(token) is not None
+
+
+def _tangled(occurrences: Sequence[set[int]]) -> bool:
+    """Whether two phrase occurrences share a word without one holding the other.
+
+    "No School Closed" reads "no school" and "school closed"; each phrase hides
+    the other's context word, so the reading is ambiguous.
+    """
+    return any(
+        a & b and not (a <= b or b <= a) for a, b in combinations(occurrences, 2)
+    )
 
 
 def _occurrences(tokens: Sequence[str], phrase: str) -> Iterator[range]:
@@ -260,7 +412,10 @@ def classify_summary(summary: str) -> SchoolDayKind:
 
     Returns:
         The one kind the summary names, or UNKNOWN when it names none or
-        several, or when a :data:`CONTEXT_WORDS` entry qualifies it.
+        several, when a :data:`CONTEXT_WORDS` entry qualifies it, when any
+        word outside the matched phrases is not neutral
+        (:data:`NEUTRAL_WORDS`, a number, an ordinal or a clock time), or
+        when two matched phrases overlap without one containing the other.
     """
     tokens = _normalize(summary).split()
     found = [
@@ -277,17 +432,28 @@ def classify_summary(summary: str) -> SchoolDayKind:
             adjusted |= positions
     # A NORMAL phrase sharing a word with an adjusted phrase is part of it, not
     # a second reading: "No-School Day" reads "no school" + "school day".
-    matched = {
-        kind
+    kept = [
+        (kind, positions)
         for kind, positions in found
         if kind is not SchoolDayKind.NORMAL or adjusted.isdisjoint(positions)
-    }
+    ]
+    matched = {kind for kind, _ in kept}
     qualified = any(
         not covered.issuperset(positions)
         for word in CONTEXT_WORDS
         for positions in _occurrences(tokens, word)
     )
-    if qualified or len(matched) != 1:
+    # #CRITICAL: data integrity: the default is inverted. A leftover word that
+    # is not reviewed as neutral ("Tentative", "Drill", "Grades") makes the
+    # summary UNKNOWN, so a qualifier nobody listed can never yield a false
+    # NO_SCHOOL. The CONTEXT_WORDS veto stays as a documented subset.
+    # #VERIFY: the TestClassifySummary cases for stray words, and the
+    # realistic plain-summary corpus that must keep its kind.
+    stray = any(
+        at not in covered and not _is_neutral(token) for at, token in enumerate(tokens)
+    )
+    tangled = _tangled([positions for _, positions in kept])
+    if qualified or stray or tangled or len(matched) != 1:
         return SchoolDayKind.UNKNOWN
     return matched.pop()
 

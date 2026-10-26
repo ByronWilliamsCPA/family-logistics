@@ -8,6 +8,7 @@ from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 from family_logistics.adapters.home_assistant.schemas import (
     MAX_EVENTS_PER_CALENDAR,
@@ -17,6 +18,7 @@ from family_logistics.adapters.home_assistant.schemas import (
 )
 from family_logistics.adapters.home_assistant.school_days import (
     CONTEXT_WORDS,
+    NEUTRAL_WORDS,
     SCHOOL_DAY_KEYWORDS,
     DayWindow,
     SnapshotMappingError,
@@ -191,19 +193,213 @@ class TestClassifySummary:
     def test_a_plain_summary_still_classifies(self, summary, kind):
         assert classify_summary(summary) is kind
 
+    @pytest.mark.parametrize(
+        "summary",
+        [
+            # uncertainty
+            "No School (Tentative)",
+            "Early Release TBD",
+            "Snow Day (Pending Board Approval)",
+            "Regular Day - Tentative",
+            "Winter Break (TBD)",
+            # grade or group limits, relative days
+            "No School Grades 6-8",
+            "No School Preschool",
+            "No School Tomorrow",
+            # an event that only mentions the day
+            "School Holiday Celebration",
+            "School Holiday Assembly",
+            "Winter Break Information Session",
+            "Winter Break Camp Registration Opens",
+            "Emergency Closure Drill",
+            "Full Day Field Trip",
+            "Full Day Kindergarten Begins",
+            "Regular Day Weather Permitting",
+            "Early Release Volunteer Briefing",
+            "Late Start Bus Driver Training",
+            # overlapping phrases that each hide the other's context word
+            "No School Closed",
+            # already unknown; must stay so
+            "Regular Day - No Buses",
+            "School Closed Early",
+            "No early release",
+            "No School for Veterans Day",
+        ],
+    )
+    def test_a_word_outside_the_tables_makes_it_unknown(self, summary):
+        assert classify_summary(summary) is SchoolDayKind.UNKNOWN
+
+    @pytest.mark.parametrize(
+        "summary",
+        [
+            " ",
+            "   \t\n ",
+            "-",
+            "!!! ... ???",
+            "()[]{}/\\",
+            "D\u00eda sin escuela",
+            "No School \u00dc",
+            "No School \u00f1",
+            "No Scho\u00f3l",
+            "No Scho\u006f\u0301l",
+            "\u5b66\u6821\u4f11\u307f",
+            "No_School",
+            "No School \u0663",
+        ],
+    )
+    def test_blank_punctuation_and_non_ascii_summaries_are_unknown(self, summary):
+        assert classify_summary(summary) is SchoolDayKind.UNKNOWN
+
+    @pytest.mark.parametrize(
+        ("summary", "kind"),
+        [
+            ("No School", SchoolDayKind.NO_SCHOOL),
+            ("No School - Labor Day", SchoolDayKind.NO_SCHOOL),
+            ("No School \u2013 Labor Day", SchoolDayKind.NO_SCHOOL),
+            ("No School - Thanksgiving Break", SchoolDayKind.NO_SCHOOL),
+            ("No School Monday", SchoolDayKind.NO_SCHOOL),
+            (
+                "No School: Columbus Day / Indigenous Peoples' Day",
+                SchoolDayKind.NO_SCHOOL,
+            ),
+            ("No School - Veterans Day", SchoolDayKind.NO_SCHOOL),
+            ("No School - Martin Luther King Jr. Day", SchoolDayKind.NO_SCHOOL),
+            ("No School - Dr. Martin Luther King, Jr. Day", SchoolDayKind.NO_SCHOOL),
+            ("No School - MLK Day", SchoolDayKind.NO_SCHOOL),
+            ("No School - Presidents' Day", SchoolDayKind.NO_SCHOOL),
+            ("No School - President's Day", SchoolDayKind.NO_SCHOOL),
+            ("No School - Memorial Day", SchoolDayKind.NO_SCHOOL),
+            ("No School - Juneteenth", SchoolDayKind.NO_SCHOOL),
+            ("No School - Independence Day", SchoolDayKind.NO_SCHOOL),
+            ("No School - Good Friday", SchoolDayKind.NO_SCHOOL),
+            ("No School - New Year's Day", SchoolDayKind.NO_SCHOOL),
+            ("No School - Christmas Eve", SchoolDayKind.NO_SCHOOL),
+            ("No School for All Students", SchoolDayKind.NO_SCHOOL),
+            ("No School for Students", SchoolDayKind.NO_SCHOOL),
+            ("No Students", SchoolDayKind.NO_SCHOOL),
+            ("Winter Break", SchoolDayKind.NO_SCHOOL),
+            ("Winter Break Dec 22 - Jan 2", SchoolDayKind.NO_SCHOOL),
+            ("Thanksgiving Break Nov. 25-27", SchoolDayKind.NO_SCHOOL),
+            ("Spring Break", SchoolDayKind.NO_SCHOOL),
+            ("Spring Break March 23 - 27", SchoolDayKind.NO_SCHOOL),
+            ("Fall Break", SchoolDayKind.NO_SCHOOL),
+            ("Mid-Winter Break", SchoolDayKind.NO_SCHOOL),
+            ("Summer Break", SchoolDayKind.NO_SCHOOL),
+            ("Holiday Break", SchoolDayKind.NO_SCHOOL),
+            ("Snow Day", SchoolDayKind.NO_SCHOOL),
+            ("Snow Day - Tuesday, Jan 27th", SchoolDayKind.NO_SCHOOL),
+            ("Student Free Day", SchoolDayKind.NO_SCHOOL),
+            ("Teacher Work Day", SchoolDayKind.NO_SCHOOL),
+            ("Teacher Workday", SchoolDayKind.NO_SCHOOL),
+            ("Professional Development Day", SchoolDayKind.NO_SCHOOL),
+            ("Staff Development Day", SchoolDayKind.NO_SCHOOL),
+            ("School Closed", SchoolDayKind.NO_SCHOOL),
+            ("Emergency Closure", SchoolDayKind.NO_SCHOOL),
+            ("No Classes", SchoolDayKind.NO_SCHOOL),
+            ("Early Release", SchoolDayKind.EARLY_RELEASE),
+            ("Early Release 12:30 PM", SchoolDayKind.EARLY_RELEASE),
+            ("Early Release - 12:30pm", SchoolDayKind.EARLY_RELEASE),
+            ("Early Release Wednesday", SchoolDayKind.EARLY_RELEASE),
+            ("Early Release Fri 11/26", SchoolDayKind.EARLY_RELEASE),
+            ("Early Dismissal - 1:00 p.m.", SchoolDayKind.EARLY_RELEASE),
+            ("Minimum Day", SchoolDayKind.EARLY_RELEASE),
+            ("Half Day", SchoolDayKind.EARLY_RELEASE),
+            ("Two Hour Delay", SchoolDayKind.LATE_START),
+            ("2 Hour Delay", SchoolDayKind.LATE_START),
+            ("Late Start Monday", SchoolDayKind.LATE_START),
+            ("Late Start 10:00 AM", SchoolDayKind.LATE_START),
+            ("Delayed Opening", SchoolDayKind.LATE_START),
+            ("Regular Day", SchoolDayKind.NORMAL),
+            ("Regular Day Thursday", SchoolDayKind.NORMAL),
+            ("Regular Bell Schedule", SchoolDayKind.NORMAL),
+            ("Normal Schedule", SchoolDayKind.NORMAL),
+            ("School Day", SchoolDayKind.NORMAL),
+            ("Full Day", SchoolDayKind.NORMAL),
+        ],
+    )
+    def test_a_realistic_plain_summary_keeps_its_kind(self, summary, kind):
+        assert classify_summary(summary) is kind
+
+    def test_the_neutral_table_holds_exactly_the_reviewed_words(self):
+        reviewed = {
+            # filler
+            "a", "an", "the", "of", "and", "or", "all",
+            "day", "days", "school", "schools", "student", "students",
+            "district",
+            # weekdays
+            "monday", "tuesday", "wednesday", "thursday", "friday",
+            "saturday", "sunday",
+            "mon", "tue", "tues", "wed", "weds", "thu", "thur", "thurs",
+            "fri", "sat", "sun",
+            # months
+            "january", "february", "march", "april", "may", "june", "july",
+            "august", "september", "october", "november", "december",
+            "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
+            "oct", "nov", "dec",
+            # time fragments ("12:30 p.m." reads "12 30 p m")
+            "am", "pm", "p", "m", "noon",
+            # holiday names
+            "labor", "columbus", "indigenous", "peoples", "veterans",
+            "thanksgiving", "christmas", "new", "year", "years", "eve",
+            "martin", "luther", "king", "jr", "dr", "mlk", "presidents",
+            "president", "memorial", "independence", "juneteenth", "easter",
+            "good", "spring", "winter", "fall", "summer", "midwinter", "mid",
+            # possessive fragment ("New Year's" reads "new year s")
+            "s",
+        }  # fmt: skip
+        assert reviewed == NEUTRAL_WORDS
+
+    @pytest.mark.parametrize(
+        "word",
+        [
+            "celebration", "program", "assembly", "concert", "party", "camp",
+            "registration", "session", "information", "drill", "training",
+            "briefing", "meeting", "trip", "field", "testing", "kindergarten",
+            "preschool", "prek", "grade", "grades", "tentative", "tbd",
+            "pending", "proposed", "updated", "revised", "tomorrow", "today",
+            "buses", "permitting", "weather", "volunteer", "break", "holiday",
+        ],
+    )  # fmt: skip
+    def test_an_excluded_word_is_not_neutral(self, word):
+        assert word not in NEUTRAL_WORDS
+
+    def test_neutral_words_are_normalized_and_disjoint_from_context(self):
+        for word in NEUTRAL_WORDS:
+            assert word.isascii()
+            assert word.isalnum()
+            assert word == word.casefold()
+        assert NEUTRAL_WORDS.isdisjoint(CONTEXT_WORDS)
+
+    @pytest.mark.parametrize(
+        ("summary", "kind"),
+        [
+            ("Early Release 1st", SchoolDayKind.EARLY_RELEASE),
+            ("Early Release 22nd", SchoolDayKind.EARLY_RELEASE),
+            ("Early Release 3rd", SchoolDayKind.EARLY_RELEASE),
+            ("Early Release 4th", SchoolDayKind.EARLY_RELEASE),
+            ("Early Release 1230PM", SchoolDayKind.EARLY_RELEASE),
+            ("Late Start 9am", SchoolDayKind.LATE_START),
+            ("Early Release 12x", SchoolDayKind.UNKNOWN),
+            ("Early Release 8th grade", SchoolDayKind.UNKNOWN),
+        ],
+    )
+    def test_numbers_ordinals_and_clock_times_are_neutral(self, summary, kind):
+        assert classify_summary(summary) is kind
+
     def test_bare_bell_schedule_is_not_a_phrase(self):
         assert "bell schedule" not in SCHOOL_DAY_KEYWORDS[SchoolDayKind.NORMAL]
         assert classify_summary("Bell Schedule") is SchoolDayKind.UNKNOWN
 
     def test_the_context_table_holds_the_reviewed_words(self):
-        required = {
+        reviewed = {
             "no", "not", "non", "cancelled", "canceled", "closed", "closure",
             "without", "resume", "resumes", "resuming", "ends", "end", "ending",
             "before", "after", "back", "return", "returns", "make up", "makeup",
             "only", "attend", "attends", "in session", "open", "lifted",
             "except", "unless", "instead", "rescheduled", "postponed",
+            "early", "late", "for",
         }  # fmt: skip
-        assert required <= CONTEXT_WORDS
+        assert reviewed == CONTEXT_WORDS
 
     def test_context_words_are_already_normalized(self):
         for word in CONTEXT_WORDS:
@@ -298,6 +494,74 @@ class TestNormalDay:
         event["location"] = "Early release"
         day = only(run({BELL: [event], DISTRICT: []}))
         assert day.kind is SchoolDayKind.NORMAL
+
+
+class TestMapperClaims:
+    """Review claims about the mapper, pinned whether or not they were real."""
+
+    def test_a_utc_midnight_closure_is_two_partial_local_days(self):
+        # A closure sent as UTC midnight to UTC midnight covers 17:00 Sunday to
+        # 17:00 Monday in Pacific time: neither local day is whole, so both are
+        # UNKNOWN, never NO_SCHOOL, and the all-day rule does not apply.
+        event = {
+            "start": "2026-10-26T00:00:00Z",
+            "end": "2026-10-27T00:00:00Z",
+            "summary": "No School",
+        }
+        days = run({BELL: [], DISTRICT: [event]})
+        assert [(d.date, d.kind) for d in days] == [
+            (date(2026, 10, 25), SchoolDayKind.UNKNOWN),
+            (date(2026, 10, 26), SchoolDayKind.UNKNOWN),
+        ]
+
+    def test_a_timed_normal_district_event_gives_no_bell_times(self):
+        day = only(
+            run(
+                {
+                    BELL: [],
+                    DISTRICT: [timed("2026-10-23", "08:00", "15:00", "Regular Day")],
+                }
+            )
+        )
+        assert day.kind is SchoolDayKind.UNKNOWN
+        assert day.start == day.end == utc(2026, 10, 23, 7)
+
+    def test_an_all_day_normal_district_event_is_unknown(self):
+        day = only(
+            run(
+                {
+                    BELL: [],
+                    DISTRICT: [all_day("2026-10-23", "2026-10-24", "Regular Day")],
+                }
+            )
+        )
+        assert day.kind is SchoolDayKind.UNKNOWN
+
+    def test_a_bell_event_clipped_at_the_window_start_gives_no_times(self):
+        event = {
+            "start": "2026-10-22T20:00:00-07:00",
+            "end": "2026-10-23T15:00:00-07:00",
+            "summary": "Regular Day",
+        }
+        day = only(run({BELL: [event], DISTRICT: []}))
+        assert (day.date, day.kind) == (FRIDAY, SchoolDayKind.UNKNOWN)
+        assert day.start == day.end == utc(2026, 10, 23, 7)
+
+    def test_a_bell_event_clipped_at_the_window_end_gives_no_times(self):
+        event = {
+            "start": "2026-10-23T08:00:00-07:00",
+            "end": "2026-10-24T02:00:00-07:00",
+            "summary": "Regular Day",
+        }
+        day = only(run({BELL: [event], DISTRICT: []}, last_day=FRIDAY))
+        assert (day.date, day.kind) == (FRIDAY, SchoolDayKind.UNKNOWN)
+        assert day.start == day.end == utc(2026, 10, 23, 7)
+
+    def test_a_zero_day_all_day_event_never_reaches_the_mapper(self):
+        with pytest.raises(PydanticValidationError):
+            snapshot(
+                {BELL: [], DISTRICT: [all_day("2026-10-23", "2026-10-23", "No School")]}
+            )
 
 
 class TestUnknownIsNeverNormal:
