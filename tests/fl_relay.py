@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import base64
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 from pydantic import SecretStr
+from sqlalchemy import event
 
 from family_logistics.core.crypto import AddressCipher, generate_key
 from family_logistics.core.database import create_sqlite_engine
@@ -81,6 +82,20 @@ def make_engine(tmp_path: Path) -> Engine:
             )
         )
     return engine
+
+
+def make_writes_fail(engine: Engine) -> None:
+    """Make every new connection refuse writes, which is not lock contention.
+
+    ``PRAGMA query_only`` makes ``BEGIN IMMEDIATE`` fail with SQLITE_READONLY, an
+    ``OperationalError`` that is neither SQLITE_BUSY nor SQLITE_LOCKED.
+    """
+
+    @event.listens_for(engine, "connect")
+    def _read_only(dbapi_connection: Any, _record: Any) -> None:
+        dbapi_connection.execute("PRAGMA query_only=ON")
+
+    engine.dispose()
 
 
 def days(count: float) -> timedelta:

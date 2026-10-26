@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from fl_relay import NOW, ZONE, local, make_engine
+from fl_relay import NOW, ZONE, local, make_engine, make_writes_fail
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from family_logistics.core.database import create_sqlite_engine
 from family_logistics.core.exceptions import ValidationError
@@ -611,3 +612,31 @@ class TestWriteLock:
         assert repo.pending(now=NOW) == []
         # The busy timeout is restored for later connections' work.
         assert repo.enqueue(FRIDAY_0800, now=NOW) is EnqueueStatus.CREATED
+
+    def test_an_error_that_is_not_lock_contention_is_not_reported_as_busy(self, engine):
+        make_writes_fail(engine)
+        repo = RouteRelayRepository(engine)
+        with pytest.raises(OperationalError) as caught:
+            repo.enqueue(FRIDAY_0800, now=NOW)
+        assert not isinstance(caught.value, RouteRelayBusyError)
+        with pytest.raises(OperationalError):
+            repo.record_results([RouteAnswer("a" * 32, 900)], now=NOW, zone=ZONE)
+
+    @pytest.mark.parametrize(
+        ("code", "busy"),
+        [
+            (sqlite3.SQLITE_BUSY, True),
+            (sqlite3.SQLITE_LOCKED, True),
+            (sqlite3.SQLITE_BUSY_SNAPSHOT, True),
+            (sqlite3.SQLITE_LOCKED_SHAREDCACHE, True),
+            (sqlite3.SQLITE_READONLY, False),
+            (sqlite3.SQLITE_IOERR, False),
+            (sqlite3.SQLITE_CANTOPEN, False),
+            (None, False),
+        ],
+    )
+    def test_only_busy_and_locked_codes_count_as_contention(self, code, busy):
+        original = sqlite3.OperationalError("simulated")
+        original.sqlite_errorcode = code
+        wrapped = OperationalError("BEGIN IMMEDIATE", None, original)
+        assert route_relay.is_lock_contention(wrapped) is busy

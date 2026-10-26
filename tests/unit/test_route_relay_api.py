@@ -18,6 +18,7 @@ from fl_relay import (
     audit_key_text,
     local,
     make_engine,
+    make_writes_fail,
 )
 from pydantic import SecretStr
 from sqlalchemy import text
@@ -567,6 +568,16 @@ class TestPostRouteResults:
         assert response.headers["Retry-After"] == "5"
         assert repo.lookup(HOME_TO_SCHOOL, now=NOW) is None
         assert audit_rows(engine) == []
+
+    def test_a_non_lock_database_error_is_a_503_without_retry_after(
+        self, settings, engine, clock
+    ):
+        client = build_client(settings, engine, clock)
+        make_writes_fail(engine)
+        response = self.post(client, self.item("0" * 32, 600))
+        assert response.status_code == 503
+        assert "Retry-After" not in response.headers
+        assert response.json() == {"detail": "Route store unavailable"}
 
     def test_a_store_error_is_a_503_and_stores_nothing(self, client, repo, engine):
         ids = queue(repo, HOME_TO_SCHOOL)

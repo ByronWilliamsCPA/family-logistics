@@ -38,6 +38,7 @@ deployment checklist). Findings stay in shadow mode until then.
 
 from __future__ import annotations
 
+import sqlite3
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -121,6 +122,7 @@ __all__ = [
     "RouteRelayRepository",
     "bucket_start",
     "due_weekday",
+    "is_lock_contention",
     "serving_weekday",
     "slot_of",
 ]
@@ -434,6 +436,31 @@ def serving_weekday(bucket: int, now: datetime, zone: tzinfo) -> int | None:
     return occurrence.weekday()
 
 
+_LOCK_CONTENTION_CODES = frozenset({sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
+"""Primary SQLite result codes that mean another connection holds a lock."""
+
+_PRIMARY_CODE_MASK = 0xFF
+"""Extended result codes (such as SQLITE_BUSY_SNAPSHOT) carry the primary code in
+their low byte."""
+
+
+def is_lock_contention(error: OperationalError) -> bool:
+    """Report whether an operational error is SQLITE_BUSY or SQLITE_LOCKED.
+
+    Args:
+        error: The error SQLAlchemy raised.
+
+    Returns:
+        True only for lock contention (primary or extended code); any other
+        operational error (read-only, I/O, cannot open, an unknown code) is a
+        store failure that a retry will not cure.
+    """
+    code = getattr(error.orig, "sqlite_errorcode", None)
+    return (
+        isinstance(code, int) and (code & _PRIMARY_CODE_MASK) in _LOCK_CONTENTION_CODES
+    )
+
+
 @contextmanager
 def _write_locked(engine: Engine, lock_timeout_ms: int) -> Generator[Connection]:
     """Yield a connection inside ``BEGIN IMMEDIATE``; commit on success.
@@ -448,6 +475,11 @@ def _write_locked(engine: Engine, lock_timeout_ms: int) -> Generator[Connection]
 
     Raises:
         RouteRelayBusyError: The write lock was not granted in time.
+
+    Note:
+        An operational error that is not lock contention propagates unchanged
+        (``sqlalchemy.exc.OperationalError``), so callers report a store error
+        rather than a retryable busy state.
     """
     with engine.connect() as connection:
         connection.exec_driver_sql(f"PRAGMA busy_timeout={int(lock_timeout_ms)}")
@@ -455,6 +487,8 @@ def _write_locked(engine: Engine, lock_timeout_ms: int) -> Generator[Connection]
             try:
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
             except OperationalError as exc:
+                if not is_lock_contention(exc):
+                    raise
                 msg = "the database is locked by another writer; nothing stored"
                 raise RouteRelayBusyError(
                     msg, operation="route_relay", error_code="ROUTE_RELAY_BUSY"
