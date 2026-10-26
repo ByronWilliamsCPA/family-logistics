@@ -44,8 +44,33 @@ BUSY_TIMEOUT_MS = 5000
 
 WAL_RETRY_SECONDS = 0.05
 _BUSY_CODES = frozenset({sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
+_PRIMARY_CODE_MASK = 0xFF
 
 logger = get_logger(__name__)
+
+
+def is_lock_contention(error: BaseException | None) -> bool:
+    """Say whether a driver error means another connection holds a lock.
+
+    The sqlite3 driver raises ``OperationalError`` for permanent faults too (a
+    read-only database, a disk I/O error, a file that cannot be opened), so the
+    exception type alone cannot tell a retryable lock from a broken database.
+
+    Args:
+        error: The driver exception, for example the ``orig`` of a SQLAlchemy
+            ``DBAPIError``. ``None`` is accepted for a missing ``orig``.
+
+    Returns:
+        True only for SQLITE_BUSY or SQLITE_LOCKED, including their extended
+        codes (such as SQLITE_BUSY_SNAPSHOT). False for any other error and for
+        an error that carries no SQLite error code.
+    """
+    # #ASSUME: External resources: the driver exposes ``sqlite_errorcode`` on
+    # its exceptions (Python 3.11+). A missing code is treated as not a lock,
+    # so an unknown fault surfaces as itself instead of as a retryable busy.
+    # #VERIFY: tests/unit/test_school_snapshot_repo.py::TestWriteLock.
+    code = getattr(error, "sqlite_errorcode", None)
+    return isinstance(code, int) and (code & _PRIMARY_CODE_MASK) in _BUSY_CODES
 
 
 def _enable_wal(cursor: Cursor) -> object:

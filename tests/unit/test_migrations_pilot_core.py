@@ -45,6 +45,8 @@ PILOT_TABLES = {
     "transport_default",
     "vehicle",
 }
+LATER_TABLES = {"trip_snapshot", "school_day", "school_snapshot"}
+"""Tables added by revisions after 0002 (0003 and 0004)."""
 AUDIT_TRIGGERS = {
     "audit_log_no_update",
     "audit_log_no_replace",
@@ -559,7 +561,7 @@ class TestPilotCoreMigration:
         migrations_api.upgrade(engine)
 
         assert migrations_api.is_at_head(engine)
-        assert table_names(engine) == PILOT_TABLES | {"audit_log", "trip_snapshot"}
+        assert table_names(engine) == PILOT_TABLES | {"audit_log"} | LATER_TABLES
         assert object_names(engine, "trigger") == AUDIT_TRIGGERS | ALIAS_TRIGGERS
         for name in PILOT_TABLES:
             assert row_count(engine, name) == 0, name
@@ -870,7 +872,7 @@ class TestMetadataParity:
     def test_table_set_is_exact(self, engine):
         migrations_api.upgrade(engine)
         assert table_names(engine) == set(schema.metadata.tables)
-        assert table_names(engine) == PILOT_TABLES | {"audit_log", "trip_snapshot"}
+        assert table_names(engine) == PILOT_TABLES | {"audit_log"} | LATER_TABLES
 
     def test_column_types_and_primary_keys_match(self, engine):
         migrations_api.upgrade(engine)

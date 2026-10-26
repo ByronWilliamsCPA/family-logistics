@@ -25,8 +25,10 @@ def engine(tmp_path):
     engine.dispose()
 
 
-def test_head_is_trip_snapshot():
-    assert migrations_api.head_revision() == "0003_trip_snapshot"
+def test_trip_snapshot_revision_upgrades_on_its_own(engine):
+    migrations_api.upgrade(engine, "0003_trip_snapshot")
+    assert migrations_api.current_revision(engine) == "0003_trip_snapshot"
+    assert "trip_snapshot" in set(inspect(engine).get_table_names())
 
 
 def test_table_matches_the_declared_schema(engine):

@@ -138,6 +138,7 @@ Before any call to the local inference server:
 | Data | Retention | Mechanism |
 |------|-----------|-----------|
 | Raw VEVENT text (`description` and `location` on `source_event`) | 30 days after the event is deleted, or after it ends if it is never deleted (`COALESCE(deleted_at, end_utc)`), not 30 days after last seen; the `summary`, the normalised fields and `raw_hash` persist | the database function `purge_raw_source_text` nulls those two fields and never deletes rows; the daily job that calls it arrives with the scheduler (M3), and until then the text is kept |
+| Home Assistant school snapshot (parsed school days on `school_day`) | replaced by every ingest; days that ended more than 30 days ago are deleted (proposed); the raw payload, event text and zone list are never stored | the database function `purge_expired_school_days`; the daily job that calls it arrives with the scheduler (M3) |
 | Analysis run logs and report artifacts | 90 days | daily purge job |
 | Audit hashes | at least 365 days | the database refuses to delete a row younger than 365 days; the purge job for older rows arrives with the scheduler (M3), and until then rows are kept |
 | Confirmed passenger legs after event deletion | 90 days after the trip date | supports change-impact comparison |
