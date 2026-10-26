@@ -351,8 +351,13 @@ class TestDeliveryFailure:
         report = go(
             service, clock, NOW, warning(), status=RunStatus.INCOMPLETE, trigger="daily"
         )
+        # The first send fails; a regression that stopped after it would leave
+        # one payload and ``sent == 0``, which the old subtraction also passed.
         assert report.failed == 1
-        assert report.sent == len(posts.payloads) - 1
+        assert len(posts.payloads) >= 2
+        assert report.sent >= 1
+        assert report.sent + report.failed == len(posts.payloads)
+        assert set(posts.tags) == {"fl-shadow"}
 
 
 class TestUnavailableRun:
