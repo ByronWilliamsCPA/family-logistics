@@ -16,12 +16,14 @@ purpose: "Record the application side of the Home Assistant trust boundary."
 ---
 
 > **Status**: `proposed`. The infrastructure side (placement, ingress, network
-> controls) is recorded in the private deployment repository.
+> controls) is recorded in the private deployment repository. The Snapshot
+> Contract below is implemented; the ADR stays `proposed` until the owner
+> accepts it.
 
 **Decision Date**: 2026-10-21
 **Deciders**: Byron Williams
-**Affected Components**: api (HA routes), services/collector (HA snapshot), adapters/routing (ha_relay)
-**Implementation Target**: M2 (snapshot), M3 (route relay), M4 (status card)
+**Affected Components**: api (HA routes), adapters/home_assistant and services/school_snapshot (HA snapshot), adapters/routing (ha_relay)
+**Implementation Target**: M3 (snapshot, first PR; the original target was M2), M3 (route relay), M4 (status card)
 
 ## Context
 
@@ -55,8 +57,9 @@ initiates a connection to Home Assistant:
   host and pins paths and methods). The token is the authenticator; network
   restriction narrows reachability and never grants access on its own. The
   site-specific controls are recorded in the private deployment repository.
-- Snapshot validation: payloads are schema-checked, size-limited and stored with
-  source attribution. A missing or stale snapshot (proposed limit 26 hours)
+- Snapshot validation: payloads are schema-checked and size-limited, and the
+  parsed school days are stored with source attribution (see the Snapshot
+  Contract). A missing or stale snapshot (proposed limit 26 hours)
   raises DATA-011 and makes school-dependent checks `incomplete`; it is never
   read as "no school".
 - School schedules reuse Home Assistant's two existing layers, delivered in the
@@ -65,8 +68,69 @@ initiates a connection to Home Assistant:
   duplicate bell-schedule configuration. Pickup is due at the end of the last
   scheduled activity at that location, not at the bell. Unrecorded sports are
   never inferred; sports are entered manually in the child's iCloud calendar.
-- Payloads carry no secrets; zone coordinates are stored as location records
-  under the privacy spec.
+- Payloads carry no secrets and no coordinates; zones are validated against the
+  registry's location records, which are the only home of coordinates (privacy
+  spec).
+
+## Snapshot Contract
+
+Implemented for `POST /api/v1/ingest/ha-snapshot`; the full guide, with an
+example payload, is [Home Assistant school snapshot](../guides/ha-school-snapshot.md).
+
+- **Request**: `{"fetched_at", "calendars", "zones"}`. `calendars` maps each
+  `calendar.*` entity ID to its raw `calendar.get_events` result
+  (`{"events": [{"start", "end", "summary", "description"?, "location"?}]}`);
+  `zones` lists `zone.*` entity IDs. Every object refuses unknown keys, and a
+  duplicate JSON key is refused before validation (a parser would keep only the
+  last value). Lists and strings are bounded (128 calendars, which covers every
+  `FL_HA_SCHOOLS` configuration the settings accept; 1000 events each and
+  20,000 in all; 64 zones; 500 character summaries); the body is limited to
+  1 MiB, checked before parsing and after authentication.
+- **Sender**: Home Assistant must not post a snapshot if any calendar fetch
+  failed. An empty `events` list means the calendar was read and had no events;
+  the app cannot tell it from a failed fetch, so a partial snapshot would be
+  stored as days without school.
+- **Mapping**: `FL_HA_SCHOOLS` maps bell and district calendars to a registry
+  school location and its students. The payload must hold exactly the
+  configured calendars. Summaries are classified deterministically by one
+  keyword table (no school, early release, late start, normal); an
+  unrecognized summary is `unknown`, never `normal`. Bell times come only from
+  timed bell-calendar events within one local day (`FL_TIMEZONE`). A bell
+  calendar belongs to one school; a district calendar may serve several.
+- **Time**: `fetched_at` must carry a UTC offset and be no more than 5 minutes
+  ahead of the server; the stored freshness is `min(fetched_at, received_at)`.
+  A snapshot whose stored freshness is not newer than the stored one is
+  refused (409) unless it is an identical re-post, which is acknowledged as
+  unchanged.
+- **Zones**: each zone must be the `ha_zone_entity_id` of a registry location,
+  else 422. Zones are checked only and never stored; the payload carries no
+  coordinates. (This narrows the earlier note on zone coordinates: location
+  records stay the only home of coordinates, entered through the registry.)
+- **Storage**: one row per person and day (date, location, start, end, kind)
+  plus the freshness, a content hash and a day count, replaced atomically with
+  one audit row of counts and freshness; an identical re-post rewrites no school
+  rows but still appends its audit row. Event text is never stored or logged.
+  Source attribution here means that the table holds only Home Assistant data
+  and every audit row carries the actor `home_assistant`; a stored day is not
+  traced to its calendar entity, because entity IDs are never stored.
+- **Schools without days**: a school that got no day rows (every calendar it
+  uses was empty in the window) is stored as such and reported uncertain
+  through SCHOOL-009, a warning that never blocks the ingest, so a summer break
+  still ingests. The acknowledgement and the audit row list those schools in
+  `schools_without_days` (their `location_id`s, in configuration order).
+  SCHOOL-009 is raised at assessment time only on days where the child has a
+  transport default, so a child without one gets no warning on those days.
+- **Errors**: 422 bodies carry an error code or redacted locations only; a
+  malformed `Content-Length` answers 400; a database fault other than lock
+  contention answers 500 and stores nothing; configuration problems (no school, no audit key, a configured ID missing
+  from the registry) answer 503, and a write lock not granted in time answers
+  503 with `Retry-After`. The registry and zone checks run under the write
+  lock before the comparison with the stored snapshot, so a reference error
+  wins over a 409. A snapshot in which no configured calendar has an event in
+  the window (the likely signature of a Home Assistant entity outage) is refused with
+  422 `EMPTY_SNAPSHOT`, and the stored one is kept to go stale. Nothing is
+  stored on any error. Any other validation fault is a generic 500 with no
+  echo, so the set of 422 codes is closed.
 
 ## Alternatives Considered
 

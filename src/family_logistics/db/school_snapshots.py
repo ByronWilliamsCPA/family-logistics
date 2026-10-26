@@ -120,9 +120,12 @@ class ReplaceStatus(StrEnum):
 
 
 class SchoolSnapshotConflictError(BusinessLogicError):
-    """A snapshot older than (or as old as, but different from) the stored one.
+    """A snapshot not newer than the stored one, but different from it.
 
-    Nothing is written. The message names no payload content.
+    The comparison is on clamped freshness (``min(fetched_at, received_at)``),
+    so two different snapshots whose clamped times are equal also conflict,
+    even when the second one's ``fetched_at`` is later. Nothing is written.
+    The message names no payload content.
     """
 
 
@@ -399,8 +402,8 @@ class SchoolSnapshotRepository:
             ``SchoolSnapshotBusyError`` propagates when another writer holds
             the write lock past the lock timeout. Nothing is written.
             ``ValidationError`` (a naive or unstorable timestamp, or two days
-            for one person and day) and ``SchoolSnapshotConflictError`` (an
-            older snapshot) and ``SchoolSnapshotConflictError`` come from
+            for one person and day) and ``SchoolSnapshotConflictError`` (a
+            snapshot not newer than the stored one) come from
             ``replace_with``.
         """
         return self.replace_with(
@@ -433,8 +436,10 @@ class SchoolSnapshotRepository:
             ValidationError: A naive timestamp, a timestamp that cannot be
                 stored (``INVALID_TIME``), or two days for one person and
                 day. Nothing is written.
-            SchoolSnapshotConflictError: The snapshot is older than the stored
-                one. Nothing is written.
+            SchoolSnapshotConflictError: The snapshot differs from the stored
+                one and its clamped freshness (``min(fetched_at,
+                received_at)``) is not after the stored one. Nothing is
+                written.
 
         Note:
             ``SchoolSnapshotBusyError`` propagates when another writer holds

@@ -275,7 +275,7 @@ FIELD_STATUS: dict[str, str] = {
     "collect_days_ahead": CONSUMED,
     "source_max_staleness_minutes": CONSUMED,
     "ha_token": CONSUMED,
-    "ha_schools": M2,
+    "ha_schools": CONSUMED,
     "apprise_url": CONSUMED,
     "apprise_config_key": M3,
     "apprise_tag_report": M3,

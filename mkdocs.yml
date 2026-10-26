@@ -171,6 +171,7 @@ nav:
   - User Guide:
       - Overview: guides/overview.md
       - Configuration: guides/configuration.md
+      - Home Assistant School Snapshot: guides/ha-school-snapshot.md
       - Usage: guides/usage.md
 
   - Operations:
