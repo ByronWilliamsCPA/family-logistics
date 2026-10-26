@@ -182,8 +182,8 @@ class Leg:
         Returns:
             The leg for the departure's local weekday and bucket.
 
-        Raises:
-            ValidationError: If ``departure`` is naive.
+        Note:
+            A naive ``departure`` raises ``ValidationError``.
         """
         weekday, bucket = slot_of(departure, zone)
         return cls(origin, destination, weekday, bucket)
@@ -306,8 +306,8 @@ def slot_of(departure: datetime, zone: tzinfo) -> tuple[int, int]:
     Returns:
         ``(weekday, bucket)`` with Monday as 0 and buckets 0 to 95.
 
-    Raises:
-        ValidationError: If ``departure`` is naive.
+    Note:
+        A naive ``departure`` raises ``ValidationError``.
     """
     _require_aware("departure", departure)
     local = departure.astimezone(zone)
@@ -453,8 +453,8 @@ class RouteRelayRepository:
             The observation, or None when there is none or it is older than
             ``CACHE_VALIDITY`` or dated in the future.
 
-        Raises:
-            ValidationError: If ``now`` is naive.
+        Note:
+            A naive ``now`` raises ``ValidationError``.
         """
         _require_aware("now", now)
         with self._engine.connect() as connection:
@@ -491,13 +491,12 @@ class RouteRelayRepository:
             pending for the same leg, weekday and bucket, ``FULL`` when the
             queue holds ``MAX_PENDING_REQUESTS`` live requests.
 
-        Raises:
-            ValidationError: If ``now`` is naive.
-            RouteRelayBusyError: The write lock was not granted in time.
-
         Note:
-            A location id with no ``location`` row violates a foreign key and
-            raises ``sqlalchemy.exc.IntegrityError``; nothing is written.
+            A naive ``now`` raises ``ValidationError``. If the write lock is not
+            granted in time, ``RouteRelayBusyError`` is raised and nothing is
+            written. A location id with no ``location`` row violates a foreign
+            key and raises ``sqlalchemy.exc.IntegrityError``; nothing is
+            written.
         """
         _require_aware("now", now)
         with _write_locked(self._engine, self._lock_timeout_ms) as connection:
@@ -552,8 +551,8 @@ class RouteRelayRepository:
         Returns:
             The requests whose expiry is still ahead.
 
-        Raises:
-            ValidationError: If ``now`` is naive.
+        Note:
+            A naive ``now`` raises ``ValidationError``.
         """
         _require_aware("now", now)
         with self._engine.connect() as connection:
@@ -599,8 +598,8 @@ class RouteRelayRepository:
         Returns:
             The due requests.
 
-        Raises:
-            ValidationError: If ``now`` is naive.
+        Note:
+            A naive ``now`` raises ``ValidationError``.
         """
         due = [
             request
@@ -672,7 +671,10 @@ class RouteRelayRepository:
         Raises:
             ValidationError: A naive ``now``, or a duration outside
                 ``1..MAX_ROUTE_DURATION_SECONDS``. Nothing is written.
-            RouteRelayBusyError: The write lock was not granted in time.
+
+        Note:
+            If the write lock is not granted in time, ``RouteRelayBusyError`` is
+            raised and nothing is written.
         """
         _require_aware("now", now)
         for answer in answers:

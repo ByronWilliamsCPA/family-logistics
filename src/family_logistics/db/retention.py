@@ -160,9 +160,9 @@ def purge_expired_route_cache(connection: Connection, *, now: datetime) -> int:
     Returns:
         The number of entries deleted.
 
-    Raises:
-        ValidationError: If ``now`` is a naive datetime. The message does not
-            contain the value.
+    Note:
+        A naive ``now`` raises ``ValidationError``; the message does not contain
+        the value.
     """
     # #ASSUME: Security: cached travel times between named places are
     # Confidential (privacy spec); the retention period equals the validity
@@ -192,9 +192,9 @@ def purge_expired_route_requests(connection: Connection, *, now: datetime) -> in
     Returns:
         The number of requests deleted.
 
-    Raises:
-        ValidationError: If ``now`` is a naive datetime. The message does not
-            contain the value.
+    Note:
+        A naive ``now`` raises ``ValidationError``; the message does not contain
+        the value.
     """
     _require_aware(now)
     table = schema.route_request

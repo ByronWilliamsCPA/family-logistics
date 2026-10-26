@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import BaseModel, Field, StrictInt
 from sqlalchemy.exc import SQLAlchemyError
 
 from family_logistics.core.crypto import (
@@ -99,8 +99,6 @@ class RouteEndpoint(BaseModel):
         kind: ``zone`` for a zone entity id, ``address`` for address text.
         value: The zone entity id or the address.
     """
-
-    model_config = ConfigDict(frozen=True)
 
     kind: Literal["zone", "address"]
     value: str
