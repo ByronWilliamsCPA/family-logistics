@@ -51,7 +51,7 @@ send more than a channel needs, and treat other families' data as on loan.
 | Analysis run | run_id, trigger, window, freshness, rules version, state, counts, output | I (output C) | Report HTML stored as an artifact with run-log retention. |
 | Audit | timestamp, actor, object, prior hash, new hash, hash key version, action, correlation ID | I | Hashes only, never content. The hashes are HMAC-SHA256 of a canonical state under `FL_AUDIT_KEY` (kept in the secret store, never in the database), and each row records the key version. Holding the table alone does not let anyone confirm a guessed state; whoever also holds the key can, so rows stay pseudonymous, not anonymous. The table is append-only: the database rejects updates, overwrites and deletes of rows younger than 365 days. |
 | HA snapshot | parsed school days (person, date, location, start, end, kind), fetched_at, received_at, content hash, day count | C | Event text, descriptions, calendar entity IDs and zones are checked or classified on arrival and never stored or logged. Only the configured school calendars and zones are accepted; no person-tracker or device-location entities are ever accepted. |
-| Route cache | endpoints (location IDs), bucket, duration, source, age | C | Keyed by location ID, not address. |
+| Route cache | endpoints (location IDs), weekday and 15-minute bucket, duration, source, age | C | Keyed by location ID, weekday and bucket, not address. |
 
 Not collected, ever: GPS or device location of children, phone numbers of
 minors, school records, health data, photos, Riley's unrelated Google work
@@ -65,8 +65,8 @@ Legend: **Y** allowed, **M** allowed masked, **P** pseudonym only, **N** never.
 |------|-----------|----------|------|-------|---------|-----|-----|
 | Family child first name | Y | Y (ID preferred) | Y | Y | Y | Y | N (fictional examples only) |
 | External child first name | Y | N (ID only) | M (initial) | Y | M (initial) | P | P |
-| External household address | Y (protected, section 5; only where routing needs it) | N | N | N (named location only) | N | N | N |
-| Family home address | Y | N | N | N (shown as "Home") | N ("Home") | N ("Home") | N |
+| External household address | Y (protected, section 5; only where routing needs it) | N | N | N (named location only) | N, except the `ha_relay` route-request fallback for a location with no `ha_zone_entity_id` (section 5) | N | N |
+| Family home address | Y | N | N | N (shown as "Home") | N ("Home"), except the `ha_relay` route-request fallback for a location with no `ha_zone_entity_id` (section 5) | N ("Home") | N |
 | Activity venue name | Y | Y | Y | Y | Y | Y | Y (public venues only) |
 | Ride times and driver | Y | Y | Y | Y | Y | Y | Fixtures only, synthetic |
 | Raw calendar notes | Y (until 30 days after the event ends or is deleted) | N | N | N | N | N | Sanitized fixtures only (M0 check 2) |
@@ -99,8 +99,8 @@ carry children's schedules. Signal and SMS are future options only.
   plaintext write; they do not prove a value is encrypted, because only the key
   can show that.
 - Routing uses location IDs internally; plaintext addresses are decrypted only
-  in the routing adapter call, the `ha_relay` route-request fallback described
-  below, and the registry UI.
+  in the routing adapter (including the `ha_relay` fallback below) and the
+  registry UI.
 - The routing provider is the only external party that receives an address:
   Google Routes directly, or Home Assistant's Waze action through the
   `ha_relay` route-request endpoint (the token-authenticated HA-only route that
@@ -154,6 +154,7 @@ Before any call to the local inference server:
 | Confirmed passenger legs after event deletion | 90 days after the trip date | supports change-impact comparison |
 | Resolved findings | 90 days after resolution | |
 | Inactive external passenger and household | removed or anonymised 180 days after the carpool ends (measured from the last trip, or a recorded carpool end date), or on request; audit hashes keep their own retention | registry review prompt at 165 days; the removal job arrives with the scheduler (M3), and until then rows are kept |
+| Route cache entries | 28 days after the last observation for that weekday and 15-minute bucket; also dropped at once when the location's address, coordinates or zone change (ADR 0006) | the purge and invalidation mechanism arrives with the `ha_relay` cache in PR 2 of the routing series (migration `0005`), and until then there is no cache |
 | Backups | 14 days rolling (proposed) | backup sidecar |
 
 The inactive-passenger period is 180 days, not 90, because a carpool pauses

@@ -89,6 +89,13 @@ Unofficial Waze scraping and undocumented APIs are prohibited.
    weekday-and-bucket rule: it must never answer a different weekday, a
    different bucket, or a leg whose bucket has no observation in the last 28
    days (that leg is unknown, ROUTE-010).
+3. **Invalidation.** Editing a location's address, coordinates or
+   `ha_zone_entity_id`, merging it into another location, or re-verifying it
+   drops that location's route cache entries. A corrected pickup address must
+   never be answered from the old address's travel time for up to 28 days: a
+   too-short cached duration reads as feasible, which is the unsafe direction.
+   Separately, an entry is purged 28 days after the last observation for its
+   weekday bucket (privacy spec, section 7).
 
 ```text
 #ASSUME: Security: the owner accepted that plaintext addresses can reach Home
@@ -97,9 +104,12 @@ Waze observation is a good enough estimate for the same weekday and bucket for
 28 days.
 #VERIFY: The privacy spec (section 5) states the address fallback plainly. PR 2
 adds a test that a location with a zone is sent as its zone id and never as an
-address, and a test that an observation older than 28 days, or from another
-weekday or bucket, is not served. Revisit the 28-day window after the shadow
-dry-run if estimates drift.
+address, a test that an observation older than 28 days, or from another
+weekday or bucket, is not served, and a test
+(`test_location_edit_drops_its_route_cache_entries`) that editing, merging or
+re-verifying a location drops that location's cached entries so the next
+estimate is unknown (ROUTE-010) until Home Assistant posts a fresh result.
+Revisit the 28-day window after the shadow dry-run if estimates drift.
 ```
 
 ### Delivery
