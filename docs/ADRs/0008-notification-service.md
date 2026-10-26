@@ -118,7 +118,7 @@ sets equal) plus fixed templates for the run-failed, status, report and ops push
 | Input | Source | Rendered as |
 |-------|--------|-------------|
 | Rule, severity | `Finding.rule_id`, `Finding.severity` | Template; `[CRITICAL]`, `[WARNING]`, `[COULD NOT VERIFY]` |
-| Lifecycle | `TrackedFinding.lifecycle`, state row | `new`, `back again`, `still open`, `now critical` |
+| Lifecycle | `TrackedFinding.lifecycle`, state row | `new`, `back again`, `still open`, `now critical`, `now imminent` (kind-only escalation) |
 | When | Resolved subject (D7), `FL_TIMEZONE` | `Fri 30 Oct 15:15`, or `Fri 30 Oct` for a day |
 | Family child or parent | Resolved subject, kind `family` | First name (below) |
 | External child | Resolved subject, kind `external` | Initial only: `E.` |
