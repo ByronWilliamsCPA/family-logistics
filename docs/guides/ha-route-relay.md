@@ -18,6 +18,12 @@ The app caches each result for the same weekday and 15-minute bucket for up to
 incomplete); the app never guesses a duration. See
 [ADR 0006](../ADRs/0006-route-provider-abstraction.md) for the decisions.
 
+!!! note "Not wired in yet"
+    The two routes below are live, but nothing in the application builds the
+    `ha_relay` provider yet (`build_route_provider` has no caller outside tests),
+    so no request is queued and `GET /api/v1/route-requests` returns an empty
+    list until the M3 wiring lands.
+
 !!! warning "Unverified assumptions"
     `#ASSUME`: Home Assistant resolves a bare time-of-day `departure_time`
     (for example `08:00:00`) to the **next** occurrence of that time, not to
@@ -56,6 +62,16 @@ Returns the **due** requests, oldest first, at most 50:
   sent, never the address) and `address` only for a location with no zone, in
   which case `value` is the decrypted address. Give a location a zone to keep its
   address off the relay.
+- **Other families' homes need a zone.** A location with no zone that is another
+  family's home is never sent: its address does not leave the app, the leg stays
+  unknown (ROUTE-010) and any ride that needs it is incomplete until the home has
+  a zone. A home is another family's when a contact from that family (for
+  example Driver S) is registered with it as home, even if a household member
+  lists the same home. A passenger's default pickup or drop-off alone does not
+  count: Passenger E's home is protected only once a contact from that
+  household is registered with it as home, or it has a zone. The household's own
+  zone-less home and venues such as a school or a music studio are still sent as
+  addresses. The rule is `family_logistics.domain.address_release`.
 - `weekday` is `mon` to `sun`; `departure_time` is a local `HH:MM:SS`.
 - A request is **due** when its weekday matches the weekday of the next local
   occurrence of `departure_time` at poll time **and** that occurrence is at least
@@ -65,8 +81,12 @@ Returns the **due** requests, oldest first, at most 50:
   has expired or been answered is not returned. A start time that does not exist
   or occurs twice on either of the next two local days (a daylight saving
   change) is not returned either.
+- The app judges every endpoint again when the poll is served, against the
+  registry as it is then: a request queued before a contact was registered for a
+  home is left out from that poll on, and nothing is decrypted for it.
 - A request whose location has neither a zone nor a readable address (an
-  address that cannot be decrypted, or no `FL_DATA_KEY`) is left out. This fails
+  address that cannot be decrypted, or no `FL_DATA_KEY`), or whose endpoint is
+  another family's zone-less home, is left out. This fails
   closed: the leg stays unknown. It still occupies the queue (500 requests) until
   it expires after 8 days, which is how it clears. The limit of 50 per poll
   counts only the requests that can be routed, so unroutable ones cannot starve
@@ -179,7 +199,11 @@ verified.
 1. Set `FL_HA_TOKEN`, `FL_AUDIT_KEY` and, if any location has no zone,
    `FL_DATA_KEY`. Confirm both routes return 401 without the token.
 2. Give each location that is a routing endpoint a Home Assistant zone, so no
-   address is sent.
+   address is sent. This is required for every home of another family (for
+   example Driver S's or Passenger E's): without a zone the app withholds it.
+   For Passenger E and Passenger R, register a contact from the household with
+   the home as `home_location_id`, or give the home a zone, before enabling
+   `ha_relay`.
 3. Confirm Home Assistant's time zone equals `FL_TIMEZONE` (Home Assistant
    Settings, General, time zone). `departure_time` is a bare local time that Home
    Assistant reads in its own zone, so a mismatch silently files results under

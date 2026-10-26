@@ -95,7 +95,8 @@ Unofficial scraping and undocumented routing APIs are prohibited.
    addresses. Only the two endpoints of a leg are sent, never names or ride
    purpose. The rule is the pure functions `is_other_family_home` and
    `ha_relay_endpoint` in `family_logistics.domain.address_release`, which the
-   `ha_relay` provider must call for every endpoint.
+   `ha_relay` provider applies to every endpoint (PR 2 implements the gate; see
+   [How the address gate is enforced](#how-the-address-gate-is-enforced)).
 
    *Rationale.* Other families' home addresses are privacy class R, held on
    loan, and the notice given to those families promises their home address is
@@ -135,12 +136,20 @@ never reach Home Assistant as plaintext; the family home, venue and passenger
 default addresses may, and once there, Home Assistant may keep them in
 traces, the logbook, recorder history and backups, and its Google travel time
 action sends every endpoint (a zone as its coordinates) on to Google.
-#VERIFY: The ha_relay provider calls `ha_relay_endpoint` for every endpoint.
-PR 2 adds a test that a zone-less other-family home never appears in a
-route-request payload and yields ROUTE-010, and that no address appears in
-logs, route cache rows, audit rows or error responses. Check Home Assistant's
-trace and recorder behaviour for the relay automation against the deployed
-version before enabling ha_relay (privacy spec, section 5).
+#VERIFY: PR 2 implements the gate: the ha_relay provider applies
+`ha_relay_endpoint` to every endpoint, at enqueue time and again at serve time.
+`tests/unit/test_route_relay_api.py::TestAddressRelease::
+test_a_zone_less_other_family_home_never_appears_in_a_route_request_payload`
+shows a zone-less other-family home absent from the payload (plaintext,
+ciphertext and request id), not logged and not decrypted;
+`tests/unit/test_ha_relay_provider.py::TestEngine::
+test_a_zone_less_other_family_home_is_withheld_and_the_run_incomplete` shows
+ROUTE-010 and an INCOMPLETE run through the provider and the engine; and
+`TestAddressRelease::test_a_registry_change_after_enqueue_stops_release_at_get_time`
+shows a contact registered after a request was queued stops its release. The
+audit log and cache rows hold location ids only. Check Home Assistant's trace
+and recorder behaviour for the relay automation against the deployed version
+before enabling ha_relay (privacy spec, section 5).
 #ASSUME: Timing: a cached travel-time observation is a good enough estimate for
 the same weekday and bucket for 28 days.
 #VERIFY: PR 2 adds, in `tests/unit/test_route_relay_api.py`, a test that a
@@ -160,6 +169,35 @@ location and a raw SQL update; no test covers a merge because no merge
 operation exists. Revisit the 28-day window after the shadow dry-run if
 estimates drift.
 ```
+
+### How the address gate is enforced
+
+PR 2 implements the owner's gate. The policy is the pure module
+`family_logistics.domain.address_release` (`is_other_family_home`,
+`ha_relay_endpoint`); the provider and the poll never decide it themselves.
+`RouteRelayRepository.location_sources` applies it to each location, reading
+the registry people in the same transaction as the location rows, and returns
+a `ZONE`, `ADDRESS` or `WITHHELD` decision. The protected address is returned
+only for `ADDRESS`, so a withheld home has no ciphertext to decrypt by mistake.
+It is enforced at two points:
+
+1. **Enqueue time, in the provider.** On a cache miss the provider does not
+   queue a leg with a `WITHHELD` endpoint and logs only the location id
+   (`route_relay.leg_withheld`). No request ever names that leg, so it stays
+   unknown (ROUTE-010) and the run is `INCOMPLETE`. A cache hit is served as
+   before: a duration holds no address, and a hit can exist only for a leg that
+   was released when the policy allowed it.
+2. **Serve time, in `GET /api/v1/route-requests`.** The registry can change
+   after a request was queued (a contact is registered for that home), so the
+   poll re-evaluates both endpoints of every due request against the registry as
+   it is then and omits a request with a `WITHHELD` endpoint before decrypting
+   anything, not even the other endpoint of that leg. The omitted request is
+   unroutable under the existing rule: dropped before the per-poll limit, left
+   pending and cleared by expiry. Only the request id and location ids are
+   logged (`route_relay.request_withheld`).
+
+A zone beats the rule: a contact's home that has a zone is sent as its zone id.
+Removing that zone makes the home zone-less and so withheld.
 
 ### How `ha_relay` works (PR 2)
 
@@ -312,8 +350,10 @@ what makes such a change visible. Re-verify after a Home Assistant upgrade.
 - The first route in the response is used; whether to take the slowest route
   instead is an open owner decision.
 - A request whose endpoint cannot be resolved (a location with neither a zone
-  nor an address, or an address that cannot be decrypted or has no data key) is
-  left out of the poll and logged by request id only. This fails closed: the leg
+  nor an address, an address that cannot be decrypted or has no data key, or
+  another family's zone-less home that the address gate withholds) is left out
+  of the poll and logged by request id (and, for a withheld home, its location
+  id) only. This fails closed: the leg
   stays unknown. Such a request still occupies the queue cap (500) until it
   expires after 8 days, which is how it clears. The poll limit (50) counts only
   routable requests, so unroutable ones queued ahead cannot starve them. A leg
@@ -334,7 +374,9 @@ Routing ships as three stacked PRs:
    estimate unknown, so any ride that needed an estimate was `incomplete`,
    ROUTE-010). `google_routes` raises a typed not-implemented error and
    `static` requires an explicit table. The factory is not wired into any
-   service yet. `NullRouteProvider` remains as a fail-closed building block.
+   service yet: nothing in `src` outside `adapters/routing` calls
+   `build_route_provider`. `NullRouteProvider` remains as a fail-closed building
+   block.
 2. **PR 2 (this change):** `ha_relay` with the result cache and request tables
    (migration `0005`), `GET /api/v1/route-requests` and
    `POST /api/v1/route-results`. `build_route_provider` now returns the real
@@ -343,7 +385,12 @@ Routing ships as three stacked PRs:
    `ROUTE_PROVIDER_ENGINE_REQUIRED`) rather than falling back. Migration
    `0005` depends on migration `0004` from the school snapshot storage PR
    (#27), which has merged. The 28-day window is a fixed value, not an `FL_`
-   setting, because it is a correctness rule; changing it amends this ADR.
+   setting, because it is a correctness rule; changing it amends this ADR. PR 2
+   also implements the owner's address-release gate (see
+   [How the address gate is enforced](#how-the-address-gate-is-enforced)). The
+   two routes are registered by `create_app`, but until a service builds the
+   provider (the M3 wiring) nothing queues a request, so `GET
+   /api/v1/route-requests` returns an empty list.
 3. **PR 3:** `google_routes` and the monthly budget counter.
 
 ## Alternatives Considered

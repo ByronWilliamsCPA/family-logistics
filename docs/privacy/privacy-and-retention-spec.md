@@ -110,9 +110,14 @@ carry children's schedules. Signal and SMS are future options only.
   resolved by Home Assistant to its coordinates). Only the two endpoints of a
   leg are sent, never names or ride purpose.
 - `ha_relay` leg endpoints follow the owner decision of 2026-10-25 (ADR 0006),
-  **other families' homes need a zone**, enforced by
-  `family_logistics.domain.address_release.ha_relay_endpoint` and
-  `is_other_family_home`:
+  **other families' homes need a zone**. The policy is
+  `family_logistics.domain.address_release` (`ha_relay_endpoint` and
+  `is_other_family_home`), and the `ha_relay` provider implements the gate at two
+  points: it does not queue a leg with a withheld endpoint, and
+  `GET /api/v1/route-requests` re-evaluates every endpoint against the registry
+  as it is when the poll is served and omits a withheld request before any
+  address is decrypted, so a contact registered after a request was queued still
+  stops its release:
   - a location with an `ha_zone_entity_id` is sent as that entity id, never as
     an address;
   - another family's home with no zone is withheld: its address never leaves
