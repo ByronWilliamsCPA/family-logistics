@@ -61,6 +61,7 @@ from family_logistics.domain.events import (
     SchoolSnapshot,
 )
 from family_logistics.domain.locations import LocationResolver
+from family_logistics.domain.notification_subjects import RideIndex
 from family_logistics.domain.parser import parse_trip
 from family_logistics.domain.recurrence import occurrence_kind
 from family_logistics.services.collector import (
@@ -100,10 +101,18 @@ class RunOutcome:
     Attributes:
         run_id: Stored run identifier.
         result: The engine result (findings, run status, timelines).
+        trigger: What started the run (one of ``TRIGGERS``).
+        rides: The run's ride windows for notification imminence: current
+            trips, unparsed transport events and ``history.trips`` for a
+            completed run; ``history.trips`` alone for a failed run that read
+            its history. None means unknown (the history could not be read),
+            and the notification policy counts unknown as imminent.
     """
 
     run_id: str
     result: AssessmentResult
+    trigger: str = "on_demand"
+    rides: RideIndex | None = None
 
 
 def engine_settings(settings: Settings) -> EngineSettings:
@@ -236,13 +245,14 @@ class AssessmentService:
         )
         history: StoredHistory | None = None
         trips: tuple[Trip, ...] = ()
+        rides: RideIndex | None = None
         # #EDGE: Data integrity: a permanently corrupt trip snapshot row makes
         # every run fail here, so runs stay FAILED (never clear) until a human
         # decides the snapshot healing policy; undecodable rows are not skipped.
         # #VERIFY: tests/unit/test_assessment_service.py::TestFailedRuns.
         try:
             history = self._repo.load_history()
-            result, trips = self._assess(now, (start, end), history, school)
+            result, trips, rides = self._assess(now, (start, end), history, school)
         except Exception as exc:  # noqa: BLE001 - any failure must be recorded as failed
             # Only the class name is kept: messages can carry addresses.
             logger.error(  # noqa: TRY400 - a traceback can carry addresses
@@ -252,6 +262,14 @@ class AssessmentService:
             # so a failed run's counts show what is still open, not a clear
             # board. With no readable history there are none to carry.
             previous = history.open_findings if history is not None else ()
+            # #ASSUME: Data integrity: with no readable history the ride set is
+            # unknown (None), which the notification policy counts as imminent.
+            # #VERIFY: tests/unit/test_assessment_service.py::TestRunOutcomeRides.
+            rides = (
+                RideIndex.build(current=(), previous=history.trips, unparsed=())
+                if history is not None
+                else None
+            )
             result = failed_result(
                 now, f"assessment raised {type(exc).__name__}", previous
             )
@@ -263,7 +281,7 @@ class AssessmentService:
             status=result.run_status.value,
             counts=result.counts(),
         )
-        return RunOutcome(run_id, result)
+        return RunOutcome(run_id, result, trigger, rides)
 
     def _assess(
         self,
@@ -271,7 +289,7 @@ class AssessmentService:
         window: tuple[datetime, datetime],
         history: StoredHistory,
         school: SchoolSnapshot | None,
-    ) -> tuple[AssessmentResult, tuple[Trip, ...]]:
+    ) -> tuple[AssessmentResult, tuple[Trip, ...], RideIndex]:
         # #EDGE: Timing: the assessment window is [today, today + N days] while
         # the collector window starts ``collect_days_back`` days earlier, so
         # events from the previous days are collected but not assessed; intended.
@@ -331,22 +349,29 @@ class AssessmentService:
             settings=self._engine_settings,
             history=AssessmentHistory(
                 previous_trips=history.trips,
-                unparsed_trip_keys=frozenset(unparsed),
+                unparsed_trip_keys=frozenset(key for key, _, _ in unparsed),
                 parse_findings=parse_findings,
                 resolved_issue_ids=history.resolved_issue_ids,
             ),
         )
-        return result, trips
+        rides = RideIndex.build(
+            current=trips, previous=history.trips, unparsed=unparsed
+        )
+        return result, trips, rides
 
     @staticmethod
     def _parse_rides(
         events: Sequence[SourceEvent],
         sources: dict[str, CalendarSource],
         snapshot: RegistrySnapshot,
-    ) -> tuple[tuple[Trip, ...], tuple[Finding, ...], list[SourceEventKey]]:
+    ) -> tuple[
+        tuple[Trip, ...],
+        tuple[Finding, ...],
+        list[tuple[SourceEventKey, datetime, datetime]],
+    ]:
         trips: list[Trip] = []
         findings: list[Finding] = []
-        unparsed: list[SourceEventKey] = []
+        unparsed: list[tuple[SourceEventKey, datetime, datetime]] = []
         for event in events:
             source = sources.get(event.calendar_id)
             if (
@@ -367,7 +392,7 @@ class AssessmentService:
             if parsed.trip is not None:
                 trips.append(parsed.trip)
             else:
-                unparsed.append(event.to_key())
+                unparsed.append((event.to_key(), event.start, event.end))
         return tuple(trips), tuple(findings), unparsed
 
     @staticmethod

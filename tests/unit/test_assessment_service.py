@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import timedelta
 from zoneinfo import ZoneInfo
 
@@ -587,3 +588,80 @@ class TestRideParsing:
         assert not any(
             t.finding.rule_id.startswith("PARSE") for t in outcome.result.findings
         )
+
+
+class TestRunOutcomeRides:
+    """ADR 0008 D7: the outcome carries the trigger and the ride index."""
+
+    def test_a_bare_outcome_keeps_its_old_shape(self, engine):
+        result = make_service(engine).run().result
+        bare = RunOutcome("run-1", result)
+        assert bare.trigger == "on_demand"
+        assert bare.rides is None
+
+    def test_run_outcome_carries_trigger_and_rides(self, engine):
+        """T-subj-7, completed run."""
+        collect_all(engine, [ride("evt-1"), ride("evt-2", text="not a template")])
+        first = make_service(engine).run("daily")
+        good = ride("evt-1").to_key().as_str()
+        bad = ride("evt-2").to_key().as_str()
+
+        assert first.trigger == "daily"
+        assert first.rides is not None
+        assert set(first.rides.current) == {good}
+        assert first.rides.current[good].start == RIDE_START
+        assert first.rides.current[good].end == RIDE_END
+        assert set(first.rides.unparsed) == {bad}
+        unparsed = first.rides.unparsed[bad]
+        assert (unparsed.start, unparsed.end) == (RIDE_START, RIDE_END)
+        assert unparsed.driver_id is None
+        assert unparsed.passengers == ()
+        assert not first.rides.previous
+
+        second = make_service(engine).run("incremental")
+        assert second.trigger == "incremental"
+        assert second.rides is not None
+        assert set(second.rides.previous) == {good}
+        assert set(second.rides.current) == {good}
+
+    def test_a_failed_run_with_history_carries_the_previous_rides(self, engine):
+        """T-subj-7, failed run that read its history."""
+        collect_all(engine, [ride("evt-1", text=ROUTED_NOTES)])
+        make_service(engine).run()
+
+        failed = make_service(engine, provider=UnreachableRoutes()).run("daily")
+
+        assert failed.result.run_status is RunStatus.FAILED
+        assert failed.trigger == "daily"
+        assert failed.rides is not None
+        assert set(failed.rides.previous) == {ride("evt-1").to_key().as_str()}
+        assert not failed.rides.current
+        assert not failed.rides.unparsed
+
+    @pytest.mark.parametrize("payload", [{"version": 99}, [1, 2]])
+    def test_a_failed_run_without_history_has_no_ride_set(self, engine, payload):
+        """T-subj-7, failed run that could not read its history: unknown."""
+        collect_all(engine, [ride()])
+        store_snapshot_row(engine, payload)
+
+        outcome = make_service(engine).run("incremental")
+
+        assert outcome.result.run_status is RunStatus.FAILED
+        assert outcome.trigger == "incremental"
+        assert outcome.rides is None
+
+    def test_engine_unchanged(self, engine):
+        """T-subj-8: issue IDs, severities and the rules version are untouched."""
+        collect_all(engine, [ride(text="not a template")])
+        outcome = make_service(engine).run()
+
+        assert outcome.result.rules_version == "m2.1"
+        assert outcome.result.findings
+        for tracked in outcome.result.findings:
+            found = tracked.finding
+            material = "\x1f".join([found.rule_id, *sorted(found.entity_keys)])
+            assert found.issue_id == hashlib.sha256(material.encode()).hexdigest()[:16]
+        assert {
+            (t.finding.rule_id, t.finding.severity.value)
+            for t in outcome.result.findings
+        } == {("PARSE-001", "critical")}
