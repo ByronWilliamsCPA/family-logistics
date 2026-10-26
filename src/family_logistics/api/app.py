@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
@@ -14,10 +15,47 @@ from family_logistics.core.database import create_sqlite_engine
 from family_logistics.db.route_relay import RouteRelayRepository
 from family_logistics.middleware.correlation import CorrelationMiddleware
 from family_logistics.middleware.security import SecurityHeadersMiddleware
+from family_logistics.services.scheduler import SchedulerService
 from family_logistics.services.school_snapshot import SchoolSnapshotIngest
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Callable
+    from contextlib import AbstractAsyncContextManager
+
+    from sqlalchemy.engine import Engine
+
     from family_logistics.core.config import Settings
+
+
+def _scheduler_lifespan(
+    settings: Settings, engine: Engine
+) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
+    """Return a lifespan that runs the scheduler when ``FL_SCHEDULER_ENABLED``.
+
+    A configuration error while building it stops startup; a crash in a job
+    never does. Off by default.
+
+    Args:
+        settings: Application settings.
+        engine: The database engine the app already holds.
+
+    Returns:
+        A lifespan context manager factory for ``FastAPI``.
+    """
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
+        if not settings.scheduler_enabled:
+            yield
+            return
+        scheduler = SchedulerService.from_settings(settings, engine)
+        scheduler.start()
+        try:
+            yield
+        finally:
+            scheduler.stop()
+
+    return lifespan
 
 
 def create_app(settings: Settings) -> FastAPI:
@@ -29,14 +67,15 @@ def create_app(settings: Settings) -> FastAPI:
     Returns:
         The configured FastAPI app (docs disabled; not a public API).
     """
+    engine = create_sqlite_engine(settings.database_path)
     app = FastAPI(
+        lifespan=_scheduler_lifespan(settings, engine),
         title="Family Logistics",
         version=__version__,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
     )
-    engine = create_sqlite_engine(settings.database_path)
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(CorrelationMiddleware)
     app.include_router(build_health_router(engine))

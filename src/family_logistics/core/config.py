@@ -277,19 +277,19 @@ FIELD_STATUS: dict[str, str] = {
     "ha_token": CONSUMED,
     "ha_schools": CONSUMED,
     "apprise_url": CONSUMED,
-    "apprise_config_key": M3,
-    "apprise_tag_report": M3,
-    "apprise_tag_status": M3,
-    "apprise_tag_warning": M3,
-    "apprise_tag_urgent": M3,
-    "apprise_tag_ops": M3,
-    "apprise_tag_shadow": M3,
+    "apprise_config_key": CONSUMED,
+    "apprise_tag_report": CONSUMED,
+    "apprise_tag_status": CONSUMED,
+    "apprise_tag_warning": CONSUMED,
+    "apprise_tag_urgent": CONSUMED,
+    "apprise_tag_ops": CONSUMED,
+    "apprise_tag_shadow": CONSUMED,
     "proxy_trusted_cidrs": M4,
     "ui_allowed_users": M4,
     "data_key": CONSUMED,
     "audit_key": CONSUMED,
     "audit_key_version": CONSUMED,
-    "route_provider": M3,
+    "route_provider": CONSUMED,
     "google_routes_api_key": M3,
     "routes_monthly_budget_usd": M3,
     "routes_budget_warn_usd": M3,
@@ -297,12 +297,13 @@ FIELD_STATUS: dict[str, str] = {
     "llm_base_url": M5,
     "llm_api_key": M5,
     "llm_model": M5,
-    "weekly_cron": M3,
-    "daily_cron": M3,
-    "change_scan_minutes": M3,
+    "weekly_cron": CONSUMED,
+    "daily_cron": CONSUMED,
+    "change_scan_minutes": CONSUMED,
+    "scheduler_enabled": CONSUMED,
     "notification_mode": CONSUMED,
-    "quiet_hours_start": M3,
-    "quiet_hours_end": M3,
+    "quiet_hours_start": CONSUMED,
+    "quiet_hours_end": CONSUMED,
     "imminent_window_minutes": CONSUMED,
     "same_location_gap_minutes": CONSUMED,
     "overnight_gap_hours": CONSUMED,
@@ -394,13 +395,20 @@ class Settings(BaseSettings):
         llm_model: Model identifier, discovered during commissioning.
         weekly_cron: Cron expression for the weekly review (local time).
         daily_cron: Cron expression for the daily review (local time).
-        change_scan_minutes: Interval of the incremental change scan.
+        change_scan_minutes: Interval of the incremental change scan. When the
+            scheduler is enabled it must exceed the notification claim lifetime
+            (15 minutes; ``services.scheduler.scheduler_problems``).
+        scheduler_enabled: Run the in-process scheduler inside ``serve``
+            (collect, assess and notify on the scan interval, the daily and
+            weekly jobs and the retention purges). Off by default: the M3
+            blockers in docs/project/roadmap.md must close before a scheduler
+            becomes the first production caller of ``AssessmentService.run``.
         notification_mode: ``shadow`` (default) is the safe mode: every push,
             ops alerts included, goes to the shadow tag only (ADR 0008, D1).
             ``production`` is a deliberate operator decision taken jointly
             after the M3 shadow gate (docs/project/roadmap.md). Recipient
-            routing is configured in Apprise; the notification service reads
-            this value, but nothing calls it until the scheduler does.
+            routing is configured in Apprise; the scheduler's dispatch reads
+            this value.
         quiet_hours_start: Start of quiet hours (local time). Only an urgent
             push bypasses them, once per episode; CAP-014 never does.
         quiet_hours_end: End of quiet hours (local time).
@@ -500,6 +508,12 @@ class Settings(BaseSettings):
     weekly_cron: str = "0 15 * * SUN"
     daily_cron: str = "0 19 * * *"
     change_scan_minutes: int = Field(default=60, ge=5)
+    # #CRITICAL: Safety: the scheduler is off by default. Enabling it makes the
+    # process the first production caller of ``AssessmentService.run`` and of
+    # the notification service (shadow mode unless production is chosen).
+    # #VERIFY: tests/unit/test_config_validation.py asserts the default is
+    # False; the roadmap's M3 blockers close before it is switched on.
+    scheduler_enabled: bool = False
 
     # #CRITICAL: Safety: shadow mode is the default. Switching to production is
     # a process decision (both parents, after the M3 shadow gate in
