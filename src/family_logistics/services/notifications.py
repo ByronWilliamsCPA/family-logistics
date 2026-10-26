@@ -660,12 +660,13 @@ class NotificationService:
             status_stale=report.status_stale,
             unresolved=report.unresolved,
         )
-        if d.state_error is not None:
-            operation = str(d.state_error.details.get("operation", "complete"))
+        cause = d.state_error
+        if cause is not None:
+            operation = str(cause.details.get("operation", "complete"))
             msg = f"notification state could not be written ({operation})"
             raise NotificationStateError(
                 msg, operation=operation, report=report
-            ) from d.state_error
+            ) from cause
         return report
 
 

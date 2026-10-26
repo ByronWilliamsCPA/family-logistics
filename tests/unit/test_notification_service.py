@@ -649,8 +649,9 @@ class TestCrashRecovery:
             raise OperationalError("update", {}, Exception("locked"))
 
         monkeypatch.setattr(service._repo, "complete", broken)
+        first, second = warning(0), warning(1)
         with pytest.raises(NotificationStateError, match=r"\(complete\)") as caught:
-            go(service, clock, NOW, warning(0), warning(1))
+            go(service, clock, NOW, first, second)
         assert len(posts.payloads) == 1
         assert caught.value.details["operation"] == "complete"
         assert (caught.value.report.failed, caught.value.report.sent) == (1, 0)
@@ -668,8 +669,9 @@ class TestCrashRecovery:
 
         monkeypatch.setattr(service._repo, "release", locked)
         held = warning()
+        urgent = finding()
         with pytest.raises(NotificationStateError, match=r"\(release\)") as caught:
-            go(service, clock, NOW, finding(), held)
+            go(service, clock, NOW, urgent, held)
         assert len(posts.payloads) == 1
         report = caught.value.report
         assert (report.sent, report.released, report.failed) == (1, 1, 0)
@@ -684,8 +686,9 @@ class TestCrashRecovery:
             raise OperationalError("update", {}, Exception("locked"))
 
         monkeypatch.setattr(service._repo, "complete", locked)
+        urgent = finding()
         with pytest.raises(NotificationStateError) as caught:
-            go(service, clock, NOW, finding())
+            go(service, clock, NOW, urgent)
         assert caught.value.report.urgent_failed == 1
         assert isinstance(caught.value, DatabaseError)
 
@@ -730,8 +733,9 @@ class TestCrashRecovery:
             )
 
         monkeypatch.setattr(service._repo, "claim", busy)
+        urgent = finding()
         with pytest.raises(DatabaseError, match="claim"):
-            go(service, clock, NOW, finding())
+            go(service, clock, NOW, urgent)
         assert posts.payloads == []
 
 
@@ -755,10 +759,9 @@ class TestUnconfigured:
             make_service(engine, mode="production", configured=False)
 
     def test_production_from_settings_without_a_url_is_refused(self, engine):
+        settings = make_settings(notification_mode="production")
         with pytest.raises(ConfigurationError, match="FL_APPRISE_URL"):
-            NotificationService.from_settings(
-                engine, make_settings(notification_mode="production")
-            )
+            NotificationService.from_settings(engine, settings)
 
     def test_production_with_a_client_is_allowed(self, engine):
         service, _posts, _clock = make_service(engine, mode="production")
