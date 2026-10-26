@@ -173,7 +173,7 @@ class TestClaim:
         (claimed,) = result.claimed
         assert claimed.subject_key == ISSUE
         row = get_row(engine)
-        assert (row.kind, row.tag, row.rule_id) == ("notice", "fl-warning", "PICK-001")
+        assert (row.kind, row.tag, row.rule_id) == ("notice", "fl-warning", "DEST-004")
         assert (row.is_open, row.delivered, row.severity) == (True, False, None)
         assert (row.claim_token, row.claimed_at) == ("tok-a", T0)
         assert (row.episode_run_id, row.run_id, row.evaluated_at) == (

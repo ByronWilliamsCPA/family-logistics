@@ -65,7 +65,7 @@ def push(
     episode_start: bool = False,
     retry_only: bool = False,
     run_wide: bool = False,
-    rule_id: str | None = "PICK-001",
+    rule_id: str | None = "DEST-004",
 ) -> PlannedPush:
     """Build one planned push; the defaults describe an issue notice."""
     is_issue = key.startswith("issue:")
@@ -102,7 +102,7 @@ def state_row(**overrides: object) -> dict[str, object]:
         "mode": "shadow",
         "kind": "notice",
         "tag": "fl-warning",
-        "rule_id": "PICK-001",
+        "rule_id": "DEST-004",
         "severity": None,
         "is_open": True,
         "delivered": False,

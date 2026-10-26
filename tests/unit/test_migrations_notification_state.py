@@ -34,7 +34,7 @@ def state_row(**overrides):
         "mode": "shadow",
         "kind": "notice",
         "tag": "fl-warning",
-        "rule_id": "PICK-001",
+        "rule_id": "DEST-004",
         "severity": None,
         "is_open": True,
         "delivered": False,
@@ -65,8 +65,19 @@ def execute(engine, statement) -> None:
 
 
 def normalized(sql: str) -> str:
-    """Collapse whitespace and drop the bind-parameter escape of a colon."""
-    return re.sub(r"\s+", " ", sql.replace("\\:", ":")).strip()
+    """Collapse whitespace."""
+    return re.sub(r"\s+", " ", sql).strip()
+
+
+def unescaped(sql: str) -> str:
+    """Drop the bind-parameter escape of a colon in the declared CHECK text.
+
+    The schema module escapes colons (``\\:``) so SQLAlchemy does not read
+    ``:run_failed`` as a bind parameter. Only the declared side is unescaped:
+    the stored DDL must hold plain colons, so a literal backslash there fails
+    the comparison.
+    """
+    return normalized(sql.replace("\\:", ":"))
 
 
 def test_head_is_the_notification_state_revision(engine):
@@ -93,7 +104,7 @@ def test_check_constraints_match_name_and_sql_text(engine, table_name):
         for c in inspect(engine).get_check_constraints(table_name)
     }
     expected = {
-        str(c.name): normalized(str(c.sqltext))
+        str(c.name): unescaped(str(c.sqltext))
         for c in declared.constraints
         if c.__class__.__name__ == "CheckConstraint"
     }
@@ -220,8 +231,8 @@ def test_checks_reject_bad_rows(engine, overrides):
 def test_valid_subject_and_kind_pairs_are_accepted(engine, subject_key, kind):
     insert_state(engine, subject_key=subject_key, kind=kind)
     with engine.connect() as connection:
-        count = connection.execute(select(schema.notification_state)).all()
-    assert len(count) == 1
+        rows = connection.execute(select(schema.notification_state)).all()
+    assert len(rows) == 1
 
 
 @pytest.mark.parametrize(
