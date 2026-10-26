@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import re
 import string
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from string import Formatter
+from unittest.mock import patch
 
 import pytest
 from fl_factories import FRIDAY_START, REGISTRY, notes, trip
@@ -201,33 +203,40 @@ class TestTemplates:
         monkeypatch.setattr(text_module, "RULE_TEMPLATES", {})
         found = finding(rule_id, severity=Severity.CRITICAL)
         rendered = render_one(push(found))
-        assert (
+        assert rendered.title == (
+            "[shadow] [CRITICAL] Urgent ride check: needs attention"
+        )
+        assert rendered.body.splitlines() == [
+            "SHADOW: production would send this to fl-urgent (bypasses quiet hours).",
             f"- [CRITICAL] A ride check needs attention, at {FRIDAY_LOCAL}. "
-            f"Rule {rule_id}, ref {found.issue_id}."
-        ) in rendered.body
+            f"Rule {rule_id}, ref {found.issue_id}.",
+        ]
 
     def test_the_fallback_prints_a_rule_id_only_if_it_is_in_the_catalog(self):
         bogus = Finding("ZZZ-999 CANARYRULE", Severity.WARNING, "m", ("k",))
-        rendered = render_one(push(bogus, kind=PushKind.NOTICE))
-        assert "A ride check needs attention" in rendered.body
+        rendered = render_one(push(bogus, kind=PushKind.NOTICE), mode="production")
+        assert rendered.body.splitlines() == [
+            f"- [WARNING] A ride check needs attention, at {FRIDAY_LOCAL}. "
+            f"Ref {bogus.issue_id}."
+        ]
         assert "ZZZ" not in all_text(rendered)
         assert "CANARYRULE" not in all_text(rendered)
-        assert f"Ref {bogus.issue_id}." in rendered.body
 
     def test_the_fallback_omits_the_time_when_the_subject_has_none(self):
         bogus = Finding("ZZZ-999", Severity.WARNING, "m", ("k",))
         rendered = render_one(
             push(bogus, kind=PushKind.NOTICE, subj=Subject()), mode="production"
         )
-        assert "at " not in rendered.body.removeprefix("- [WARNING] ")[:34]
-        assert f"A ride check needs attention. Ref {bogus.issue_id}." in rendered.body
+        assert rendered.body == (
+            f"- [WARNING] A ride check needs attention. Ref {bogus.issue_id}."
+        )
 
     def test_a_finding_push_without_its_finding_still_renders(self):
         bare = PlannedPush(
             subject_key="issue:x", kind=PushKind.NOTICE, intended_tag="fl-warning"
         )
-        rendered = render_one(bare)
-        assert "A ride check needs attention" in rendered.body
+        rendered = render_one(bare, mode="production")
+        assert rendered.body == ("- [COULD NOT VERIFY] A ride check needs attention.")
 
 
 # ---------------------------------------------------------------------------
@@ -836,13 +845,34 @@ SUBJECTS = st.sampled_from(
 )
 
 
+RULE_IDS_WITH_UNKNOWN = st.sampled_from(
+    [*sorted(RULES), "ZZZ-999", "ZZZ-999 CANARYRULE"]
+)
+
+
+def without_templates(enabled):
+    """Patch ``RULE_TEMPLATES`` to empty so the fixed fallback is what renders."""
+    if enabled:
+        return patch.object(text_module, "RULE_TEMPLATES", {})
+    return nullcontext()
+
+
 class TestContentBoundary:
     @PROPS
-    @given(TOKENS, RULE_IDS, SEVERITIES, LIFECYCLES, KINDS, MODES, SUBJECTS)
+    @given(
+        TOKENS,
+        RULE_IDS_WITH_UNKNOWN,
+        SEVERITIES,
+        LIFECYCLES,
+        KINDS,
+        MODES,
+        SUBJECTS,
+        st.booleans(),
+    )
     def test_no_free_text_reaches_a_payload(
-        self, token, rule, severity, lifecycle, kind, mode, subj
+        self, token, rule, severity, lifecycle, kind, mode, subj, no_templates
     ):
-        """T-text-2."""
+        """T-text-2, through the templates and through the fallback."""
         canary = f"CANARY{token}"
         keys = (
             f"cal-{canary}|uid-{canary}|-",
@@ -852,16 +882,17 @@ class TestContentBoundary:
             f"source:{canary}",
             f"parse:{canary}",
         )
-        found = make_finding(
+        found = Finding(
             rule,
+            severity,
             f"{canary} {ADDRESS} {canary}-pickup {canary}-free-notes",
             keys,
             suggestion=f"{canary} move it to {ADDRESS}",
-            severity=severity,
         )
-        rendered = render_one(
-            push(found, kind=kind, lifecycle=lifecycle, subj=subj), mode
-        )
+        with without_templates(no_templates):
+            rendered = render_one(
+                push(found, kind=kind, lifecycle=lifecycle, subj=subj), mode
+            )
         shown = all_text(rendered)
         for forbidden in (canary, "CANARY", ADDRESS, "Example", "cal-", "uid-", "|"):
             assert forbidden not in shown
@@ -876,9 +907,10 @@ class TestContentBoundary:
         TRIGGERS,
         MODES,
         st.booleans(),
+        st.booleans(),
     )
     def test_no_free_text_survives_planning_and_chunking(
-        self, token, rules, trigger, mode, failed
+        self, token, rules, trigger, mode, failed, no_templates
     ):
         canary = f"CANARY{token}"
         found = [
@@ -907,11 +939,14 @@ class TestContentBoundary:
                 NOW,
             )
         built = planned_of(result, trigger, RIDES, NOW, mode)
-        for each in render_all(built, mode):
+        with without_templates(no_templates):
+            rendered = render_all(built, mode)
+        assert rendered
+        for each in rendered:
             shown = all_text(each)
             assert "CANARY" not in shown
             assert "Example" not in shown
-            assert "boom" not in shown
+            assert "error text" not in shown
 
     def test_trip_text_never_reaches_a_payload(self):
         """Pickup, destination, free notes and the event UID stay out."""
@@ -950,11 +985,21 @@ class TestContentBoundary:
             assert "ConnectionError" not in all_text(each)
 
     def test_the_friday_external_passenger_flow_renders_only_initials(self):
-        """The Friday scenario end to end: a changed leg names the child by initial."""
+        """The Friday scenario end to end: the dropped leg names the child by initial."""
+        friday = trip(
+            notes(
+                driver="Riley",
+                family="Sam",
+                external="Passenger E",
+                pickup="Music Studio",
+                destinations=(("Sam", "HOME"), ("Passenger E", "DEFAULT")),
+            ),
+            uid="friday-lesson",
+        )
         found = make_finding(
             "PASS-003",
             "Passenger E lost a ride to 742 Example Terrace",
-            (RIDE_KEY, "passenger:ext-e"),
+            (friday.key.as_str(), "passenger:ext-e"),
             severity=Severity.CRITICAL,
         )
         result = AssessmentResult(
@@ -962,17 +1007,23 @@ class TestContentBoundary:
             (TrackedFinding(found, Lifecycle.NEW),),
             (),
             (),
-            NOW,
+            friday.start - timedelta(hours=1),
         )
-        built = planned_of(result, "on_demand", RIDES, NOW, "production")
-        rendered = render_all(built, "production", {"critical": 1})
-        first = next(
-            r for r in rendered if "PASS-003" not in r.title and "[CRITICAL]" in r.title
+        rides = RideIndex.build(current=(), previous=(friday,), unparsed=())
+        built = planned_of(
+            result, "on_demand", rides, friday.start - timedelta(hours=1), "production"
         )
-        shown = all_text(first)
-        assert "Passenger E" not in shown
+        item = next(
+            r
+            for r in render_all(built, "production", {"critical": 1})
+            if r.title.startswith("[CRITICAL]")
+        )
+        assert item.body.startswith("- [CRITICAL] P.: a ride (Fri 23 Oct 15:30)")
+        assert "driver was Riley" in item.body
+        shown = all_text(item)
+        assert "Passenger" not in shown
         assert "Example" not in shown
-        assert "P." in shown or "a passenger" in shown
+        assert "Sam" not in shown
 
 
 # ---------------------------------------------------------------------------
