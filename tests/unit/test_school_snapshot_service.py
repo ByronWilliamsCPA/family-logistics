@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+import math
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from fl_engine import NOW
+from fl_engine import NOW, default, routes
+from fl_factories import CALENDAR
 from fl_ha_snapshot import (
     FRIDAY,
     SCHOOLS,
@@ -15,7 +17,9 @@ from fl_ha_snapshot import (
     payload,
     seed_with_zones,
     snapshot_settings,
+    weekdays,
 )
+from fl_service import collect
 from sqlalchemy import func, select
 
 from family_logistics.adapters.home_assistant.schemas import HaSnapshotPayload
@@ -23,17 +27,30 @@ from family_logistics.adapters.home_assistant.school_days import SnapshotMapping
 from family_logistics.core.database import create_sqlite_engine
 from family_logistics.core.exceptions import ConfigurationError
 from family_logistics.db import migrations_api
-from family_logistics.db.audit import AuditRepository
+from family_logistics.db.audit import AuditRepository, state_hash
+from family_logistics.db.registry import RegistryStore
 from family_logistics.db.schema import audit_log, school_day
 from family_logistics.db.school_snapshots import (
     ReplaceStatus,
     SchoolSnapshotConflictError,
+    SchoolSnapshotRepository,
 )
-from family_logistics.domain.events import SchoolDayKind
+from family_logistics.domain.context import (
+    DEFAULT_SOURCE_MAX_AGES,
+    HA_SNAPSHOT_SOURCE,
+)
+from family_logistics.domain.events import (
+    SchoolDayKind,
+    TransportDirection,
+    TransportMode,
+)
+from family_logistics.services.assessments import AssessmentService
 from family_logistics.services.school_snapshot import (
     AUDIT_ACTOR,
     AUDIT_OBJECT_REF,
+    DAYS_BEYOND_ASSESSMENT,
     MAX_FUTURE_SKEW,
+    IngestErrorCode,
     IngestRejectedError,
     SchoolIngestUnavailableError,
     SchoolSnapshotIngest,
@@ -89,9 +106,16 @@ class TestStored:
             "status": "stored",
             "schools": 2,
             "days": 3,
+            "schools_without_days": [],
             "fetched_at": (NOW - timedelta(minutes=1)).isoformat(),
             "received_at": NOW.isoformat(),
         }
+
+    def test_a_fetch_exactly_at_the_skew_limit_is_accepted(self, engine, audit_key):
+        limit = NOW + MAX_FUTURE_SKEW
+        ack = make_ingest(engine, audit_key).ingest(parse(fetched_at=limit.isoformat()))
+        assert ack.status is ReplaceStatus.STORED
+        assert ack.fetched_at == NOW
 
     def test_a_fetch_slightly_in_the_future_is_clamped_to_now(self, engine, audit_key):
         ahead = NOW + timedelta(minutes=4)
@@ -123,6 +147,49 @@ class TestStored:
         ack = ingest.ingest(parse(fetched_at=fetched, district=[holiday]))
         assert before <= ack.received_at <= datetime.now(UTC)
         assert ack.received_at.utcoffset() == timedelta(0)
+
+
+class TestWindow:
+    """The window starts on the household's local day, not the UTC day."""
+
+    def test_a_pacific_evening_keeps_todays_school_day(self, engine, audit_key):
+        # Friday 20:00 Pacific is already Saturday in UTC.
+        evening = datetime(2026, 10, 24, 3, tzinfo=UTC)
+        thursday = FRIDAY - timedelta(days=1)
+        ingest = make_ingest(engine, audit_key, clock=lambda: evening)
+        ingest.ingest(parse(middle=[bell(thursday), bell(FRIDAY)], high=[]))
+        latest = ingest.repository.latest()
+        assert latest is not None
+        assert [d.date for d in latest.days] == [FRIDAY]
+
+    def test_a_zone_ahead_of_utc_drops_its_own_yesterday(self, engine, audit_key):
+        # 12:00 UTC on Friday is 01:00 on Saturday in Auckland (UTC+13).
+        clock = datetime(2026, 10, 23, 12, tzinfo=UTC)
+        saturday = FRIDAY + timedelta(days=1)
+
+        def local(day: date) -> dict[str, str]:
+            return {
+                "start": f"{day.isoformat()}T09:00:00+13:00",
+                "end": f"{day.isoformat()}T15:00:00+13:00",
+                "summary": "Regular Day",
+            }
+
+        ingest = make_ingest(
+            engine, audit_key, clock=lambda: clock, timezone="Pacific/Auckland"
+        )
+        fetched = (clock - timedelta(minutes=1)).isoformat()
+        ingest.ingest(
+            parse(fetched_at=fetched, middle=[local(FRIDAY), local(saturday)], high=[])
+        )
+        latest = ingest.repository.latest()
+        assert latest is not None
+        assert [d.date for d in latest.days] == [saturday]
+
+    def test_the_margin_covers_the_snapshot_staleness_limit(self):
+        # A snapshot usable for max_age can be read up to ceil(max_age / 1 day)
+        # local days after its fetch, so the kept window must reach that far.
+        max_age = dict(DEFAULT_SOURCE_MAX_AGES)[HA_SNAPSHOT_SOURCE]
+        assert math.ceil(max_age / timedelta(days=1)) <= DAYS_BEYOND_ASSESSMENT
 
 
 class TestIdempotency:
@@ -161,6 +228,15 @@ class TestAudit:
         ]
         assert all(e.new_hash for e in entries)
 
+    def test_the_entry_holds_exactly_the_acknowledgement(self, engine, audit_key):
+        ack = make_ingest(engine, audit_key).ingest(parse(), correlation_id="req-1")
+        settings = snapshot_settings(audit_key)
+        (entry,) = AuditRepository.from_settings(engine, settings).entries_for(
+            AUDIT_OBJECT_REF
+        )
+        assert entry.prior_hash is None
+        assert entry.new_hash == state_hash(ack.as_dict(), key=audit_key)
+
     def test_without_an_audit_key_nothing_is_stored(self, engine):
         with pytest.raises(SchoolIngestUnavailableError):
             make_ingest(engine, None).ingest(parse())
@@ -175,6 +251,11 @@ class TestRejected:
             make_ingest(engine, audit_key).ingest(parse(fetched_at=ahead.isoformat()))
         assert caught.value.error_code == "FETCHED_AT_IN_FUTURE"
         assert count(engine, school_day) == 0
+
+    def test_codes_are_typed_and_serialize_as_plain_strings(self):
+        error = IngestRejectedError("refused", error_code=IngestErrorCode.UNKNOWN_ZONE)
+        assert error.error_code == "UNKNOWN_ZONE"
+        assert type(error.error_code) is str
 
     def test_unknown_zone_stores_nothing(self, engine, audit_key):
         make_ingest(engine, audit_key).ingest(parse())
@@ -277,6 +358,59 @@ class TestEmptySnapshot:
         ack = make_ingest(engine, audit_key).ingest(parse(middle=[], district=[]))
         assert ack.status is ReplaceStatus.STORED
         assert ack.days == 2
+        assert ack.schools_without_days == ("middle-school",)
+
+
+class TestSchoolWithoutDays:
+    """A school that got no row is stored and flagged, never refused (P29-09)."""
+
+    def test_its_days_are_reported_as_school_009(self, engine, audit_key):
+        with engine.begin() as connection:
+            store = RegistryStore(connection)
+            store.replace_transport_defaults(
+                "alex",
+                [default("alex", TransportDirection.TO_SCHOOL, TransportMode.BIKE)],
+            )
+            store.replace_transport_defaults(
+                "sam",
+                [
+                    default(
+                        "sam",
+                        TransportDirection.TO_SCHOOL,
+                        TransportMode.BIKE,
+                        school_id="middle-school",
+                    )
+                ],
+            )
+        middle = [bell(day) for day in weekdays(FRIDAY, 17)]
+        ack = make_ingest(engine, audit_key).ingest(parse(middle=middle, high=[]))
+        assert ack.status is ReplaceStatus.STORED
+        assert ack.schools_without_days == ("high-school",)
+
+        collect(engine, CALENDAR, (), at_time=NOW - timedelta(minutes=20))
+        settings = snapshot_settings(audit_key, caldav_calendars="")
+        service = AssessmentService(engine, settings, routes(), clock=lambda: NOW)
+        outcome = service.run(school=SchoolSnapshotRepository(engine).latest())
+        flagged = [
+            set(tracked.finding.entity_keys)
+            for tracked in outcome.result.findings
+            if tracked.finding.rule_id == "SCHOOL-009"
+        ]
+        assert not [keys for keys in flagged if "person:sam" in keys]
+        alex_days = {
+            key
+            for keys in flagged
+            if "person:alex" in keys
+            for key in keys
+            if key.startswith("day:")
+        }
+        assert alex_days == {f"day:{day.isoformat()}" for day in weekdays(FRIDAY, 15)}
+
+    def test_an_identical_repost_names_the_same_school(self, engine, audit_key):
+        make_ingest(engine, audit_key).ingest(parse(high=[]))
+        again = make_ingest(engine, audit_key).ingest(parse(high=[]))
+        assert again.status is ReplaceStatus.UNCHANGED
+        assert again.schools_without_days == ("high-school",)
 
 
 class TestUnavailable:
