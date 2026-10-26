@@ -4,7 +4,11 @@ Home Assistant pushes the raw output of its ``calendar.get_events`` action for
 each configured school calendar, the zone entity IDs it knows, and the time it
 fetched them. Every model here is strict, refuses unknown keys and bounds every
 list and string, so a malformed or oversized payload is refused before any of
-it is mapped or stored.
+it is mapped or stored. The models validate from JSON text
+(``model_validate_json``) or from the dict ``json.loads`` returns
+(``model_validate``); both paths apply the same checks. Duplicate JSON object
+keys are not detected here: parsers keep the last value, so a caller that must
+refuse them has to parse with ``object_pairs_hook`` before validating.
 
 The payload is untrusted input from the home network. Validation errors are
 reported through :func:`safe_error_locations`, which keeps only the error type
@@ -15,14 +19,29 @@ calendar entity ID or event text ever reaches a response or a log.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import date, datetime
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Self
 
-from pydantic import BaseModel, ConfigDict, Field, PlainValidator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PlainValidator,
+    field_validator,
+    model_validator,
+)
 
-from family_logistics.core.config import HA_CALENDAR_ENTITY_PATTERN
+from family_logistics.core.config import (
+    MAX_HA_SCHOOLS,
+    MAX_SCHOOL_CALENDARS,
+    CalendarEntityId,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pydantic import ValidationError as PydanticValidationError
 
 __all__ = [
@@ -33,7 +52,7 @@ __all__ = [
     "MAX_REPORTED_ERRORS",
     "MAX_SNAPSHOT_BYTES",
     "MAX_SUMMARY_LENGTH",
-    "MAX_TIME_LENGTH",
+    "MAX_TOTAL_EVENTS",
     "MAX_YEAR",
     "MAX_ZONES",
     "MIN_YEAR",
@@ -45,21 +64,37 @@ __all__ = [
 ]
 
 # #CRITICAL: security: the work one untrusted request can cause is bounded in
-# three places, and none alone suffices. The byte limit and these list and
-# string bounds cap what is parsed and held in memory; the year bounds
+# three places, and none alone suffices. The byte limit and these list,
+# string and total-event bounds cap what is parsed and held in memory; the year
+# bounds
 # (MIN_YEAR to MAX_YEAR) keep every time far from the edges of ``datetime``;
 # and the mapper clips each event to the snapshot window before listing its
 # days, so the mapping work is bounded by events times window days, not by
 # how long an event claims to last.
-# #VERIFY: the route refuses a body over MAX_SNAPSHOT_BYTES before parsing;
-# tests/unit/test_ha_snapshot_schema.py covers each list, string and year
-# bound; tests/unit/test_ha_school_days.py::TestExtremeEvents covers clipping.
+# #VERIFY: the ingest route must refuse a body over MAX_SNAPSHOT_BYTES before
+# parsing (this module only declares the limit); the tests in
+# tests/unit/test_ha_snapshot_schema.py cover each list, string, total-event
+# and year bound; tests/unit/test_ha_school_days.py::TestExtremeEvents covers
+# clipping.
 MAX_SNAPSHOT_BYTES = 1_048_576
-"""Largest request body accepted, in bytes (1 MiB)."""
-MAX_CALENDARS = 16
+"""Largest request body the ingest route may accept, in bytes (1 MiB)."""
+MAX_CALENDARS = MAX_HA_SCHOOLS * 2 * MAX_SCHOOL_CALENDARS
+"""Most calendars one payload may carry.
+
+Derived from the ``FL_HA_SCHOOLS`` limits (schools, times a bell and a district
+list, times calendars per list) so that every configuration ``Settings``
+accepts, even one with no shared calendar, can be ingested: the mapper needs a
+snapshot to hold exactly the configured calendars.
+"""
 MAX_EVENTS_PER_CALENDAR = 1000
+MAX_TOTAL_EVENTS = 20_000
+"""Most events across all calendars of one payload.
+
+A backstop that bounds a validated payload however its bytes arrived. It sits
+above what ``MAX_SNAPSHOT_BYTES`` can carry (at least 50 bytes per event), so
+it never refuses a body the byte limit lets through.
+"""
 MAX_ZONES = 64
-MAX_TIME_LENGTH = 40
 MAX_SUMMARY_LENGTH = 500
 MAX_DESCRIPTION_LENGTH = 4000
 MAX_LOCATION_LENGTH = 500
@@ -72,13 +107,15 @@ MAX_YEAR = 2100
 ZONE_ENTITY_PATTERN = r"^zone\.[a-z0-9_]{1,200}$"
 """A Home Assistant zone entity ID; person and device trackers never match."""
 
-_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# ``re.ASCII`` keeps ``\d`` to 0-9: Unicode digits would pass the pattern and
+# then fail inside ``fromisoformat``.
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)
 _INSTANT = re.compile(
-    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})"
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})",
+    re.ASCII,
 )
 
 ZoneEntityId = Annotated[str, Field(pattern=ZONE_ENTITY_PATTERN)]
-CalendarEntityId = Annotated[str, Field(pattern=HA_CALENDAR_ENTITY_PATTERN)]
 
 
 def _plausible[T: date](value: T) -> T:
@@ -110,17 +147,18 @@ def _parse_instant(value: object) -> datetime:
         The timezone-aware date-time.
 
     Raises:
-        ValueError: If the value is not a bounded string in that shape, or
-            its year is implausible. The message never echoes the value.
+        ValueError: If the value is not a string in that shape (the pattern
+            bounds its length), or its year is implausible. The message never
+            echoes the value.
     """
-    if (
-        not isinstance(value, str)
-        or len(value) > MAX_TIME_LENGTH
-        or _INSTANT.fullmatch(value) is None
-    ):
-        msg = "expected an ISO 8601 date-time with a UTC offset"
+    msg = "expected an ISO 8601 date-time with a UTC offset"
+    if not isinstance(value, str) or _INSTANT.fullmatch(value) is None:
         raise ValueError(msg)
-    return _plausible(datetime.fromisoformat(value))
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise ValueError(msg) from None
+    return _plausible(parsed)
 
 
 def _parse_event_time(value: object) -> date | datetime:
@@ -150,8 +188,34 @@ def _parse_event_time(value: object) -> date | datetime:
         raise ValueError(msg) from None
 
 
+def _discard_text(limit: int) -> Callable[[object], None]:
+    """Build a validator that checks an ignored text field, then drops it.
+
+    Args:
+        limit: Longest accepted string.
+
+    Returns:
+        A validator that returns ``None`` for ``None`` or a string of at most
+        ``limit`` characters and raises ``ValueError`` otherwise. The message
+        never echoes the value.
+    """
+
+    def discard(value: object) -> None:
+        if value is None:
+            return
+        if not isinstance(value, str) or len(value) > limit:
+            msg = f"expected a string of at most {limit} characters"
+            raise ValueError(msg)
+
+    return discard
+
+
 Instant = Annotated[datetime, PlainValidator(_parse_instant)]
 EventTime = Annotated[date | datetime, PlainValidator(_parse_event_time)]
+DiscardedDescription = Annotated[
+    None, PlainValidator(_discard_text(MAX_DESCRIPTION_LENGTH))
+]
+DiscardedLocation = Annotated[None, PlainValidator(_discard_text(MAX_LOCATION_LENGTH))]
 
 _STRICT = ConfigDict(
     extra="forbid", frozen=True, strict=True, hide_input_in_errors=True
@@ -163,16 +227,17 @@ class HaCalendarEvent(BaseModel):
 
     All-day events carry dates with an exclusive end; timed events carry
     date-times with a UTC offset. Only the summary is read for
-    classification: description and location are accepted because Home
-    Assistant sends them, but they are never used, logged or stored.
+    classification: description and location are accepted (and length
+    checked) because Home Assistant sends them, but their text is discarded
+    at validation, so the validated event never holds it.
 
     Attributes:
         model_config: Strict, immutable, unknown keys refused.
         start: First day (all-day) or start instant (timed).
         end: Day after the last day (all-day) or end instant (timed).
         summary: Event title.
-        description: Ignored.
-        location: Ignored.
+        description: Always ``None``; the sent text is discarded.
+        location: Always ``None``; the sent text is discarded.
     """
 
     model_config = _STRICT
@@ -180,8 +245,8 @@ class HaCalendarEvent(BaseModel):
     start: EventTime
     end: EventTime
     summary: str = Field(max_length=MAX_SUMMARY_LENGTH)
-    description: str | None = Field(default=None, max_length=MAX_DESCRIPTION_LENGTH)
-    location: str | None = Field(default=None, max_length=MAX_LOCATION_LENGTH)
+    description: DiscardedDescription = None
+    location: DiscardedLocation = None
 
     @property
     def all_day(self) -> bool:
@@ -219,33 +284,80 @@ class HaCalendar(BaseModel):
 
     Attributes:
         model_config: Strict, immutable, unknown keys refused.
-        events: The calendar's events in the requested window.
+        events: The calendar's events in the requested window. An empty
+            tuple means the calendar was read and had no events; the sender
+            must not post a snapshot when any calendar fetch failed, because
+            the payload has no per-calendar completeness signal.
     """
 
     model_config = _STRICT
 
-    events: tuple[HaCalendarEvent, ...] = Field(max_length=MAX_EVENTS_PER_CALENDAR)
+    # strict=False on a tuple field only lets the container be a JSON list; its
+    # items stay strict.
+    events: Annotated[tuple[HaCalendarEvent, ...], Field(strict=False)] = Field(
+        max_length=MAX_EVENTS_PER_CALENDAR
+    )
+
+
+CalendarMap = Mapping[CalendarEntityId, HaCalendar]
+"""Calendars by entity ID; read-only once the payload is validated."""
 
 
 class HaSnapshotPayload(BaseModel):
     """Body of ``POST /api/v1/ingest/ha-snapshot``.
 
+    Validate JSON text with ``model_validate_json`` or the parsed dict with
+    ``model_validate``; scalars stay strict on both paths, only the JSON list
+    to tuple conversion is allowed.
+
     Attributes:
         model_config: Strict, immutable, unknown keys refused.
         fetched_at: When Home Assistant read the calendars; must carry a UTC
             offset.
-        calendars: ``calendar.get_events`` output keyed by calendar entity ID.
-        zones: Zone entity IDs Home Assistant knows; checked against the
-            registry and never stored. Coordinates are not accepted.
+        calendars: ``calendar.get_events`` output keyed by calendar entity ID,
+            a read-only mapping after validation. At most ``MAX_CALENDARS``
+            calendars and ``MAX_TOTAL_EVENTS`` events in all.
+        zones: Zone entity IDs Home Assistant knows; for the ingest route to
+            check against the registry, never stored. Coordinates are not
+            accepted.
     """
 
     model_config = _STRICT
 
     fetched_at: Instant
-    calendars: dict[CalendarEntityId, HaCalendar] = Field(
-        min_length=1, max_length=MAX_CALENDARS
+    calendars: CalendarMap = Field(min_length=1, max_length=MAX_CALENDARS)
+    zones: Annotated[tuple[ZoneEntityId, ...], Field(strict=False)] = Field(
+        default=(), max_length=MAX_ZONES
     )
-    zones: tuple[ZoneEntityId, ...] = Field(default=(), max_length=MAX_ZONES)
+
+    @field_validator("calendars", mode="after")
+    @classmethod
+    def _calendars_are_read_only(cls, value: CalendarMap) -> CalendarMap:
+        """Freeze the calendar mapping so the bounds cannot be bypassed later.
+
+        Args:
+            value: The validated calendars.
+
+        Returns:
+            A read-only view of a copy.
+        """
+        return MappingProxyType(dict(value))
+
+    @model_validator(mode="after")
+    def _events_are_bounded_in_total(self) -> Self:
+        """Cap the events across all calendars.
+
+        Returns:
+            The validated payload.
+
+        Raises:
+            ValueError: If the calendars hold more than ``MAX_TOTAL_EVENTS``
+                events together.
+        """
+        if sum(len(item.events) for item in self.calendars.values()) > MAX_TOTAL_EVENTS:
+            msg = f"at most {MAX_TOTAL_EVENTS} events in all calendars"
+            raise ValueError(msg)
+        return self
 
 
 _FIELD_NAMES = frozenset(
@@ -260,7 +372,9 @@ def safe_error_locations(error: PydanticValidationError) -> list[dict[str, objec
 
     Location parts that are schema field names or list indexes are kept; any
     other part (a calendar entity ID used as a key, for instance) becomes
-    ``"*"``. Input values and messages are dropped.
+    ``"*"``, and so does a part that pydantic reports as a rejected dict key
+    (the part before the ``[key]`` marker), even when it equals a field name.
+    Input values and messages are dropped.
 
     Args:
         error: The pydantic validation error raised for the payload.
@@ -277,9 +391,13 @@ def safe_error_locations(error: PydanticValidationError) -> list[dict[str, objec
     for detail in error.errors(
         include_url=False, include_context=False, include_input=False
     )[:MAX_REPORTED_ERRORS]:
+        parts = detail["loc"]
         loc: list[object] = [
-            part if isinstance(part, int) or part in _FIELD_NAMES else "*"
-            for part in detail["loc"]
+            part
+            if isinstance(part, int)
+            or (part in _FIELD_NAMES and parts[index + 1 : index + 2] != ("[key]",))
+            else "*"
+            for index, part in enumerate(parts)
         ]
         reported.append({"loc": loc, "type": detail["type"]})
     return reported
