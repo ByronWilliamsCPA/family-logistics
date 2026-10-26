@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, cast
 from sqlalchemy import delete, insert, select
 from sqlalchemy.exc import DBAPIError, OperationalError, StatementError
 
-from family_logistics.core.database import BUSY_TIMEOUT_MS
+from family_logistics.core.database import BUSY_TIMEOUT_MS, is_lock_contention
 from family_logistics.core.exceptions import (
     BusinessLogicError,
     DatabaseError,
@@ -241,7 +241,11 @@ def _write_locked(engine: Engine, lock_timeout_ms: int) -> Generator[Connection]
         exception rolls the whole transaction back.
 
     Raises:
-        SchoolSnapshotBusyError: The write lock was not granted in time.
+        SchoolSnapshotBusyError: The write lock was not granted in time
+            (SQLITE_BUSY or SQLITE_LOCKED).
+        OperationalError: Any other database fault while taking the lock
+            (read-only database, disk I/O error); it is not retryable, so it
+            is never reported as busy.
     """
     # #CRITICAL: Concurrency: a writer that holds the lock past the timeout
     # (a migration, a long scheduler run) must not turn into a 500; the
@@ -253,6 +257,8 @@ def _write_locked(engine: Engine, lock_timeout_ms: int) -> Generator[Connection]
             try:
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
             except OperationalError as exc:
+                if not is_lock_contention(exc.orig):
+                    raise
                 msg = "the database is locked by another writer; nothing stored"
                 raise SchoolSnapshotBusyError(
                     msg, operation="replace", error_code="SNAPSHOT_BUSY"

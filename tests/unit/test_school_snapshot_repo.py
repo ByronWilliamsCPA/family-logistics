@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import sqlite3
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
+from sqlalchemy.exc import OperationalError
 
 from family_logistics.core.database import BUSY_TIMEOUT_MS, create_sqlite_engine
 from family_logistics.core.exceptions import ValidationError
@@ -64,6 +67,24 @@ def school_day(
 def count(engine, table) -> int:
     with engine.connect() as connection:
         return connection.execute(select(func.count()).select_from(table)).scalar_one()
+
+
+@contextmanager
+def fail_begin_immediate(engine, code: int | None):
+    """Make ``BEGIN IMMEDIATE`` raise a driver error carrying ``code``."""
+
+    def fail(_conn, _cursor, statement, parameters, _context, _executemany):
+        if statement == "BEGIN IMMEDIATE":
+            orig = sqlite3.OperationalError("simulated")
+            if code is not None:
+                orig.sqlite_errorcode = code
+            raise OperationalError(statement, parameters, orig)
+
+    event.listen(engine, "before_cursor_execute", fail)
+    try:
+        yield
+    finally:
+        event.remove(engine, "before_cursor_execute", fail)
 
 
 class TestLatest:
@@ -163,8 +184,9 @@ class TestFreshness:
     def test_naive_timestamps_are_refused(self, repo, engine, naive):
         times = {"fetched_at": FETCHED, "received_at": RECEIVED}
         times[naive] = times[naive].replace(tzinfo=None)
-        with pytest.raises(ValidationError):
-            repo.replace((school_day(),), **times)
+        days = (school_day(),)
+        with pytest.raises(ValidationError, match=f"{naive} must be timezone-aware"):
+            repo.replace(days, **times)
         assert count(engine, schema.school_day) == 0
         assert repo.latest() is None
 
@@ -313,12 +335,9 @@ class TestReplace:
         assert calls == ["compare", "commit"]
 
     def test_duplicate_person_and_day_is_refused(self, repo, engine):
-        with pytest.raises(ValidationError):
-            repo.replace(
-                (school_day("sam"), school_day("sam", kind=SchoolDayKind.UNKNOWN)),
-                fetched_at=FETCHED,
-                received_at=RECEIVED,
-            )
+        days = (school_day("sam"), school_day("sam", kind=SchoolDayKind.UNKNOWN))
+        with pytest.raises(ValidationError, match="at most one day"):
+            repo.replace(days, fetched_at=FETCHED, received_at=RECEIVED)
         assert count(engine, schema.school_day) == 0
 
 
@@ -337,6 +356,43 @@ class TestWriteLock:
         assert info.value.retry_after == SNAPSHOT_RETRY_AFTER_SECONDS
         assert info.value.error_code == "SNAPSHOT_BUSY"
         assert repo.latest() is None
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            sqlite3.SQLITE_BUSY,
+            sqlite3.SQLITE_LOCKED,
+            sqlite3.SQLITE_BUSY_SNAPSHOT,
+            sqlite3.SQLITE_LOCKED_SHAREDCACHE,
+        ],
+    )
+    def test_lock_contention_codes_are_busy_errors(self, engine, code):
+        repo = SchoolSnapshotRepository(engine)
+        with fail_begin_immediate(engine, code), pytest.raises(SchoolSnapshotBusyError):
+            repo.replace((school_day(),), fetched_at=FETCHED, received_at=RECEIVED)
+        assert repo.latest() is None
+        assert count(engine, schema.school_day) == 0
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            sqlite3.SQLITE_READONLY,
+            sqlite3.SQLITE_IOERR,
+            sqlite3.SQLITE_CANTOPEN,
+            sqlite3.SQLITE_FULL,
+            None,
+        ],
+    )
+    def test_a_permanent_fault_is_not_reported_as_busy(self, engine, code):
+        repo = SchoolSnapshotRepository(engine)
+        with (
+            fail_begin_immediate(engine, code),
+            pytest.raises(OperationalError) as info,
+        ):
+            repo.replace((school_day(),), fetched_at=FETCHED, received_at=RECEIVED)
+        assert not isinstance(info.value, SchoolSnapshotBusyError)
+        assert repo.latest() is None
+        assert count(engine, schema.school_day) == 0
 
     def test_the_lock_timeout_is_restored_after_a_replace(self, engine):
         repo = SchoolSnapshotRepository(engine, lock_timeout_ms=50)
