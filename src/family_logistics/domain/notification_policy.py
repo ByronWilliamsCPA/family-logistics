@@ -621,18 +621,39 @@ def plan_unavailable(*, now: datetime, policy: NotificationPolicy) -> Plan:
     )
 
 
-def _owed_in_episode(push: PlannedPush, row: StateView, *, new_day: bool) -> bool:
-    """Report whether an open episode's row is owed another push."""
+def is_escalation(push: PlannedPush, row: StateView) -> bool:
+    """Say whether a push outranks what its row last delivered (D5).
+
+    The severity rose above the delivered severity, or the kind rose from
+    ``notice`` to ``urgent``. An undelivered row has nothing to outrank, so it
+    is never an escalation. The notification state repository uses this to set
+    ``PlannedPush.escalated`` on a claimed push, so the renderer can say
+    ``now critical``.
+
+    Args:
+        push: The planned push (for a retry, the effective push).
+        row: The subject's stored row.
+
+    Returns:
+        True when the delivered push is outranked.
+    """
     if not row.delivered:
-        return True
-    escalated = (
+        return False
+    severity_rose = (
         row.severity is not None
         and push.severity is not None
         and severity_rank(push.severity) > severity_rank(row.severity)
     )
     kind_rose = push.kind is PushKind.URGENT and row.kind is PushKind.NOTICE
+    return severity_rose or kind_rose
+
+
+def _owed_in_episode(push: PlannedPush, row: StateView, *, new_day: bool) -> bool:
+    """Report whether an open episode's row is owed another push."""
+    if not row.delivered:
+        return True
     rearmed = push.run_wide and push.kind is PushKind.URGENT and new_day
-    return escalated or kind_rose or rearmed
+    return is_escalation(push, row) or rearmed
 
 
 def starts_new_episode(push: PlannedPush, row: StateView | None, run_id: str) -> bool:
@@ -779,6 +800,7 @@ __all__ = [
     "delivery_tag",
     "finding_kind",
     "in_quiet_hours",
+    "is_escalation",
     "plan",
     "plan_unavailable",
     "production_tag",

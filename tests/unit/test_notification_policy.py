@@ -37,6 +37,7 @@ from family_logistics.domain.notification_policy import (
     delivery_tag,
     finding_kind,
     in_quiet_hours,
+    is_escalation,
     plan,
     plan_unavailable,
     production_tag,
@@ -1174,3 +1175,39 @@ class TestStartsNewEpisode:
         assert (
             starts_new_episode(push(**push_overrides), rows[row], "run-1") is expected
         )
+
+
+class TestIsEscalation:
+    """The rule the state repository uses to mark a claimed push escalated."""
+
+    @pytest.mark.parametrize(
+        ("push_overrides", "row_overrides", "expected"),
+        [
+            ({"severity": Severity.CRITICAL}, {}, True),
+            ({"severity": Severity.INCOMPLETE}, {}, True),
+            ({}, {}, False),
+            ({"severity": Severity.CRITICAL}, {"severity": Severity.CRITICAL}, False),
+            ({"severity": Severity.WARNING}, {"severity": Severity.CRITICAL}, False),
+            ({"kind": PushKind.URGENT}, {}, True),
+            ({"kind": PushKind.URGENT, "severity": None}, {"severity": None}, True),
+            ({"kind": PushKind.URGENT}, {"kind": PushKind.URGENT}, False),
+            ({"severity": Severity.CRITICAL}, {"delivered": False}, False),
+            ({"severity": None}, {"severity": Severity.WARNING}, False),
+            ({"severity": Severity.CRITICAL}, {"severity": None}, False),
+        ],
+        ids=[
+            "severity-rose-to-critical",
+            "severity-rose-to-incomplete",
+            "same",
+            "same-critical",
+            "severity-fell",
+            "notice-to-urgent",
+            "notice-to-urgent-without-severity",
+            "already-urgent",
+            "undelivered-row",
+            "push-without-severity",
+            "row-without-severity",
+        ],
+    )
+    def test_the_rule_grid(self, push_overrides, row_overrides, expected):
+        assert is_escalation(push(**push_overrides), state(**row_overrides)) is expected

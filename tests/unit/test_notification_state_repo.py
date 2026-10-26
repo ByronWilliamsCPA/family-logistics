@@ -38,6 +38,7 @@ from family_logistics.core.exceptions import DatabaseError, ValidationError
 from family_logistics.db.notifications import (
     NotificationStateBusyError,
     NotificationStateRepository,
+    load_name_rows,
 )
 from family_logistics.domain.models import Severity
 from family_logistics.domain.notification_policy import (
@@ -1124,3 +1125,59 @@ def test_effective_push_is_a_copy_not_a_mutation(repo, engine):
     original = replace(planned)
     claim(repo, planned, completed=False)
     assert planned == original
+
+
+class TestEscalatedFlag:
+    """The claim sets ``escalated`` from the stored row, not from the plan."""
+
+    def test_a_claimed_escalation_is_marked(self, repo, engine):
+        put_row(engine, **delivered_row())
+        urgent = push(kind=PushKind.URGENT, severity=Severity.CRITICAL)
+        result = claim(repo, urgent)
+        assert [d.push.escalated for d in result.decisions] == [True]
+
+    def test_a_first_notice_is_not_marked(self, repo):
+        result = claim(repo, push())
+        assert [d.push.escalated for d in result.decisions] == [False]
+
+    def test_an_undelivered_row_is_not_marked(self, repo, engine):
+        put_row(engine)
+        result = claim(repo, push(kind=PushKind.URGENT, severity=Severity.CRITICAL))
+        assert [d.push.escalated for d in result.decisions] == [False]
+
+    def test_a_new_episode_is_not_marked(self, repo, engine):
+        put_row(engine, **delivered_row(is_open=False))
+        later = T0 + RENOTIFY_COOLDOWN + minutes(1)
+        result = claim(
+            repo,
+            push(kind=PushKind.URGENT, severity=Severity.CRITICAL),
+            now=later,
+            evaluated_at=later,
+        )
+        assert decisions(result) == [Decision.SEND]
+        assert [d.push.escalated for d in result.decisions] == [False]
+
+
+class TestWatermarkRunId:
+    def test_none_before_the_first_dispatch(self, repo):
+        assert repo.watermark_run_id() is None
+
+    def test_the_run_that_holds_the_watermark(self, repo):
+        claim(repo, push(), run_id="run-7")
+        assert repo.watermark_run_id() == "run-7"
+
+
+class TestLoadNameRows:
+    def test_reads_only_the_name_columns(self, engine):
+        from fl_service import seed_registry
+
+        seed_registry(engine)
+        people, passengers = load_name_rows(engine)
+        assert ("sam", "Sam", "child") in people
+        assert ("morgan", "Morgan", "parent") in people
+        assert any(person_id == "ext-e" for person_id, _ in passengers)
+        assert all(len(row) == 3 for row in people)
+        assert all(len(row) == 2 for row in passengers)
+
+    def test_an_empty_database_gives_empty_lists(self, engine):
+        assert load_name_rows(engine) == ([], [])
