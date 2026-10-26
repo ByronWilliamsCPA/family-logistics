@@ -261,6 +261,7 @@ class TestClaim:
     def test_a_naive_clock_is_refused(self, repo):
         naive = T0.replace(tzinfo=None)
         plan = make_plan(push())
+        pol = policy()
         with pytest.raises(ValidationError, match="timezone-aware"):
             repo.claim(
                 plan,
@@ -270,12 +271,13 @@ class TestClaim:
                 evaluated_at=T0,
                 now=naive,
                 quiet=False,
-                policy=policy(),
+                policy=pol,
             )
 
     def test_a_naive_outcome_time_is_refused(self, repo):
         naive = T0.replace(tzinfo=None)
         plan = make_plan(push())
+        pol = policy()
         with pytest.raises(ValidationError, match="timezone-aware"):
             repo.claim(
                 plan,
@@ -285,7 +287,7 @@ class TestClaim:
                 evaluated_at=naive,
                 now=T0,
                 quiet=False,
-                policy=policy(),
+                policy=pol,
             )
 
 
@@ -885,6 +887,7 @@ class TestLockRetries:
             engine, lock_timeout_ms=20, sleep=sleeps.append
         )
         plan = make_plan(push(episode_start=True))
+        pol = policy()
         with (
             self.held_write_lock(engine),
             pytest.raises(NotificationStateBusyError) as info,
@@ -897,7 +900,7 @@ class TestLockRetries:
                 evaluated_at=T0,
                 now=T0,
                 quiet=False,
-                policy=policy(),
+                policy=pol,
             )
         assert isinstance(info.value, DatabaseError)
         assert len(sleeps) == CLAIM_LOCK_RETRIES
@@ -909,6 +912,7 @@ class TestLockRetries:
         sleeps: list[float] = []
         repo = NotificationStateRepository(engine, sleep=sleeps.append)
         plan = make_plan(push())
+        pol = policy()
 
         def fail(_conn, _cursor, statement, parameters, _context, _executemany):
             if statement == "BEGIN IMMEDIATE":
@@ -927,7 +931,7 @@ class TestLockRetries:
                     evaluated_at=T0,
                     now=T0,
                     quiet=False,
-                    policy=policy(),
+                    policy=pol,
                 )
         finally:
             event.remove(engine, "before_cursor_execute", fail)
@@ -982,6 +986,7 @@ class TestLockRetries:
         claimer = NotificationStateRepository(engine, sleep=lambda _s: None)
         claim(claimer, push(episode_start=True))
         repo = NotificationStateRepository(engine, sleep=sleeps.append)
+        pushes = [push()]
 
         def fail(_conn, _cursor, statement, parameters, _context, _executemany):
             if statement == "BEGIN IMMEDIATE":
@@ -993,7 +998,7 @@ class TestLockRetries:
         try:
             with pytest.raises(OperationalError):
                 repo.complete(
-                    [push()],
+                    pushes,
                     mode="shadow",
                     token="tok-a",
                     delivered=True,
@@ -1006,13 +1011,15 @@ class TestLockRetries:
 
     def test_complete_refuses_a_naive_clock(self, repo):
         claim(repo, push(episode_start=True))
+        pushes = [push()]
+        naive = T0.replace(tzinfo=None)
         with pytest.raises(ValidationError, match="timezone-aware"):
             repo.complete(
-                [push()],
+                pushes,
                 mode="shadow",
                 token="tok-a",
                 delivered=True,
-                now=T0.replace(tzinfo=None),
+                now=naive,
                 quiet=False,
             )
 
@@ -1021,12 +1028,13 @@ class TestLockRetries:
             engine, lock_timeout_ms=20, sleep=lambda _s: None
         )
         claim(repo, push(episode_start=True))
+        pushes = [push()]
         with (
             self.held_write_lock(engine),
             pytest.raises(NotificationStateBusyError),
         ):
             repo.complete(
-                [push()],
+                pushes,
                 mode="shadow",
                 token="tok-a",
                 delivered=True,

@@ -16,7 +16,7 @@ pytestmark = pytest.mark.unit
 
 TABLES = ("notification_state", "notification_watermark")
 NOW = datetime(2026, 10, 26, 14, 0, tzinfo=UTC)
-ISSUE_KEY = "issue:" + "0123456789abcdef"
+ISSUE_KEY = "issue:" + "a" * 16
 RUN_ID = "run-0001"
 
 
@@ -241,10 +241,10 @@ def test_valid_subject_and_kind_pairs_are_accepted(engine, subject_key, kind):
         (ISSUE_KEY, "status"),
         (ISSUE_KEY, "report"),
         (ISSUE_KEY, "ops"),
-        ("issue:" + "0123456789abcde", "notice"),
-        ("issue:" + "0123456789abcdeff", "notice"),
-        ("issue:" + "0123456789ABCDEF", "notice"),
-        ("issue:" + "0123456789abcdeg", "notice"),
+        ("issue:" + "a" * 15, "notice"),
+        ("issue:" + "a" * 17, "notice"),
+        ("issue:" + "A" * 16, "notice"),
+        ("issue:" + "a" * 15 + "g", "notice"),
         ("run-failed", "status"),
         ("run-failed", "ops"),
         ("run:", "status"),

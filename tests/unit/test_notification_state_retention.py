@@ -29,6 +29,7 @@ NOW = T0 + timedelta(days=200)
 CUTOFF = NOW - timedelta(days=NOTIFICATION_STATE_RETENTION_DAYS)
 NAIVE = datetime.fromisoformat("2026-10-23T07:00:00")
 OPS = "ops:run_failed"
+OTHER_ISSUE = "issue:" + "c" * 16
 RUN = "run:run-0001"
 
 
@@ -125,11 +126,11 @@ class TestOnlyClosedRowsGo:
         old = CUTOFF - timedelta(days=30)
         put_row(engine, **closed(old, subject_key=ISSUE))
         put_row(engine, **closed(CUTOFF + timedelta(days=30), subject_key=ISSUE_B))
-        put_row(engine, subject_key="issue:aaaaaaaaaaaaaaaa", updated_at=old)
+        put_row(engine, subject_key=OTHER_ISSUE, updated_at=old)
         assert purge(engine) == 1
         assert keys(engine) == {
             (ISSUE_B, "shadow"),
-            ("issue:aaaaaaaaaaaaaaaa", "shadow"),
+            (OTHER_ISSUE, "shadow"),
         }
 
 

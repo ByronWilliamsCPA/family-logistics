@@ -32,8 +32,8 @@ T0 = datetime(2026, 10, 26, 14, 0, tzinfo=UTC)
 NIGHT = datetime(2026, 10, 27, 6, 30, tzinfo=UTC)
 """23:30 local on 26 October: inside quiet hours."""
 
-ISSUE = "issue:0123456789abcdef"
-ISSUE_B = "issue:fedcba9876543210"
+ISSUE = "issue:" + "a" * 16
+ISSUE_B = "issue:" + "b" * 16
 TAGS = {
     PushKind.NOTICE: "fl-warning",
     PushKind.URGENT: "fl-urgent",
