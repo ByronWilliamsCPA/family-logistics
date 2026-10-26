@@ -188,6 +188,7 @@ nav:
       - 0005 SQLite WAL single writer: ADRs/0005-sqlite-wal-single-writer.md
       - 0006 Route provider abstraction: ADRs/0006-route-provider-abstraction.md
       - 0007 Home Assistant data exchange: ADRs/0007-ha-initiated-data-exchange.md
+      - 0008 Notification service: ADRs/0008-notification-service.md
 
   - API Reference:
       - Overview: api-reference.md
