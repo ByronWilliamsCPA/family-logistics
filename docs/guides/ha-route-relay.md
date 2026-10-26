@@ -177,8 +177,9 @@ Notes:
 
 - `origin` and `destination` take the zone entity id or the address text as the
   same field, so the automation passes `value` through and ignores `kind`.
-- The automation posts the **first** route's `duration`. Whether to use the
-  slowest returned route instead is an open owner decision.
+- The automation posts the **first** route's `duration` (owner decision,
+  2026-10-26): the provider's recommended route, normally the fastest with
+  traffic. To be more cautious, post the largest `duration` in `routes` instead.
 - `int(0)` turns a missing duration into 0, which the app refuses with a 422 so
   the failure is visible in the Home Assistant trace instead of storing a guess.
 - The response shape above was verified on Home Assistant Core 2026.10.x. Check
@@ -224,4 +225,5 @@ verified.
 6. Keep notifications in shadow mode until steps 3 to 5 have passed.
 7. Check one full cycle: a run that needs a leg is incomplete (ROUTE-010), the
    next poll lists it, the post is accepted, and the following run is clear.
-8. Decide first route versus slowest route (open owner decision).
+8. Confirm the first-route choice still suits you after the shadow period; the
+   alternative is to post the slowest returned route.

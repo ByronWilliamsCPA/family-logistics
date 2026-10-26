@@ -347,8 +347,11 @@ what makes such a change visible. Re-verify after a Home Assistant upgrade.
 
 ### Design notes from PR 2
 
-- The first route in the response is used; whether to take the slowest route
-  instead is an open owner decision.
+- The first route in the response is used (owner decision, 2026-10-26): the
+  provider's recommended route, normally the fastest with traffic. This is the
+  optimistic choice, so it can understate a trip when a slower first route is
+  returned beside a quicker one. Switching to the slowest returned route is a
+  one-line change to the automation.
 - A request whose endpoint cannot be resolved (a location with neither a zone
   nor an address, an address that cannot be decrypted or has no data key, or
   another family's zone-less home that the address gate withholds) is left out
