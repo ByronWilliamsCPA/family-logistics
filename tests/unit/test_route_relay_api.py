@@ -25,8 +25,9 @@ from sqlalchemy import text
 
 from family_logistics.api import route_relay as route_relay_api
 from family_logistics.api.app import create_app
-from family_logistics.api.ha import build_ha_router
+from family_logistics.api.ha import MAX_FAILURES, build_ha_router
 from family_logistics.api.route_relay import (
+    MAX_BODY_BYTES,
     MAX_RESULTS_PER_POST,
     register_route_relay_routes,
 )
@@ -129,6 +130,27 @@ class TestAuth:
 
     def test_authentication_comes_before_body_validation(self, client):
         assert client.post(POST, json={"nonsense": True}).status_code == 401
+
+    @pytest.mark.parametrize(
+        "content",
+        [b"not json", b"\xff\xfe", b'{"results": [', b"", b"[" * 100_000],
+        ids=["text", "bad-utf8", "truncated", "empty", "deeply-nested"],
+    )
+    def test_authentication_comes_before_a_malformed_body(self, client, content):
+        assert client.post(POST, content=content).status_code == 401
+        bad = {"Authorization": "Bearer " + "x" * 40}
+        assert client.post(POST, headers=bad, content=content).status_code == 401
+
+    def test_an_oversized_body_without_a_token_is_a_401_not_a_413(self, client):
+        content = b"x" * (MAX_BODY_BYTES + 1)
+        assert client.post(POST, content=content).status_code == 401
+
+    def test_malformed_unauthenticated_posts_are_throttled(self, client):
+        # The body is never parsed before the token check, so every attempt
+        # counts toward the failure throttle.
+        for _ in range(MAX_FAILURES):
+            assert client.post(POST, content=b"not json").status_code == 401
+        assert client.post(POST, content=b"not json").status_code == 429
 
     def test_an_unconfigured_token_denies_everything(self, tmp_path, engine, clock):
         unset = make_settings(tmp_path, ha_token=None)
@@ -515,6 +537,54 @@ class TestPostRouteResults:
     def test_a_body_that_is_not_json_is_a_422(self, client):
         response = client.post(POST, headers=GOOD, content=b"not json")
         assert response.status_code == 422
+
+    @pytest.mark.parametrize(
+        "content", [b"\xff\xfe", b'{"results": [', b"", b"[" * 60_000]
+    )
+    def test_other_unreadable_bodies_are_a_422(self, client, content):
+        assert client.post(POST, headers=GOOD, content=content).status_code == 422
+
+    def test_a_422_does_not_echo_the_posted_input(self, client):
+        marker = "secret-marker-value"
+        body = {
+            "results": [{"request_id": marker, "duration_seconds": marker}],
+            marker: marker,
+        }
+        response = client.post(POST, headers=GOOD, json=body)
+        assert response.status_code == 422
+        assert marker not in response.text
+        (error, *_) = response.json()["detail"]
+        assert set(error) == {"type", "loc", "msg"}
+        malformed = client.post(POST, headers=GOOD, content=marker.encode())
+        assert malformed.status_code == 422
+        assert marker not in malformed.text
+
+    def test_an_oversized_body_is_a_413_and_stores_nothing(self, client, engine):
+        content = b" " * (MAX_BODY_BYTES + 1)
+        response = client.post(POST, headers=GOOD, content=content)
+        assert response.status_code == 413
+        assert response.json() == {"detail": "Request body too large"}
+        assert audit_rows(engine) == []
+
+    def test_an_oversized_chunked_body_is_a_413(self, client):
+        def chunks():
+            for _ in range(MAX_BODY_BYTES // 1024 + 2):
+                yield b" " * 1024
+
+        # No Content-Length: the byte count of what is actually read decides.
+        response = client.post(POST, headers=GOOD, content=chunks())
+        assert response.status_code == 413
+
+    def test_a_body_of_exactly_the_cap_is_read(self, client):
+        prefix = b'{"results": [{"request_id": "x", "duration_seconds": 60}]}'
+        content = prefix + b" " * (MAX_BODY_BYTES - len(prefix))
+        assert len(content) == MAX_BODY_BYTES
+        response = client.post(POST, headers=GOOD, content=content)
+        assert response.status_code == 200
+        assert response.json()["rejected"] == 1
+
+    def test_the_body_cap_is_64_kib(self):
+        assert MAX_BODY_BYTES == 64 * 1024
 
     def test_one_audit_row_per_post_with_counts_only(self, client, repo, engine):
         ids = queue(repo, HOME_TO_SCHOOL, HOME_TO_STUDIO)

@@ -33,8 +33,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import HTTPException, status
-from pydantic import BaseModel, Field, StrictInt
+from fastapi import HTTPException, Request, status
+from fastapi.concurrency import run_in_threadpool
+from pydantic import BaseModel, Field, StrictInt, ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from family_logistics.core.crypto import (
@@ -74,8 +75,15 @@ MAX_RESULTS_PER_POST = 100
 """Most results one POST may carry. It bounds the body without a size helper and
 is twice the number of requests one poll returns."""
 
+MAX_BODY_BYTES = 64 * 1024
+"""Largest ``POST /route-results`` body read, in bytes (413 above it). A full batch
+of 100 results is well under 10 KiB, so this leaves room for extra fields."""
+
 MAX_REQUEST_ID_LENGTH = 64
 """Longest ``request_id`` accepted; the app issues 32-character ids."""
+
+BODY_TOO_LARGE = "Request body too large"
+"""Fixed 413 text for a body over ``MAX_BODY_BYTES``."""
 
 STORE_UNAVAILABLE = "Route store unavailable"
 """Fixed 503 text for a store error; it never carries SQL or location detail."""
@@ -300,6 +308,74 @@ def _items(
     return items
 
 
+async def _read_body(request: Request) -> bytes:
+    """Read the request body, refusing more than ``MAX_BODY_BYTES``.
+
+    Both the declared ``Content-Length`` and the bytes actually read are
+    checked, so a missing or understated length cannot slip a large body in.
+
+    Args:
+        request: The request, already authenticated.
+
+    Returns:
+        The body bytes.
+
+    Raises:
+        HTTPException: 413 when the body is over the cap.
+    """
+    # #CRITICAL: Security: the cap must hold before anything parses the body;
+    # an unbounded read is a memory-exhaustion path for a caller with the token.
+    # #VERIFY: tests/unit/test_route_relay_api.py (the 413 cases, with and
+    # without a Content-Length header).
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+        raise _too_large()
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > MAX_BODY_BYTES:
+            raise _too_large()
+    return bytes(body)
+
+
+def _too_large() -> HTTPException:
+    """Build the 413 for a body over ``MAX_BODY_BYTES``."""
+    return HTTPException(
+        status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=BODY_TOO_LARGE
+    )
+
+
+def _parse_answers(raw: bytes) -> list[RouteAnswer]:
+    """Validate the body and turn it into answers, echoing none of it back.
+
+    Args:
+        raw: The body bytes.
+
+    Returns:
+        One answer per posted result.
+
+    Raises:
+        HTTPException: 422 when the body is not valid JSON or fails
+            validation. The error body carries only each problem's location,
+            type and message, never the posted input.
+    """
+    try:
+        body = RouteResultsBody.model_validate_json(raw)
+    except ValidationError as error:
+        problems = [
+            {"type": item["type"], "loc": list(item["loc"]), "msg": item["msg"]}
+            for item in error.errors(
+                include_url=False, include_context=False, include_input=False
+            )
+        ]
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=problems
+        ) from None
+    return [
+        RouteAnswer(item.request_id, item.duration_seconds) for item in body.results
+    ]
+
+
 def register_route_relay_routes(
     router: APIRouter,
     settings: Settings,
@@ -355,18 +431,7 @@ def register_route_relay_routes(
             correlation_id=get_correlation_id(),
         )
 
-    @router.post(
-        "/route-results",
-        response_model=RouteResultsResponse,
-        responses={status.HTTP_503_SERVICE_UNAVAILABLE: {"description": "Retry"}},
-    )
-    def post_route_results(
-        body: RouteResultsBody,
-    ) -> RouteResultsResponse:
-        """Store the durations Home Assistant priced."""
-        answers = [
-            RouteAnswer(item.request_id, item.duration_seconds) for item in body.results
-        ]
+    def record(answers: list[RouteAnswer]) -> RouteResultsResponse:
         try:
             outcome = repository.record_results(
                 answers, now=clock(), zone=zone, before_commit=audit
@@ -394,3 +459,25 @@ def register_route_relay_routes(
                 for item in outcome.items
             ],
         )
+
+    @router.post(
+        "/route-results",
+        response_model=RouteResultsResponse,
+        responses={
+            status.HTTP_413_CONTENT_TOO_LARGE: {"description": "Body over the cap"},
+            status.HTTP_422_UNPROCESSABLE_CONTENT: {"description": "Invalid body"},
+            status.HTTP_503_SERVICE_UNAVAILABLE: {"description": "Retry"},
+        },
+    )
+    async def post_route_results(request: Request) -> RouteResultsResponse:
+        """Store the durations Home Assistant priced.
+
+        The body is a JSON object ``{"results": [{"request_id": str,
+        "duration_seconds": int}, ...]}``. It is read here, after the router's
+        bearer check, so an unauthenticated request is refused (and throttled)
+        whatever it sends.
+        """
+        raw = await _read_body(request)
+        answers = _parse_answers(raw)
+        # The repository is synchronous (SQLite); keep it off the event loop.
+        return await run_in_threadpool(record, answers)
