@@ -25,8 +25,10 @@ def engine(tmp_path):
     engine.dispose()
 
 
-def test_head_is_school_snapshot():
-    assert migrations_api.head_revision() == "0004_school_snapshot"
+def test_the_school_snapshot_revision_follows_the_trip_snapshot(engine):
+    migrations_api.upgrade(engine, "0004_school_snapshot")
+    assert migrations_api.current_revision(engine) == "0004_school_snapshot"
+    assert set(TABLES) <= set(inspect(engine).get_table_names())
 
 
 @pytest.mark.parametrize("table_name", TABLES)
