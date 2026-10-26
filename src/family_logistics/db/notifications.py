@@ -342,12 +342,10 @@ class NotificationStateRepository:
             outcome every decision is ``STALE``, ``stale`` is True and nothing
             was written.
 
-        Raises:
-            NotificationStateBusyError: The database stayed busy through every
-                retry; nothing was written.
-
         Note:
-            A naive ``now`` or ``evaluated_at`` raises ``ValidationError``.
+            A database that stays busy through every retry raises
+            ``NotificationStateBusyError`` with nothing written, and a naive
+            ``now`` or ``evaluated_at`` raises ``ValidationError``.
         """
         _require_aware("now", now)
         _require_aware("evaluated_at", evaluated_at)
