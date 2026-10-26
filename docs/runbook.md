@@ -73,8 +73,8 @@ either state is never shown as clear.
 
 | `FL_NOTIFICATION_MODE` | Behaviour |
 |------------------------|-----------|
-| `shadow` (default) | Real collection and validation; all output goes to the operator only (`fl-shadow` tag); nothing reaches the other parent |
-| `production` | Reports, status and findings go to both parents through the dedicated `fl-*` tags |
+| `shadow` (default) | Real collection and validation; every push, ops alerts, status and the weekly report included, goes to the operator only (`fl-shadow` tag) with a `[shadow]` title and a first line naming the tag production would have used; nothing reaches the other parent. Planning, de-duplication and quiet hours run exactly as in production, so shadow is a faithful preview ([ADR 0008](ADRs/0008-notification-service.md), D1) |
+| `production` | Urgent pushes go to `fl-urgent`, other findings to `fl-warning`, daily and on-demand status to `fl-status`, the weekly run summary to `fl-report` and operator alerts to `fl-ops`. Quiet hours (`FL_QUIET_HOURS_START` to `FL_QUIET_HOURS_END`) hold everything except one urgent push per episode |
 
 Switching to `production` requires the joint approval of both parents after a
 shadow period, recorded in the private deployment repository. To switch back,
@@ -188,10 +188,15 @@ The Apprise client posts to the saved Apprise configuration,
 the `fl-*` tag in the JSON body; who receives each tag is configured in Apprise.
 It sends only to the six configured `FL_APPRISE_TAG_*` tags and refuses any
 other tag before making a request; `ops_alert()` sends operator alerts to the
-`fl-ops` tag. Triggering it from the scheduler (failed or
-incomplete runs, collection failures, routing budget threshold, database
-unreachable) arrives with the scheduler in M3. Until then, rely on the
-external monitor of `/healthz`.
+`fl-ops` tag.
+
+Failed and incomplete runs alert through `NotificationService` (one `fl-ops`
+push per failed episode and one per incomplete episode, not one per run; held
+during quiet hours), and `dispatch_unavailable` raises the same alert when a
+run itself raises. The service is built but nothing calls it until the
+scheduler lands in M3, and collection failures, the routing budget threshold
+and an unreachable database still arrive with the scheduler. Until then, rely
+on the external monitor of `/healthz`.
 
 ## Escalation
 

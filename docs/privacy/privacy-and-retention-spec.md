@@ -76,6 +76,11 @@ Legend: **Y** allowed, **M** allowed masked, **P** pseudonym only, **N** never.
 
 ### Notification channels
 
+Pushes are rendered from fixed templates ([ADR 0008](../ADRs/0008-notification-service.md)),
+never from finding text. They name first names only (a family child, a parent
+or a driver; an external child appears as an initial) and carry no place names
+in v1.
+
 Family Logistics sends only to its six dedicated Apprise tags (`fl-report`,
 `fl-status`, `fl-warning`, `fl-urgent`, `fl-ops`, `fl-shadow`), each routed in
 the notification service's configuration to the parents' private channels.
@@ -148,8 +153,9 @@ carry children's schedules. Signal and SMS are future options only.
 - Logs pass through a redaction filter that drops fields tagged `R` and
   replaces external names with passenger IDs. A unit test asserts no
   address-shaped string reaches a log record.
-- Masking in push: "Ride for E. at 3:15 needs a driver" rather than full name
-  or destination.
+- Masking in push: "E.: a ride (Fri 30 Oct 15:15) was dropped, no replacement;
+  driver was Riley." rather than full name or destination (a push says what is
+  wrong and when, never where).
 
 > **Deviation from the original proposal.** The original proposal kept
 > addresses and coordinates in a separate `protected_location` table. The
@@ -183,6 +189,7 @@ Before any call to the local inference server:
 | Audit hashes | at least 365 days | the database refuses to delete a row younger than 365 days; the purge job for older rows arrives with the scheduler (M3), and until then rows are kept |
 | Confirmed passenger legs after event deletion | 90 days after the trip date | supports change-impact comparison |
 | Resolved findings | 90 days after resolution | |
+| Notification state (`notification_state`) | 90 days after the row last changed, closed rows only; an open row is never purged, because deleting it would re-notify a still-open finding | the database function `purge_expired_notification_state`; the daily job that calls it arrives with the scheduler (M3), and until then rows are kept |
 | Inactive external passenger and household | removed or anonymised 180 days after the carpool ends (measured from the last trip, or a recorded carpool end date), or on request; audit hashes keep their own retention | registry review prompt at 165 days; the removal job arrives with the scheduler (M3), and until then rows are kept |
 | Route cache entries (`route_cache`) | 28 days after the last observation for that weekday and 15-minute bucket; also dropped at once, with the location's pending requests, when the location's id, address, coordinates, zone or verification state change or the location is deleted (ADR 0006) | invalidation is in the database (cascading keys and a trigger from migration `0005`), so no code path can skip it; the age purge is the database function `purge_expired_route_cache`, and the daily job that calls it arrives with the scheduler (M3), and until then entries are kept (a stale entry is never served: a hit needs an observation within 28 days) |
 | Route requests (`route_request`) | a request expires 8 days after it is queued and is then deleted, answered or not (an answered row only serves to recognise an identical re-post) | the database function `purge_expired_route_requests`; the daily job that calls it arrives with the scheduler (M3), and until then rows are kept (an expired request is never served or accepted) |
