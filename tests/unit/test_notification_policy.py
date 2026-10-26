@@ -225,19 +225,21 @@ class TestQuietHours:
 
     def test_a_naive_now_is_refused(self):
         naive = datetime(2026, 10, 23, 23, 0)  # noqa: DTZ001
+        start, end = time(22), time(6)
         with pytest.raises(ValueError, match="aware"):
-            in_quiet_hours(naive, time(22), time(6), LA)
+            in_quiet_hours(naive, start, end, LA)
 
     def test_an_aware_boundary_is_refused(self):
         night = local(2026, 10, 23, 23)
-        aware_start = time(22, tzinfo=UTC)
+        aware_start, end = time(22, tzinfo=UTC), time(6)
         with pytest.raises(ValueError, match="naive"):
-            in_quiet_hours(night, aware_start, time(6), LA)
+            in_quiet_hours(night, aware_start, end, LA)
 
     def test_an_empty_window_is_refused(self):
         night = local(2026, 10, 23, 23)
+        same = time(6)
         with pytest.raises(ValueError, match="differ"):
-            in_quiet_hours(night, time(6), time(6), LA)
+            in_quiet_hours(night, same, same, LA)
 
 
 CAP = "CAP-014"
