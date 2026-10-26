@@ -661,7 +661,7 @@ class NotificationService:
             unresolved=report.unresolved,
         )
         cause = d.state_error
-        if cause is not None:
+        if isinstance(cause, DatabaseError):
             operation = str(cause.details.get("operation", "complete"))
             msg = f"notification state could not be written ({operation})"
             raise NotificationStateError(
