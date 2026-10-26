@@ -230,13 +230,24 @@ class TestGetRouteRequests:
         clock.now = local(9, 0)
         assert served() == {("sat", "08:00:00")}
 
+    def test_a_request_is_served_only_when_its_time_is_the_lead_time_away(
+        self, client, repo, clock
+    ):
+        queue(repo, HOME_TO_SCHOOL)
+        clock.now = local(7, 50)  # 10 minutes ahead: too close
+        assert client.get(GET, headers=GOOD).json() == {"requests": []}
+        clock.now = local(7, 29)  # 31 minutes ahead
+        assert len(client.get(GET, headers=GOOD).json()["requests"]) == 1
+
     def test_a_midnight_request_is_due_on_the_day_that_starts_at_midnight(
         self, client, repo, clock
     ):
         saturday_midnight = Leg("home", "high-school", 5, 0)
         queue(repo, saturday_midnight)
-        clock.now = local(23, 50)  # Friday evening: the next 00:00 is Saturday's
+        clock.now = local(23, 20)  # Friday evening: the next 00:00 is Saturday's
         assert len(client.get(GET, headers=GOOD).json()["requests"]) == 1
+        clock.now = local(23, 50)  # inside the 30 minute lead time: not served
+        assert client.get(GET, headers=GOOD).json() == {"requests": []}
         clock.now = local(0, 5, day=24)  # just after midnight: next is Sunday's
         assert client.get(GET, headers=GOOD).json() == {"requests": []}
 
@@ -247,7 +258,7 @@ class TestGetRouteRequests:
 
     def test_an_answered_request_is_not_served_again(self, client, repo):
         ids = queue(repo, HOME_TO_SCHOOL)
-        repo.record_results([RouteAnswer(ids[HOME_TO_SCHOOL], 600)], now=NOW)
+        repo.record_results([RouteAnswer(ids[HOME_TO_SCHOOL], 600)], now=NOW, zone=ZONE)
         assert client.get(GET, headers=GOOD).json() == {"requests": []}
 
     def test_a_poll_writes_nothing_and_logs_only_a_count(
@@ -300,6 +311,30 @@ class TestPostRouteResults:
         found = repo.lookup(HOME_TO_SCHOOL, now=NOW)
         assert found is not None
         assert found.duration.total_seconds() == 1260
+
+    def test_a_result_after_the_time_arrived_is_not_due_and_stays_pending(
+        self, client, repo, clock
+    ):
+        # Friday 07:59:59: too close to 08:00 to be served at all.
+        ids = queue(repo, HOME_TO_SCHOOL)
+        clock.now = local(7, 59, second=59)
+        assert client.get(GET, headers=GOOD).json() == {"requests": []}
+        # A result arriving at 08:00:02 (a poll served earlier, a slow call)
+        # would have priced Saturday: it is refused and nothing is cached.
+        clock.now = local(8, 0, second=2)
+        body = self.post(client, self.item(ids[HOME_TO_SCHOOL], 900)).json()
+        assert body["results"] == [
+            {
+                "request_id": ids[HOME_TO_SCHOOL],
+                "status": "rejected",
+                "reason": "not_due",
+            }
+        ]
+        assert (body["accepted"], body["rejected"]) == (0, 1)
+        assert repo.lookup(HOME_TO_SCHOOL, now=clock.now) is None
+        assert [r.request_id for r in repo.pending(now=clock.now)] == [
+            ids[HOME_TO_SCHOOL]
+        ]
 
     def test_a_sender_claimed_weekday_or_endpoint_is_ignored(self, client, repo):
         ids = queue(repo, HOME_TO_SCHOOL)

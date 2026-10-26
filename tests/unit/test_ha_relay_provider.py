@@ -69,7 +69,7 @@ def provider(repo, clock):
 def answer_all(repo, now, seconds=600):
     pending = repo.pending(now=now)
     outcome = repo.record_results(
-        [RouteAnswer(r.request_id, seconds) for r in pending], now=now
+        [RouteAnswer(r.request_id, seconds) for r in pending], now=now, zone=ZONE
     )
     assert all(i.status is ResultStatus.ACCEPTED for i in outcome.items)
     return len(pending)

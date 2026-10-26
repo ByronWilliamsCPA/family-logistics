@@ -53,7 +53,9 @@ def answer_leg(repo, leg, seconds, *, now=NOW):
     """Enqueue a leg and answer its request, returning the stored request id."""
     assert repo.enqueue(leg, now=now) is EnqueueStatus.CREATED
     (request,) = [r for r in repo.pending(now=now) if r.leg == leg]
-    outcome = repo.record_results([RouteAnswer(request.request_id, seconds)], now=now)
+    outcome = repo.record_results(
+        [RouteAnswer(request.request_id, seconds)], now=now, zone=ZONE
+    )
     assert outcome.items[0].status is ResultStatus.ACCEPTED
     return request.request_id
 
@@ -113,8 +115,9 @@ class TestLookup:
         assert repo.lookup(FRIDAY_0800, now=stale) is None
 
     def test_an_observation_dated_in_the_future_is_not_served(self, repo):
-        answer_leg(repo, FRIDAY_0800, 900, now=NOW + timedelta(hours=2))
-        assert repo.lookup(FRIDAY_0800, now=NOW) is None
+        evening = Leg("home", "high-school", FRIDAY, 80)  # Friday 20:00
+        answer_leg(repo, evening, 900, now=NOW + timedelta(hours=2))
+        assert repo.lookup(evening, now=NOW) is None
 
     @pytest.mark.parametrize(
         "other",
@@ -224,54 +227,85 @@ class TestDueRequests:
     def test_the_moment_the_time_arrives_it_has_passed(self, repo):
         leg = Leg("home", "high-school", FRIDAY, 32)
         assert self.due_ids(repo, local(8, 0), [leg]) == set()
-        assert self.due_ids(repo, local(7, 59, second=59), [leg]) == {leg}
+        assert self.due_ids(repo, local(7, 59, second=59), [leg]) == set()
+
+    def test_a_request_inside_the_lead_time_is_not_served(self, repo):
+        # Home Assistant prices some seconds after the poll; a request whose
+        # time is closer than the lead could be priced for the next day.
+        friday = Leg("home", "high-school", FRIDAY, 32)
+        saturday = Leg("home", "high-school", SATURDAY, 32)
+        assert self.due_ids(repo, local(7, 50), [friday, saturday]) == set()
+        assert self.due_ids(repo, local(7, 59, second=59), [friday, saturday]) == set()
+
+    def test_a_request_at_least_the_lead_time_away_is_served(self, repo):
+        friday = Leg("home", "high-school", FRIDAY, 32)
+        saturday = Leg("home", "high-school", SATURDAY, 32)
+        assert self.due_ids(repo, local(7, 29), [friday, saturday]) == {friday}
+        assert self.due_ids(repo, local(7, 30), [friday, saturday]) == {friday}
+
+    def test_the_lead_time_is_thirty_minutes(self):
+        assert timedelta(minutes=30) == route_relay.SERVE_LEAD_TIME
 
     def test_around_midnight_the_new_day_decides(self, repo):
         friday_late = Leg("home", "high-school", FRIDAY, 95)  # 23:45
         saturday_early = Leg("home", "high-school", SATURDAY, 1)  # 00:15
         saturday_morning = Leg("home", "high-school", SATURDAY, 32)
         legs = [friday_late, saturday_early, saturday_morning]
-        # Friday 23:50: 23:45 has passed (next one is Saturday's), 00:15 and
-        # 08:00 next occur on Saturday.
-        assert self.due_ids(repo, local(23, 50), legs) == {
+        # Friday 23:10: 23:45 is 35 minutes away (Friday's), 00:15 and 08:00
+        # next occur on Saturday.
+        assert self.due_ids(repo, local(23, 10), legs) == {
+            friday_late,
             saturday_early,
             saturday_morning,
         }
-        # Saturday 00:05: Friday 23:45's next occurrence is Saturday 23:45.
-        assert self.due_ids(repo, local(0, 5, day=24), legs) == {
-            saturday_early,
-            saturday_morning,
-        }
+        # Friday 23:50: 23:45 has passed (the next one is Saturday's, and a
+        # Friday request waits a week); 00:15 is inside the lead time.
+        assert self.due_ids(repo, local(23, 50), legs) == {saturday_morning}
+        # Saturday 00:05: 00:15 is inside the lead time; 23:45 is Saturday's.
+        assert self.due_ids(repo, local(0, 5, day=24), legs) == {saturday_morning}
         # Saturday 00:20: 00:15 has passed, so it waits for next Saturday.
         assert self.due_ids(repo, local(0, 20, day=24), legs) == {saturday_morning}
 
-    def test_a_time_inside_the_spring_forward_gap_is_due_on_the_next_day(self, repo):
-        # 2026-03-08 is a Sunday; 02:30 local does not exist that day.
+    def test_a_time_inside_the_spring_forward_gap_fails_closed(self, repo):
+        # 2026-03-08 is a Sunday; 02:30 local does not exist that day. A
+        # nonexistent wall time on either of the next two days is not served,
+        # and neither is the adjacent day's request that shares the bucket.
         gap = Leg("home", "high-school", 6, 10)  # Sunday 02:30
         monday = Leg("home", "high-school", 0, 10)  # Monday 02:30
         legs = [gap, monday]
-        saturday_noon = local(12, 0, month=3, day=7)
-        assert self.due_ids(repo, saturday_noon, legs) == {monday}
-        sunday_midnight = local(0, 30, month=3, day=8)
-        assert self.due_ids(repo, sunday_midnight, legs) == {monday}
+        assert self.due_ids(repo, local(12, 0, month=3, day=7), legs) == set()
+        assert self.due_ids(repo, local(0, 30, month=3, day=8), legs) == set()
+        # From Monday 00:10 both of the next two days (Monday, Tuesday) exist.
+        assert self.due_ids(repo, local(0, 10, month=3, day=9), legs) == {monday}
 
     def test_a_time_after_the_gap_keeps_its_weekday(self, repo):
         sunday_0900 = Leg("home", "high-school", 6, 36)
         saturday_noon = local(12, 0, month=3, day=7)
         assert self.due_ids(repo, saturday_noon, [sunday_0900]) == {sunday_0900}
 
-    def test_an_ambiguous_fall_back_time_counts_as_its_first_occurrence(self, repo):
-        # 2026-11-01 is a Sunday; 01:30 happens twice.
+    def test_an_ambiguous_fall_back_time_fails_closed(self, repo):
+        # 2026-11-01 is a Sunday; 01:30 happens twice. Which pass Home
+        # Assistant prices is unknowable, so the request is not served.
         sunday = Leg("home", "high-school", 6, 6)  # Sunday 01:30
-        saturday_noon = local(12, 0, month=10, day=31)
-        assert self.due_ids(repo, saturday_noon, [sunday]) == {sunday}
-        # Between the two 01:30s the first has passed, so the next is Monday's.
-        between = datetime(2026, 11, 1, 9, 45, tzinfo=UTC)  # 01:45 PST (second pass)
-        assert self.due_ids(repo, between, [sunday]) == set()
+        monday = Leg("home", "high-school", 0, 6)  # Monday 01:30
+        legs = [sunday, monday]
+        assert self.due_ids(repo, local(12, 0, month=10, day=31), legs) == set()
+        # The reviewer's case: Sunday 01:10 on the second pass (PST). The true
+        # next 01:30 is Sunday's, not Monday's.
+        second_pass = datetime(2026, 11, 1, 1, 10, tzinfo=ZONE, fold=1)
+        assert self.due_ids(repo, second_pass, legs) == set()
+        # Once the ambiguous day is behind the next two days, Monday is served.
+        assert self.due_ids(repo, local(0, 10, month=11, day=2), legs) == {monday}
 
     def test_due_weekday_helper(self):
         assert due_weekday(32, local(7, 0), ZONE) == FRIDAY
         assert due_weekday(32, local(9, 0), ZONE) == SATURDAY
+        assert due_weekday(32, local(7, 59, second=59), ZONE) == FRIDAY
+        assert due_weekday(32, local(8, 0), ZONE) == SATURDAY
+
+    def test_due_weekday_is_none_for_a_nonexistent_or_ambiguous_time(self):
+        assert due_weekday(10, local(12, 0, month=3, day=7), ZONE) is None
+        assert due_weekday(6, local(12, 0, month=10, day=31), ZONE) is None
 
     def test_an_expired_request_is_not_served(self, repo):
         leg = Leg("home", "high-school", FRIDAY, 32)
@@ -313,8 +347,10 @@ class TestRecordResults:
         return request
 
     def test_an_answer_fills_the_cache_for_the_requests_own_leg(self, repo, engine):
-        request = self.request_for(repo, Leg("high-school", "home", 2, 70))
-        outcome = repo.record_results([RouteAnswer(request.request_id, 840)], now=NOW)
+        request = self.request_for(repo, Leg("high-school", "home", FRIDAY, 70))
+        outcome = repo.record_results(
+            [RouteAnswer(request.request_id, 840)], now=NOW, zone=ZONE
+        )
         assert [i.status for i in outcome.items] == [ResultStatus.ACCEPTED]
         assert (
             outcome.count(ResultStatus.ACCEPTED),
@@ -331,11 +367,11 @@ class TestRecordResults:
                 r["duration_seconds"],
             )
             for r in rows
-        ] == [("high-school", "home", 2, 70, 840)]
+        ] == [("high-school", "home", FRIDAY, 70, 840)]
         assert repo.pending(now=NOW) == []
 
     def test_an_unknown_request_id_is_rejected(self, repo):
-        outcome = repo.record_results([RouteAnswer("f" * 32, 900)], now=NOW)
+        outcome = repo.record_results([RouteAnswer("f" * 32, 900)], now=NOW, zone=ZONE)
         assert outcome.items == (
             route_relay.ItemOutcome(
                 "f" * 32, ResultStatus.REJECTED, RejectReason.UNKNOWN_REQUEST
@@ -345,7 +381,9 @@ class TestRecordResults:
     def test_an_expired_request_is_rejected_and_stores_nothing(self, repo, engine):
         request = self.request_for(repo)
         later = NOW + REQUEST_TTL
-        outcome = repo.record_results([RouteAnswer(request.request_id, 900)], now=later)
+        outcome = repo.record_results(
+            [RouteAnswer(request.request_id, 900)], now=later, zone=ZONE
+        )
         assert outcome.items[0].reason is RejectReason.EXPIRED
         with engine.connect() as connection:
             assert (
@@ -357,9 +395,11 @@ class TestRecordResults:
 
     def test_the_same_value_again_is_an_idempotent_no_op(self, repo, engine):
         request = self.request_for(repo)
-        repo.record_results([RouteAnswer(request.request_id, 900)], now=NOW)
+        repo.record_results([RouteAnswer(request.request_id, 900)], now=NOW, zone=ZONE)
         later = NOW + timedelta(hours=3)
-        outcome = repo.record_results([RouteAnswer(request.request_id, 900)], now=later)
+        outcome = repo.record_results(
+            [RouteAnswer(request.request_id, 900)], now=later, zone=ZONE
+        )
         assert outcome.items[0].status is ResultStatus.UNCHANGED
         assert outcome.items[0].reason is None
         # The observation time was not refreshed by the replay.
@@ -369,8 +409,10 @@ class TestRecordResults:
 
     def test_a_different_value_for_an_answered_request_is_a_conflict(self, repo):
         request = self.request_for(repo)
-        repo.record_results([RouteAnswer(request.request_id, 900)], now=NOW)
-        outcome = repo.record_results([RouteAnswer(request.request_id, 1800)], now=NOW)
+        repo.record_results([RouteAnswer(request.request_id, 900)], now=NOW, zone=ZONE)
+        outcome = repo.record_results(
+            [RouteAnswer(request.request_id, 1800)], now=NOW, zone=ZONE
+        )
         assert outcome.items[0].status is ResultStatus.REJECTED
         assert outcome.items[0].reason is RejectReason.CONFLICT
         found = repo.lookup(FRIDAY_0800, now=NOW)
@@ -379,17 +421,21 @@ class TestRecordResults:
 
     def test_a_replay_after_the_request_expired_is_still_a_no_op(self, repo):
         request = self.request_for(repo)
-        repo.record_results([RouteAnswer(request.request_id, 900)], now=NOW)
+        repo.record_results([RouteAnswer(request.request_id, 900)], now=NOW, zone=ZONE)
         later = NOW + REQUEST_TTL + timedelta(days=1)
-        outcome = repo.record_results([RouteAnswer(request.request_id, 900)], now=later)
+        outcome = repo.record_results(
+            [RouteAnswer(request.request_id, 900)], now=later, zone=ZONE
+        )
         assert outcome.items[0].status is ResultStatus.UNCHANGED
 
     def test_a_newer_answer_replaces_the_cache_entry(self, repo):
         first = self.request_for(repo)
-        repo.record_results([RouteAnswer(first.request_id, 900)], now=NOW)
-        later = NOW + CACHE_VALIDITY + timedelta(days=1)
+        repo.record_results([RouteAnswer(first.request_id, 900)], now=NOW, zone=ZONE)
+        later = NOW + CACHE_VALIDITY + timedelta(days=7)  # a Friday again
         second = self.request_for(repo, now=later)
-        repo.record_results([RouteAnswer(second.request_id, 1000)], now=later)
+        repo.record_results(
+            [RouteAnswer(second.request_id, 1000)], now=later, zone=ZONE
+        )
         found = repo.lookup(FRIDAY_0800, now=later)
         assert found is not None
         assert found.duration == timedelta(seconds=1000)
@@ -405,6 +451,7 @@ class TestRecordResults:
                 RouteAnswer(good.request_id, 901),
             ],
             now=NOW,
+            zone=ZONE,
         )
         assert [(i.status, i.reason) for i in outcome.items] == [
             (ResultStatus.REJECTED, RejectReason.UNKNOWN_REQUEST),
@@ -412,6 +459,81 @@ class TestRecordResults:
             (ResultStatus.UNCHANGED, None),
             (ResultStatus.REJECTED, RejectReason.CONFLICT),
         ]
+
+    def test_a_result_received_after_its_time_arrived_is_rejected_not_due(
+        self, repo, engine
+    ):
+        # Polled at Friday 07:59:59 and priced at 08:00:01, Home Assistant would
+        # have priced Saturday 08:00; filing that as Friday would be wrong.
+        request = self.request_for(repo)
+        outcome = repo.record_results(
+            [RouteAnswer(request.request_id, 900)],
+            now=local(8, 0, second=2),
+            zone=ZONE,
+        )
+        assert outcome.items == (
+            route_relay.ItemOutcome(
+                request.request_id, ResultStatus.REJECTED, RejectReason.NOT_DUE
+            ),
+        )
+        assert RejectReason.NOT_DUE.value == "not_due"
+        assert repo.lookup(FRIDAY_0800, now=local(8, 0, second=2)) is None
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    select(func.count()).select_from(schema.route_cache)
+                ).scalar_one()
+                == 0
+            )
+        # Still pending, so it is served again in its next due window and a
+        # result received then is accepted.
+        assert [r.request_id for r in repo.pending(now=NOW)] == [request.request_id]
+        next_friday = local(7, 0, day=30)
+        assert [
+            r.request_id for r in repo.due_requests(now=next_friday, zone=ZONE)
+        ] == [request.request_id]
+        retry = repo.record_results(
+            [RouteAnswer(request.request_id, 900)], now=next_friday, zone=ZONE
+        )
+        assert retry.items[0].status is ResultStatus.ACCEPTED
+
+    def test_a_result_well_before_its_time_is_accepted(self, repo):
+        request = self.request_for(repo, now=local(0, 0))
+        outcome = repo.record_results(
+            [RouteAnswer(request.request_id, 900)], now=local(0, 5), zone=ZONE
+        )
+        assert outcome.items[0].status is ResultStatus.ACCEPTED
+
+    def test_a_result_for_the_wrong_weekday_is_not_due(self, repo):
+        # A Saturday 08:00 request answered on Friday morning: the next 08:00
+        # is Friday's, so the answer would measure the wrong day.
+        saturday = Leg("home", "high-school", SATURDAY, 32)
+        request = self.request_for(repo, saturday)
+        outcome = repo.record_results(
+            [RouteAnswer(request.request_id, 900)], now=NOW, zone=ZONE
+        )
+        assert outcome.items[0].reason is RejectReason.NOT_DUE
+        assert repo.lookup(saturday, now=NOW) is None
+
+    def test_a_result_for_an_ambiguous_time_is_not_due(self, repo):
+        monday = Leg("home", "high-school", 0, 6)  # Monday 01:30
+        created = local(12, 0, month=10, day=31)
+        request = self.request_for(repo, monday, now=created)
+        second_pass = datetime(2026, 11, 1, 1, 10, tzinfo=ZONE, fold=1)
+        outcome = repo.record_results(
+            [RouteAnswer(request.request_id, 900)], now=second_pass, zone=ZONE
+        )
+        assert outcome.items[0].reason is RejectReason.NOT_DUE
+        assert repo.lookup(monday, now=second_pass) is None
+
+    def test_an_expired_or_replayed_request_is_judged_before_due(self, repo):
+        request = self.request_for(repo)
+        repo.record_results([RouteAnswer(request.request_id, 900)], now=NOW, zone=ZONE)
+        # Replays are idempotent even when the time of day has since passed.
+        replay = repo.record_results(
+            [RouteAnswer(request.request_id, 900)], now=local(9, 0), zone=ZONE
+        )
+        assert replay.items[0].status is ResultStatus.UNCHANGED
 
     @pytest.mark.parametrize("seconds", [0, -1, MAX_ROUTE_DURATION_SECONDS + 1])
     def test_a_duration_outside_the_range_is_refused_before_any_write(
@@ -422,6 +544,7 @@ class TestRecordResults:
             repo.record_results(
                 [RouteAnswer(request.request_id, 900), RouteAnswer("x", seconds)],
                 now=NOW,
+                zone=ZONE,
             )
         assert repo.lookup(FRIDAY_0800, now=NOW) is None
         assert len(repo.pending(now=NOW)) == 1
@@ -429,7 +552,9 @@ class TestRecordResults:
     def test_the_upper_bound_itself_is_accepted(self, repo):
         request = self.request_for(repo)
         outcome = repo.record_results(
-            [RouteAnswer(request.request_id, MAX_ROUTE_DURATION_SECONDS)], now=NOW
+            [RouteAnswer(request.request_id, MAX_ROUTE_DURATION_SECONDS)],
+            now=NOW,
+            zone=ZONE,
         )
         assert outcome.items[0].status is ResultStatus.ACCEPTED
 
@@ -442,7 +567,10 @@ class TestRecordResults:
 
         with pytest.raises(RuntimeError, match="audit failed"):
             repo.record_results(
-                [RouteAnswer(request.request_id, 900)], now=NOW, before_commit=fail
+                [RouteAnswer(request.request_id, 900)],
+                now=NOW,
+                before_commit=fail,
+                zone=ZONE,
             )
         assert repo.lookup(FRIDAY_0800, now=NOW) is None
         assert [r.request_id for r in repo.pending(now=NOW)] == [request.request_id]
@@ -454,12 +582,13 @@ class TestRecordResults:
             [RouteAnswer(request.request_id, 900)],
             now=NOW,
             before_commit=lambda _c, outcome: seen.append(outcome),
+            zone=ZONE,
         )
         assert [i.status for i in seen[0].items] == [ResultStatus.ACCEPTED]
 
     def test_a_naive_now_is_refused(self, repo):
         with pytest.raises(ValidationError):
-            repo.record_results([], now=NAIVE)
+            repo.record_results([], now=NAIVE, zone=ZONE)
 
 
 class TestWriteLock:
@@ -473,7 +602,9 @@ class TestWriteLock:
                     repo.enqueue(FRIDAY_0800, now=NOW)
                 assert caught.value.retry_after == route_relay.LOCK_RETRY_AFTER_SECONDS
                 with pytest.raises(RouteRelayBusyError):
-                    repo.record_results([RouteAnswer("a" * 32, 900)], now=NOW)
+                    repo.record_results(
+                        [RouteAnswer("a" * 32, 900)], now=NOW, zone=ZONE
+                    )
                 connection.rollback()
         finally:
             holder.dispose()

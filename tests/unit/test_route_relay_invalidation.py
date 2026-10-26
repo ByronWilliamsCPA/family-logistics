@@ -10,7 +10,7 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
-from fl_relay import CIPHER, HOME_ADDRESS, LOCATIONS, NOW, make_engine
+from fl_relay import CIPHER, HOME_ADDRESS, LOCATIONS, NOW, ZONE, make_engine
 from sqlalchemy import text
 
 from family_logistics.db.registry import RegistryStore
@@ -49,7 +49,9 @@ def repo(engine):
 def answer(repo, leg, seconds):
     assert repo.enqueue(leg, now=NOW) is EnqueueStatus.CREATED
     (request,) = [r for r in repo.pending(now=NOW) if r.leg == leg]
-    outcome = repo.record_results([RouteAnswer(request.request_id, seconds)], now=NOW)
+    outcome = repo.record_results(
+        [RouteAnswer(request.request_id, seconds)], now=NOW, zone=ZONE
+    )
     assert outcome.items[0].status is ResultStatus.ACCEPTED
 
 
@@ -111,7 +113,9 @@ def test_a_late_answer_for_a_dropped_request_is_rejected(engine, seeded):
     repo = seeded
     (doomed,) = [r for r in repo.pending(now=NOW) if r.leg == PENDING_HOME_SCHOOL]
     edit(engine, "home", name="Family Home", verified=False)
-    outcome = repo.record_results([RouteAnswer(doomed.request_id, 900)], now=NOW)
+    outcome = repo.record_results(
+        [RouteAnswer(doomed.request_id, 900)], now=NOW, zone=ZONE
+    )
     assert outcome.items[0].status is ResultStatus.REJECTED
     assert repo.lookup(PENDING_HOME_SCHOOL, now=NOW) is None
 

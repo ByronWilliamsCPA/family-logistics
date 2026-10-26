@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 import pytest
-from fl_relay import NOW, make_engine
+from fl_relay import NOW, ZONE, make_engine
 from sqlalchemy import func, select
 
 from family_logistics.core.exceptions import ValidationError
@@ -45,7 +45,7 @@ def repo(engine):
 def answer(repo, leg, *, now):
     repo.enqueue(leg, now=now)
     (request,) = [r for r in repo.pending(now=now) if r.leg == leg]
-    repo.record_results([RouteAnswer(request.request_id, 900)], now=now)
+    repo.record_results([RouteAnswer(request.request_id, 900)], now=now, zone=ZONE)
 
 
 def count(engine, table):
@@ -60,7 +60,7 @@ def test_the_retention_period_is_the_validity_window():
 class TestCachePurge:
     def test_entries_older_than_28_days_are_purged(self, repo, engine):
         answer(repo, Leg("home", "high-school", FRIDAY, 32), now=NOW)
-        answer(repo, Leg("home", "xc", FRIDAY, 32), now=NOW + timedelta(days=10))
+        answer(repo, Leg("home", "xc", FRIDAY, 32), now=NOW + timedelta(days=14))
         later = NOW + CACHE_VALIDITY + timedelta(seconds=1)
         with engine.begin() as connection:
             assert purge_expired_route_cache(connection, now=later) == 1

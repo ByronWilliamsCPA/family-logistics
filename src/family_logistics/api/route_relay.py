@@ -361,7 +361,7 @@ def register_route_relay_routes(
         ]
         try:
             outcome = repository.record_results(
-                answers, now=clock(), before_commit=audit
+                answers, now=clock(), zone=zone, before_commit=audit
             )
         except RouteRelayBusyError as busy:
             raise _unavailable(DATABASE_BUSY, busy.retry_after) from None

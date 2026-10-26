@@ -41,7 +41,7 @@ from __future__ import annotations
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta, tzinfo
+from datetime import UTC, datetime, time, timedelta, tzinfo
 from enum import StrEnum
 from typing import TYPE_CHECKING, cast
 
@@ -84,6 +84,12 @@ MAX_REQUESTS_PER_POLL = 50
 """Cap on requests one poll returns, bounding the routing-provider calls a single
 Home Assistant automation run makes."""
 
+SERVE_LEAD_TIME = timedelta(minutes=30)
+"""How far ahead of a bucket's start time a request must be to be served. Home
+Assistant prices some seconds to minutes after the poll (latency, clock skew), so
+a request served closer than this to its time could be priced for the following
+day and filed under the wrong weekday."""
+
 LOCK_RETRY_AFTER_SECONDS = 5
 """Seconds a client is asked to wait after ``RouteRelayBusyError``."""
 
@@ -99,6 +105,7 @@ __all__ = [
     "MAX_REQUESTS_PER_POLL",
     "MAX_ROUTE_DURATION_SECONDS",
     "REQUEST_TTL",
+    "SERVE_LEAD_TIME",
     "WEEKDAY_NAMES",
     "BatchOutcome",
     "CachedLeg",
@@ -114,6 +121,7 @@ __all__ = [
     "RouteRelayRepository",
     "bucket_start",
     "due_weekday",
+    "serving_weekday",
     "slot_of",
 ]
 
@@ -149,6 +157,7 @@ class RejectReason(StrEnum):
     UNKNOWN_REQUEST = "unknown_request"
     EXPIRED = "expired"
     CONFLICT = "conflict"
+    NOT_DUE = "not_due"
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,25 +338,84 @@ def _require_aware(name: str, value: datetime) -> None:
         raise ValidationError(msg, field=name)
 
 
-def _exists(candidate: datetime, zone: tzinfo) -> bool:
-    """Report whether a local wall-clock time occurs (it does not in a DST gap).
+def _is_unambiguous(candidate: datetime) -> bool:
+    """Report whether a local wall-clock time occurs exactly once.
+
+    A time in a spring-forward gap does not occur and a time in a fall-back hour
+    occurs twice; ``zoneinfo`` gives the two folds different UTC offsets in
+    both cases.
 
     Args:
-        candidate: A local time carrying ``zone``.
+        candidate: A local time carrying the household's zone.
+
+    Returns:
+        True when both folds resolve to the same UTC offset.
+    """
+    return (
+        candidate.replace(fold=0).utcoffset() == candidate.replace(fold=1).utcoffset()
+    )
+
+
+def _next_occurrence(bucket: int, now: datetime, zone: tzinfo) -> datetime | None:
+    """Return the next local occurrence of a bucket's start time, if unambiguous.
+
+    Args:
+        bucket: The request's bucket.
+        now: Reference instant (aware).
         zone: The household's time zone.
 
     Returns:
-        True when the wall-clock time survives a round trip through UTC.
+        The first local occurrence of the bucket's start time strictly after
+        ``now``, or None when that wall time is nonexistent or ambiguous on
+        either of the next two local days.
     """
-    round_trip = candidate.astimezone(UTC).astimezone(zone)
-    return round_trip.replace(tzinfo=None) == candidate.replace(tzinfo=None)
+    # #EDGE: Timing: around a daylight saving change a wall-clock time may not
+    # exist (spring forward) or occur twice (fall back), and Home Assistant's
+    # reading of such a time is unknown. Fail closed: when the bucket start is
+    # nonexistent or ambiguous on today's or tomorrow's date, there is no
+    # occurrence, so the request is neither served nor answerable. It is served
+    # again once both of the next two days are unambiguous, within the request's
+    # 8 day life. A poll in the same second as the start counts it as passed.
+    # #VERIFY: tests/unit/test_route_relay_repo.py::TestDueRequests covers a gap,
+    # an ambiguous hour (including the second pass) and midnight; check one
+    # request near a DST change in shadow mode.
+    start = bucket_start(bucket)
+    moment = now.astimezone(UTC)
+    today = moment.astimezone(zone).date()
+    first = datetime.combine(today, start, tzinfo=zone)
+    second = datetime.combine(today + timedelta(days=1), start, tzinfo=zone)
+    if not (_is_unambiguous(first) and _is_unambiguous(second)):
+        return None
+    return first if first.astimezone(UTC) > moment else second
 
 
-def due_weekday(bucket: int, now: datetime, zone: tzinfo) -> int:
+def due_weekday(bucket: int, now: datetime, zone: tzinfo) -> int | None:
     """Return the weekday of the next local occurrence of a bucket's start time.
 
     Home Assistant can price only "the next occurrence of a time of day", so a
-    request is due when its weekday equals this value.
+    result is true only for the request whose weekday equals this value at the
+    moment the result is received.
+
+    Args:
+        bucket: The request's bucket.
+        now: Reference instant (aware).
+        zone: The household's time zone.
+
+    Returns:
+        The weekday (Monday is 0) of the first local occurrence of the
+        bucket's start time strictly after ``now``, or None when the start
+        time is nonexistent or ambiguous on either of the next two local days.
+    """
+    occurrence = _next_occurrence(bucket, now, zone)
+    return None if occurrence is None else occurrence.weekday()
+
+
+def serving_weekday(bucket: int, now: datetime, zone: tzinfo) -> int | None:
+    """Return the weekday a request may be served for at a poll, if any.
+
+    The next occurrence of the bucket's start time must be at least
+    ``SERVE_LEAD_TIME`` after the poll, so that Home Assistant's latency and
+    clock skew cannot carry the pricing call across the start time.
 
     Args:
         bucket: The request's bucket.
@@ -355,25 +423,15 @@ def due_weekday(bucket: int, now: datetime, zone: tzinfo) -> int:
         zone: The household's time zone.
 
     Returns:
-        The weekday (Monday is 0) of the first local occurrence of the
-        bucket's start time strictly after ``now``.
+        The weekday of the next occurrence, or None when the time is too close
+        or nonexistent or ambiguous (see ``due_weekday``).
     """
-    # #EDGE: Timing: a wall-clock time inside a spring-forward gap does not
-    # occur that day, so the next occurrence is the following day; an
-    # ambiguous time in a fall-back hour counts as its first occurrence. The
-    # weekday is that of the local date either way. A poll in the same second
-    # as the bucket's start counts the time as already passed (next day).
-    # #VERIFY: tests/unit/test_route_relay_repo.py::TestDueRequests covers a
-    # gap, an ambiguous hour and midnight; check one request near a DST change
-    # in shadow mode.
-    start = bucket_start(bucket)
-    moment = now.astimezone(UTC)
-    day: date = now.astimezone(zone).date()
-    while True:
-        candidate = datetime.combine(day, start, tzinfo=zone)
-        if _exists(candidate, zone) and candidate.astimezone(UTC) > moment:
-            return day.weekday()
-        day += timedelta(days=1)
+    occurrence = _next_occurrence(bucket, now, zone)
+    if occurrence is None:
+        return None
+    if occurrence.astimezone(UTC) - now.astimezone(UTC) < SERVE_LEAD_TIME:
+        return None
+    return occurrence.weekday()
 
 
 @contextmanager
@@ -582,18 +640,24 @@ class RouteRelayRepository:
         ]
 
     def due_requests(
-        self, *, now: datetime, zone: tzinfo, limit: int = MAX_REQUESTS_PER_POLL
+        self,
+        *,
+        now: datetime,
+        zone: tzinfo,
+        limit: int | None = MAX_REQUESTS_PER_POLL,
     ) -> list[PendingRequest]:
         """Return the pending requests Home Assistant can price right now.
 
-        A request is due when its weekday equals the weekday of the next local
-        occurrence of its bucket's start time (``due_weekday``). The others stay
+        A request is served when its weekday equals the weekday of the next
+        local occurrence of its bucket's start time and that occurrence is at
+        least ``SERVE_LEAD_TIME`` away (``serving_weekday``). The others stay
         queued until their day.
 
         Args:
             now: Poll time (aware).
             zone: The household's time zone.
-            limit: Most requests to return, oldest first.
+            limit: Most requests to return, oldest first; None for all of them
+                (the caller drops the ones it cannot route before capping).
 
         Returns:
             The due requests.
@@ -604,9 +668,9 @@ class RouteRelayRepository:
         due = [
             request
             for request in self.pending(now=now)
-            if request.leg.weekday == due_weekday(request.leg.bucket, now, zone)
+            if request.leg.weekday == serving_weekday(request.leg.bucket, now, zone)
         ]
-        return due[:limit]
+        return due if limit is None else due[:limit]
 
     def location_sources(
         self, location_ids: Collection[str]
@@ -649,18 +713,23 @@ class RouteRelayRepository:
         answers: Sequence[RouteAnswer],
         *,
         now: datetime,
+        zone: tzinfo,
         before_commit: Callable[[Connection, BatchOutcome], None] | None = None,
     ) -> BatchOutcome:
         """Apply a batch of posted results in one transaction.
 
         Each item is judged on its own: an unknown or expired request id and a
         replay with a different value are rejected, an identical replay is
-        unchanged, anything else fills the cache for the request's own leg,
+        unchanged, a request no longer due (its next occurrence is not its own
+        weekday, so Home Assistant priced another day) is rejected and stays
+        pending, anything else fills the cache for the request's own leg,
         weekday and bucket (never the sender's) at the server's ``now``.
 
         Args:
             answers: Validated results, in posted order.
             now: Receipt time (aware); becomes ``observed_at``.
+            zone: The household's time zone, to judge whether a request is
+                still due at receipt.
             before_commit: Called with the open connection and the outcome just
                 before commit, for the audit row. If it raises, nothing is
                 written.
@@ -683,20 +752,23 @@ class RouteRelayRepository:
                 raise ValidationError(msg, field="duration_seconds")
         with _write_locked(self._engine, self._lock_timeout_ms) as connection:
             outcome = BatchOutcome(
-                tuple(_apply(connection, answer, now) for answer in answers)
+                tuple(_apply(connection, answer, now, zone) for answer in answers)
             )
             if before_commit is not None:
                 before_commit(connection, outcome)
         return outcome
 
 
-def _apply(connection: Connection, answer: RouteAnswer, now: datetime) -> ItemOutcome:
+def _apply(
+    connection: Connection, answer: RouteAnswer, now: datetime, zone: tzinfo
+) -> ItemOutcome:
     """Judge one posted result and, when it is acceptable, store it.
 
     Args:
         connection: The connection holding the write lock.
         answer: The result.
         now: Receipt time (aware).
+        zone: The household's time zone.
 
     Returns:
         The item's outcome.
@@ -721,6 +793,17 @@ def _apply(connection: Connection, answer: RouteAnswer, now: datetime) -> ItemOu
     if cast("datetime", row["expires_at"]) <= now:
         return ItemOutcome(
             answer.request_id, ResultStatus.REJECTED, RejectReason.EXPIRED
+        )
+    # #CRITICAL: Data integrity: Home Assistant prices the NEXT occurrence of the
+    # bucket's time of day, so a result is true for the request's weekday only
+    # while that is still the next occurrence. A result received after the time
+    # arrived (a slow call, clock skew) measured the following day: reject it and
+    # leave the request pending, with no cache write, to be served again.
+    # #VERIFY: tests/unit/test_route_relay_repo.py::TestRecordResults
+    # (not_due cases) and TestDueRequests (the lead time).
+    if due_weekday(cast("int", row["bucket"]), now, zone) != row["weekday"]:
+        return ItemOutcome(
+            answer.request_id, ResultStatus.REJECTED, RejectReason.NOT_DUE
         )
     connection.execute(
         update(route_request)
