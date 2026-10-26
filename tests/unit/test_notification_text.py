@@ -804,7 +804,11 @@ class TestRunLevelWording:
 # Never clear for a failed, incomplete or unavailable run (properties)
 # ---------------------------------------------------------------------------
 
-PROPS = settings(max_examples=120, suppress_health_check=[HealthCheck.too_slow])
+# No per-example deadline: each example renders whole push sets, and the default
+# 200 ms limit would make a loaded CI runner fail a correct property.
+PROPS = settings(
+    max_examples=120, deadline=None, suppress_health_check=[HealthCheck.too_slow]
+)
 RIDE = trip(notes(driver="Riley"), uid="ride")
 RIDE_KEY = RIDE.key.as_str()
 RIDES = RideIndex.build(current=(RIDE,), previous=(), unparsed=())
@@ -1226,15 +1230,17 @@ class TestLengths:
     def test_render_refuses_a_chunk_mixing_run_text_with_findings(self, other):
         mixed = [push(kind=PushKind.NOTICE), other]
         reversed_mix = [other, push(kind=PushKind.NOTICE)]
+        shown_policy = policy()
         with pytest.raises(ValueError, match="findings"):
-            render(mixed, names=NAMES, policy=policy())
+            render(mixed, names=NAMES, policy=shown_policy)
         with pytest.raises(ValueError, match="findings"):
-            render(reversed_mix, names=NAMES, policy=policy())
+            render(reversed_mix, names=NAMES, policy=shown_policy)
 
     def test_render_refuses_an_empty_chunk(self):
         empty: list[PlannedPush] = []
+        shown_policy = policy()
         with pytest.raises(ValueError, match="at least one"):
-            render(empty, names=NAMES, policy=policy())
+            render(empty, names=NAMES, policy=shown_policy)
 
 
 class TestChunking:
