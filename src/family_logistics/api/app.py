@@ -9,7 +9,9 @@ from fastapi import FastAPI
 from family_logistics import __version__
 from family_logistics.api.ha import build_ha_router
 from family_logistics.api.health import build_health_router
+from family_logistics.api.route_relay import register_route_relay_routes
 from family_logistics.core.database import create_sqlite_engine
+from family_logistics.db.route_relay import RouteRelayRepository
 from family_logistics.middleware.correlation import CorrelationMiddleware
 from family_logistics.middleware.security import SecurityHeadersMiddleware
 from family_logistics.services.school_snapshot import SchoolSnapshotIngest
@@ -38,7 +40,9 @@ def create_app(settings: Settings) -> FastAPI:
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(CorrelationMiddleware)
     app.include_router(build_health_router(engine))
-    app.include_router(
-        build_ha_router(settings, school_ingest=SchoolSnapshotIngest(engine, settings))
+    ha_router = build_ha_router(
+        settings, school_ingest=SchoolSnapshotIngest(engine, settings)
     )
+    register_route_relay_routes(ha_router, settings, RouteRelayRepository(engine))
+    app.include_router(ha_router)
     return app

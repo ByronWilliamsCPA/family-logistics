@@ -6,6 +6,7 @@ other test data uses, so a test can assert they never appear in a response.
 
 from __future__ import annotations
 
+import base64
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -85,3 +86,18 @@ def make_engine(tmp_path: Path) -> Engine:
 def days(count: float) -> timedelta:
     """Return a timedelta of ``count`` days."""
     return timedelta(days=count)
+
+
+class Clock:
+    """A settable clock returning an aware instant."""
+
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+def audit_key_text() -> str:
+    """Return a valid ``FL_AUDIT_KEY`` value built at run time (no literal)."""
+    return base64.urlsafe_b64encode(bytes(range(32))).decode()

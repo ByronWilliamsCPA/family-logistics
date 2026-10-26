@@ -1,0 +1,514 @@
+"""GET /api/v1/route-requests and POST /api/v1/route-results (ADR 0006)."""
+
+from __future__ import annotations
+
+import logging
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from fl_relay import (
+    DATA_KEY,
+    HOME_ADDRESS,
+    NOW,
+    STUDIO_ADDRESS,
+    ZONE,
+    Clock,
+    audit_key_text,
+    local,
+    make_engine,
+)
+from pydantic import SecretStr
+from sqlalchemy import text
+
+from family_logistics.api.app import create_app
+from family_logistics.api.ha import build_ha_router
+from family_logistics.api.route_relay import (
+    MAX_RESULTS_PER_POST,
+    register_route_relay_routes,
+)
+from family_logistics.core.config import Settings
+from family_logistics.core.database import create_sqlite_engine
+from family_logistics.db.route_relay import (
+    MAX_ROUTE_DURATION_SECONDS,
+    Leg,
+    RouteAnswer,
+    RouteRelayRepository,
+)
+
+pytestmark = pytest.mark.unit
+
+TOKEN = "t" * 40
+GOOD = {"Authorization": f"Bearer {TOKEN}"}
+FRIDAY = 4
+HOME_TO_SCHOOL = Leg("home", "high-school", FRIDAY, 32)
+HOME_TO_STUDIO = Leg("home", "studio", FRIDAY, 32)
+GET = "/api/v1/route-requests"
+POST = "/api/v1/route-results"
+
+
+def make_settings(tmp_path, **overrides):
+    values = {
+        "ha_token": TOKEN,
+        "data_key": DATA_KEY,
+        "audit_key": SecretStr(audit_key_text()),
+        "database_path": tmp_path / "fl.db",
+        "timezone": str(ZONE),
+    }
+    values.update(overrides)
+    return Settings.model_validate(values)
+
+
+@pytest.fixture
+def engine(tmp_path):
+    engine = make_engine(tmp_path)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def repo(engine):
+    return RouteRelayRepository(engine)
+
+
+@pytest.fixture
+def clock():
+    return Clock(NOW)
+
+
+@pytest.fixture
+def settings(tmp_path):
+    return make_settings(tmp_path)
+
+
+def build_client(settings, engine, clock, *, lock_timeout_ms=None):
+    router = build_ha_router(settings)
+    repository = (
+        RouteRelayRepository(engine)
+        if lock_timeout_ms is None
+        else RouteRelayRepository(engine, lock_timeout_ms=lock_timeout_ms)
+    )
+    register_route_relay_routes(router, settings, repository, clock=clock)
+    app = FastAPI()
+    app.include_router(router)
+    return TestClient(app)
+
+
+@pytest.fixture
+def client(settings, engine, clock):
+    return build_client(settings, engine, clock)
+
+
+def queue(repo, *legs, now=NOW):
+    for leg in legs:
+        repo.enqueue(leg, now=now)
+    return {r.leg: r.request_id for r in repo.pending(now=now)}
+
+
+def audit_rows(engine):
+    with engine.connect() as connection:
+        return connection.execute(
+            text("SELECT actor, object_ref, action, new_hash FROM audit_log")
+        ).all()
+
+
+class TestAuth:
+    def test_both_routes_refuse_a_missing_token(self, client):
+        assert client.get(GET).status_code == 401
+        assert client.post(POST, json={"results": []}).status_code == 401
+
+    def test_both_routes_refuse_a_wrong_token(self, client):
+        bad = {"Authorization": "Bearer " + "x" * 40}
+        assert client.get(GET, headers=bad).status_code == 401
+        body = {"results": [{"request_id": "a", "duration_seconds": 60}]}
+        assert client.post(POST, headers=bad, json=body).status_code == 401
+
+    def test_authentication_comes_before_body_validation(self, client):
+        assert client.post(POST, json={"nonsense": True}).status_code == 401
+
+    def test_an_unconfigured_token_denies_everything(self, tmp_path, engine, clock):
+        unset = make_settings(tmp_path, ha_token=None)
+        client = build_client(unset, engine, clock)
+        assert client.get(GET, headers=GOOD).status_code == 401
+
+    def test_the_routes_are_registered_by_create_app(self, settings, engine):
+        client = TestClient(create_app(settings))
+        assert client.get(GET).status_code == 401
+        assert client.get(GET, headers=GOOD).status_code == 200
+
+
+class TestGetRouteRequests:
+    def test_an_empty_queue_is_an_empty_list(self, client):
+        response = client.get(GET, headers=GOOD)
+        assert response.status_code == 200
+        assert response.json() == {"requests": []}
+
+    def test_a_zoned_location_is_sent_as_its_zone_id_and_never_as_an_address(
+        self, client, repo
+    ):
+        # "home" has both a zone and an address; the address must not be used.
+        ids = queue(repo, HOME_TO_SCHOOL)
+        response = client.get(GET, headers=GOOD)
+        assert response.status_code == 200
+        assert response.json() == {
+            "requests": [
+                {
+                    "request_id": ids[HOME_TO_SCHOOL],
+                    "origin": {"kind": "zone", "value": "zone.home_base"},
+                    "destination": {"kind": "zone", "value": "zone.school_a"},
+                    "weekday": "fri",
+                    "departure_time": "08:00:00",
+                }
+            ]
+        }
+        assert HOME_ADDRESS not in response.text
+        assert STUDIO_ADDRESS not in response.text
+
+    def test_a_zone_less_location_is_sent_as_its_decrypted_address(self, client, repo):
+        queue(repo, HOME_TO_STUDIO)
+        (item,) = client.get(GET, headers=GOOD).json()["requests"]
+        assert item["origin"] == {"kind": "zone", "value": "zone.home_base"}
+        assert item["destination"] == {"kind": "address", "value": STUDIO_ADDRESS}
+        assert HOME_ADDRESS not in client.get(GET, headers=GOOD).text
+
+    def test_a_request_with_no_usable_endpoint_is_not_served_and_logs_no_address(
+        self, client, repo, caplog
+    ):
+        # middle-school has neither a zone nor an address.
+        queue(repo, Leg("home", "middle-school", FRIDAY, 32))
+        with caplog.at_level(logging.WARNING):
+            response = client.get(GET, headers=GOOD)
+        assert response.json() == {"requests": []}
+        assert "route_relay.request_unroutable" in caplog.text
+        assert HOME_ADDRESS not in caplog.text
+        assert STUDIO_ADDRESS not in caplog.text
+
+    def test_an_address_that_cannot_be_decrypted_is_not_served(
+        self, tmp_path, engine, clock, repo, caplog
+    ):
+        wrong_key = make_settings(
+            tmp_path,
+            data_key=SecretStr("A" * 43 + "="),
+        )
+        client = build_client(wrong_key, engine, clock)
+        queue(repo, HOME_TO_STUDIO)
+        with caplog.at_level(logging.WARNING):
+            response = client.get(GET, headers=GOOD)
+        assert response.json() == {"requests": []}
+        assert "route_relay.request_unroutable" in caplog.text
+        assert STUDIO_ADDRESS not in caplog.text
+
+    def test_an_address_is_not_served_without_a_data_key(
+        self, tmp_path, engine, clock, repo
+    ):
+        no_key = make_settings(tmp_path, data_key=None)
+        client = build_client(no_key, engine, clock)
+        queue(repo, HOME_TO_STUDIO)
+        assert client.get(GET, headers=GOOD).json() == {"requests": []}
+
+    def test_a_zone_pair_needs_no_data_key(self, tmp_path, engine, clock, repo):
+        no_key = make_settings(tmp_path, data_key=None)
+        client = build_client(no_key, engine, clock)
+        queue(repo, HOME_TO_SCHOOL)
+        assert len(client.get(GET, headers=GOOD).json()["requests"]) == 1
+
+    def test_only_due_requests_are_served(self, client, repo, clock):
+        today = Leg("home", "high-school", FRIDAY, 32)  # Friday 08:00
+        tomorrow = Leg("home", "xc", 5, 32)  # Saturday 08:00
+        queue(repo, today, tomorrow)
+
+        def served():
+            return {
+                (r["weekday"], r["departure_time"])
+                for r in client.get(GET, headers=GOOD).json()["requests"]
+            }
+
+        clock.now = local(7, 0)
+        assert served() == {("fri", "08:00:00")}
+        # After 08:00 the next 08:00 is Saturday's: the Friday request waits a
+        # week and the Saturday one is now the due one.
+        clock.now = local(9, 0)
+        assert served() == {("sat", "08:00:00")}
+
+    def test_a_midnight_request_is_due_on_the_day_that_starts_at_midnight(
+        self, client, repo, clock
+    ):
+        saturday_midnight = Leg("home", "high-school", 5, 0)
+        queue(repo, saturday_midnight)
+        clock.now = local(23, 50)  # Friday evening: the next 00:00 is Saturday's
+        assert len(client.get(GET, headers=GOOD).json()["requests"]) == 1
+        clock.now = local(0, 5, day=24)  # just after midnight: next is Sunday's
+        assert client.get(GET, headers=GOOD).json() == {"requests": []}
+
+    def test_an_expired_request_is_not_served(self, client, repo, clock):
+        queue(repo, HOME_TO_SCHOOL)
+        clock.now = NOW.replace(year=2027)
+        assert client.get(GET, headers=GOOD).json() == {"requests": []}
+
+    def test_an_answered_request_is_not_served_again(self, client, repo):
+        ids = queue(repo, HOME_TO_SCHOOL)
+        repo.record_results([RouteAnswer(ids[HOME_TO_SCHOOL], 600)], now=NOW)
+        assert client.get(GET, headers=GOOD).json() == {"requests": []}
+
+    def test_a_poll_writes_nothing_and_logs_only_a_count(
+        self, client, repo, engine, caplog
+    ):
+        queue(repo, HOME_TO_STUDIO)
+        with caplog.at_level(logging.INFO):
+            client.get(GET, headers=GOOD)
+        assert audit_rows(engine) == []
+        assert STUDIO_ADDRESS not in caplog.text
+
+    def test_a_location_that_vanished_mid_poll_is_not_served(
+        self, client, repo, monkeypatch
+    ):
+        queue(repo, HOME_TO_SCHOOL)
+        monkeypatch.setattr(RouteRelayRepository, "location_sources", lambda *_: {})
+        assert client.get(GET, headers=GOOD).json() == {"requests": []}
+
+    def test_a_store_error_is_a_503_not_a_500(self, client, engine):
+        with engine.begin() as connection:
+            connection.execute(text("DROP TABLE route_request"))
+        response = client.get(GET, headers=GOOD)
+        assert response.status_code == 503
+
+
+class TestPostRouteResults:
+    def post(self, client, *items):
+        return client.post(POST, headers=GOOD, json={"results": list(items)})
+
+    @staticmethod
+    def item(request_id, seconds=900):
+        return {"request_id": request_id, "duration_seconds": seconds}
+
+    def test_a_result_fills_the_cache_for_the_requests_own_leg(self, client, repo):
+        ids = queue(repo, HOME_TO_SCHOOL)
+        response = self.post(client, self.item(ids[HOME_TO_SCHOOL], 1260))
+        assert response.status_code == 200
+        assert response.json() == {
+            "accepted": 1,
+            "unchanged": 0,
+            "rejected": 0,
+            "results": [
+                {
+                    "request_id": ids[HOME_TO_SCHOOL],
+                    "status": "accepted",
+                    "reason": None,
+                }
+            ],
+        }
+        found = repo.lookup(HOME_TO_SCHOOL, now=NOW)
+        assert found is not None
+        assert found.duration.total_seconds() == 1260
+
+    def test_a_sender_claimed_weekday_or_endpoint_is_ignored(self, client, repo):
+        ids = queue(repo, HOME_TO_SCHOOL)
+        claim = {
+            **self.item(ids[HOME_TO_SCHOOL], 700),
+            "weekday": "sun",
+            "bucket": 5,
+            "origin": {"kind": "address", "value": "somewhere else"},
+            "destination": "zone.elsewhere",
+        }
+        assert self.post(client, claim).json()["accepted"] == 1
+        assert repo.lookup(HOME_TO_SCHOOL, now=NOW) is not None
+        assert repo.lookup(Leg("home", "high-school", 6, 5), now=NOW) is None
+
+    def test_an_unknown_id_is_rejected_for_that_item_only(self, client, repo):
+        ids = queue(repo, HOME_TO_SCHOOL)
+        response = self.post(
+            client, self.item("0" * 32), self.item(ids[HOME_TO_SCHOOL], 600)
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert (body["accepted"], body["rejected"]) == (1, 1)
+        assert body["results"][0] == {
+            "request_id": "0" * 32,
+            "status": "rejected",
+            "reason": "unknown_request",
+        }
+        assert repo.lookup(HOME_TO_SCHOOL, now=NOW) is not None
+
+    def test_an_expired_id_is_rejected(self, client, repo, clock):
+        ids = queue(repo, HOME_TO_SCHOOL)
+        clock.now = NOW.replace(year=2027)
+        body = self.post(client, self.item(ids[HOME_TO_SCHOOL])).json()
+        assert body["results"][0]["reason"] == "expired"
+        assert repo.lookup(HOME_TO_SCHOOL, now=clock.now) is None
+
+    def test_the_same_duration_replayed_is_a_no_op(self, client, repo):
+        ids = queue(repo, HOME_TO_SCHOOL)
+        self.post(client, self.item(ids[HOME_TO_SCHOOL], 600))
+        body = self.post(client, self.item(ids[HOME_TO_SCHOOL], 600)).json()
+        assert (body["accepted"], body["unchanged"], body["rejected"]) == (0, 1, 0)
+        assert body["results"][0]["status"] == "unchanged"
+
+    def test_a_different_duration_replayed_is_a_conflict(self, client, repo):
+        ids = queue(repo, HOME_TO_SCHOOL)
+        self.post(client, self.item(ids[HOME_TO_SCHOOL], 600))
+        body = self.post(client, self.item(ids[HOME_TO_SCHOOL], 601)).json()
+        assert body["results"][0] == {
+            "request_id": ids[HOME_TO_SCHOOL],
+            "status": "rejected",
+            "reason": "conflict",
+        }
+        found = repo.lookup(HOME_TO_SCHOOL, now=NOW)
+        assert found is not None
+        assert found.duration.total_seconds() == 600
+
+    @pytest.mark.parametrize(
+        "seconds",
+        [
+            -1,
+            0,
+            "600",
+            "",
+            600.5,
+            600.0,
+            True,
+            None,
+            [600],
+            MAX_ROUTE_DURATION_SECONDS + 1,
+            10**12,
+        ],
+        ids=[
+            "negative",
+            "zero",
+            "string",
+            "empty-string",
+            "float",
+            "integral-float",
+            "bool",
+            "null",
+            "list",
+            "over-12-hours",
+            "huge",
+        ],
+    )
+    def test_a_bad_duration_is_a_422_and_nothing_is_stored(
+        self, client, repo, engine, seconds
+    ):
+        ids = queue(repo, HOME_TO_SCHOOL)
+        response = self.post(client, self.item(ids[HOME_TO_SCHOOL], seconds))
+        assert response.status_code == 422
+        assert repo.lookup(HOME_TO_SCHOOL, now=NOW) is None
+        assert audit_rows(engine) == []
+
+    def test_the_largest_allowed_duration_is_accepted(self, client, repo):
+        ids = queue(repo, HOME_TO_SCHOOL)
+        response = self.post(
+            client, self.item(ids[HOME_TO_SCHOOL], MAX_ROUTE_DURATION_SECONDS)
+        )
+        assert response.json()["accepted"] == 1
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {},
+            {"results": []},
+            {"results": "x"},
+            {"results": [{"duration_seconds": 60}]},
+            {"results": [{"request_id": "a"}]},
+            {"results": [{"request_id": "", "duration_seconds": 60}]},
+            {"results": [{"request_id": "a" * 65, "duration_seconds": 60}]},
+            {"results": [{"request_id": 5, "duration_seconds": 60}]},
+            {"results": ["a"]},
+            [],
+        ],
+        ids=[
+            "no-results",
+            "empty-batch",
+            "results-not-a-list",
+            "no-request-id",
+            "no-duration",
+            "empty-request-id",
+            "long-request-id",
+            "numeric-request-id",
+            "item-not-an-object",
+            "body-is-a-list",
+        ],
+    )
+    def test_a_malformed_body_is_a_422(self, client, body):
+        assert client.post(POST, headers=GOOD, json=body).status_code == 422
+
+    def test_an_oversized_batch_is_a_422(self, client):
+        items = [self.item(f"{n:032d}", 60) for n in range(MAX_RESULTS_PER_POST + 1)]
+        assert self.post(client, *items).status_code == 422
+
+    def test_a_full_batch_is_processed(self, client):
+        items = [self.item(f"{n:032d}", 60) for n in range(MAX_RESULTS_PER_POST)]
+        body = self.post(client, *items).json()
+        assert body["rejected"] == MAX_RESULTS_PER_POST
+
+    def test_a_body_that_is_not_json_is_a_422(self, client):
+        response = client.post(POST, headers=GOOD, content=b"not json")
+        assert response.status_code == 422
+
+    def test_one_audit_row_per_post_with_counts_only(self, client, repo, engine):
+        ids = queue(repo, HOME_TO_SCHOOL, HOME_TO_STUDIO)
+        self.post(
+            client,
+            self.item(ids[HOME_TO_SCHOOL], 1234),
+            self.item(ids[HOME_TO_STUDIO], 4321),
+            self.item("0" * 32),
+        )
+        self.post(client, self.item(ids[HOME_TO_SCHOOL], 1234))
+        rows = audit_rows(engine)
+        assert [row.action for row in rows] == [
+            "route-results a2 r1 u0",
+            "route-results a0 r0 u1",
+        ]
+        assert {row.object_ref for row in rows} == {"route-results"}
+        assert all(row.new_hash and len(row.new_hash) == 64 for row in rows)
+        everything = " ".join(str(tuple(row)) for row in rows)
+        for secret in (HOME_ADDRESS, STUDIO_ADDRESS, "1234", "4321", "zone."):
+            assert secret not in everything
+
+    def test_a_rejected_only_post_is_still_audited(self, client, engine):
+        self.post(client, self.item("0" * 32))
+        assert [row.action for row in audit_rows(engine)] == ["route-results a0 r1 u0"]
+
+    def test_a_missing_audit_key_stores_nothing_and_is_a_503(
+        self, tmp_path, engine, clock, repo
+    ):
+        unaudited = make_settings(tmp_path, audit_key=None)
+        client = build_client(unaudited, engine, clock)
+        ids = queue(repo, HOME_TO_SCHOOL)
+        response = self.post(client, self.item(ids[HOME_TO_SCHOOL], 600))
+        assert response.status_code == 503
+        assert repo.lookup(HOME_TO_SCHOOL, now=NOW) is None
+        assert [r.request_id for r in repo.pending(now=NOW)] == [ids[HOME_TO_SCHOOL]]
+
+    def test_a_busy_database_is_a_503_with_retry_after_and_stores_nothing(
+        self, settings, engine, clock, repo, tmp_path
+    ):
+        client = build_client(settings, engine, clock, lock_timeout_ms=50)
+        ids = queue(repo, HOME_TO_SCHOOL)
+        holder = create_sqlite_engine(tmp_path / "fl.db")
+        try:
+            with holder.connect() as connection:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                response = self.post(client, self.item(ids[HOME_TO_SCHOOL], 600))
+                connection.rollback()
+        finally:
+            holder.dispose()
+        assert response.status_code == 503
+        assert response.headers["Retry-After"] == "5"
+        assert repo.lookup(HOME_TO_SCHOOL, now=NOW) is None
+        assert audit_rows(engine) == []
+
+    def test_a_store_error_is_a_503_and_stores_nothing(self, client, repo, engine):
+        ids = queue(repo, HOME_TO_SCHOOL)
+        with engine.begin() as connection:
+            connection.execute(text("DROP TABLE route_cache"))
+        response = self.post(client, self.item(ids[HOME_TO_SCHOOL], 600))
+        assert response.status_code == 503
+        assert response.json() == {"detail": "Route store unavailable"}
+        assert audit_rows(engine) == []
+        assert [r.request_id for r in repo.pending(now=NOW)] == [ids[HOME_TO_SCHOOL]]
+
+    def test_the_response_carries_no_location_text(self, client, repo):
+        ids = queue(repo, HOME_TO_STUDIO)
+        response = self.post(client, self.item(ids[HOME_TO_STUDIO], 600))
+        assert STUDIO_ADDRESS not in response.text
+        assert "studio" not in response.text
