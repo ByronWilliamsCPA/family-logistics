@@ -1,47 +1,42 @@
 """Build the configured route provider (``FL_ROUTE_PROVIDER``).
 
 Only the provider selection lives here. Nothing in ``src`` calls the factory
-yet; services adopt it when they are wired in M3.
+yet; services adopt it when they are wired in.
 """
 
 from __future__ import annotations
 
-import threading
 from typing import TYPE_CHECKING, Never
+from zoneinfo import ZoneInfo
 
 from family_logistics.adapters.routing.base import StaticRouteProvider
-from family_logistics.adapters.routing.null import NullRouteProvider
+from family_logistics.adapters.routing.ha_relay import HaRelayRouteProvider
 from family_logistics.core.exceptions import RouteProviderUnavailableError
-from family_logistics.utils.logging import get_logger
+from family_logistics.db.route_relay import RouteRelayRepository
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from datetime import timedelta
 
+    from sqlalchemy.engine import Engine
+
     from family_logistics.adapters.routing.base import RouteProvider
     from family_logistics.core.config import Settings
-
-logger = get_logger(__name__)
-
-# #EDGE: Concurrency: the warn-once flag is per process and shared by threads;
-# the lock makes the check-and-set atomic, so at most one warning is logged.
-# #VERIFY: TestFactory::test_concurrent_builds_log_the_ha_relay_warning_once.
-_ha_relay_warned = threading.Event()
-"""Set once the ha_relay placeholder warning is logged in this process."""
-
-_warn_lock = threading.Lock()
-"""Guards the check-and-set of ``_ha_relay_warned``."""
 
 
 def build_route_provider(
     settings: Settings,
     *,
+    engine: Engine | None = None,
     static_matrix: Mapping[tuple[str, str], timedelta] | None = None,
 ) -> RouteProvider:
     """Return the route provider selected by ``settings.route_provider``.
 
     Args:
         settings: Application settings.
+        engine: Database engine at the schema head. Required for ``ha_relay``
+            (it holds the route cache and request queue) and ignored for every
+            other provider.
         static_matrix: Travel-time table for the ``static`` provider. It is
             required for ``static`` and rejected for every other provider.
 
@@ -51,8 +46,9 @@ def build_route_provider(
     Raises:
         RouteProviderUnavailableError: For ``google_routes`` (not implemented
             yet, error code ``ROUTE_PROVIDER_NOT_IMPLEMENTED``), for ``static``
-            without ``static_matrix`` (``ROUTE_PROVIDER_MATRIX_REQUIRED``) and
-            for a provider name that is not one of the known values
+            without ``static_matrix`` (``ROUTE_PROVIDER_MATRIX_REQUIRED``), for
+            ``ha_relay`` without ``engine`` (``ROUTE_PROVIDER_ENGINE_REQUIRED``)
+            and for a provider name that is not one of the known values
             (``ROUTE_PROVIDER_UNKNOWN``).
         ValueError: When ``static_matrix`` is passed with a provider other than
             ``static``; the table would be ignored and a simulation would be
@@ -66,7 +62,17 @@ def build_route_provider(
         )
         raise ValueError(msg)
     if name == "ha_relay":
-        return _build_ha_relay()
+        if engine is None:
+            msg = (
+                "FL_ROUTE_PROVIDER=ha_relay needs the database engine that holds"
+                " the route cache; it cannot be built without one"
+            )
+            raise RouteProviderUnavailableError(
+                msg, provider=name, error_code="ROUTE_PROVIDER_ENGINE_REQUIRED"
+            )
+        return HaRelayRouteProvider(
+            RouteRelayRepository(engine), ZoneInfo(settings.timezone)
+        )
     if name == "static":
         if static_matrix is None:
             msg = (
@@ -103,33 +109,3 @@ def _unknown_provider_name(name: Never) -> str:
         The name, for the error message.
     """
     return str(name)
-
-
-def _build_ha_relay() -> RouteProvider:
-    """Return the placeholder for the Home Assistant relay provider.
-
-    Logs one structured warning per process, on the first build only.
-
-    Returns:
-        A ``NullRouteProvider``: every travel estimate is unknown.
-    """
-    # #CRITICAL: External resources: the ha_relay provider does not exist yet,
-    # so this returns NullRouteProvider and every travel time is unknown.
-    # #VERIFY: PR 2 of the routing series replaces this branch with the real
-    # relay; until then the Null fallback must fail closed (ROUTE-010 and an
-    # INCOMPLETE run, never a guessed duration), pinned by
-    # tests/unit/test_route_provider_factory.py::TestEngineFailsClosed.
-    # #ASSUME: External resources: the single warning per process is the only
-    # operator signal that the placeholder is active.
-    # #VERIFY: the wiring PR (M3) must surface the active provider name and
-    # "degraded: null" in run output or /healthz before relying on ha_relay.
-    with _warn_lock:
-        first = not _ha_relay_warned.is_set()
-        _ha_relay_warned.set()
-    if first:
-        logger.warning(
-            "routing.ha_relay_not_implemented",
-            provider="ha_relay",
-            effect="every travel estimate is unknown (ROUTE-010, run INCOMPLETE)",
-        )
-    return NullRouteProvider()
