@@ -141,7 +141,9 @@ for an external child with the same id.
   word is absent.
 - **External** (`PassengerKind.EXTERNAL`): always the first letter of `ExternalPassenger.display_first_name`,
   upper-cased, plus `.`, whatever else is looked up; no letter gives `a passenger`. Two external children with the same
-  initial both render `E.`; this ambiguity is accepted (the status card has the detail).
+  initial both render `E.`; this ambiguity is accepted (the status card has the detail). The initial is the first
+  letter of `display_first_name`, so a pseudonymised external such as the household's `Passenger E` renders `P.`, while a
+  deployment with real first names gets the real initial.
 - **Driver** (`driver_id`): the first token of `Person.display_name` from the `person` table only (any role), filtered
   as above; unknown gives `the driver`.
 - An id not found under its kind, any id starting with `unregistered:`, or a directory that could not be loaded renders

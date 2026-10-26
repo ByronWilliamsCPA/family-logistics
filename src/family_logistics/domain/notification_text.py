@@ -38,6 +38,7 @@ settings are validated in ``core.config``.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
@@ -46,6 +47,7 @@ from typing import TYPE_CHECKING, Final
 from family_logistics.domain.lifecycle import Lifecycle
 from family_logistics.domain.models import PassengerKind, RunStatus, Severity
 from family_logistics.domain.notification_policy import (
+    CLEAR_PHRASES,
     MAX_ITEMS_PER_PUSH,
     PlannedPush,
     PushKind,
@@ -58,6 +60,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
     from zoneinfo import ZoneInfo
 
+    from family_logistics.domain.engine import AssessmentResult
     from family_logistics.domain.notification_policy import NotificationPolicy
 
 TITLE_LIMIT: Final = 120
@@ -197,20 +200,25 @@ _REASON_LABELS: Final = {
     "CAP-014": "vehicle capacities",
 }
 _OTHER_REASONS: Final = "other checks"
+_CLEAR_WORD, _CLEAR_FINDINGS, _CLEAR_SOURCES = CLEAR_PHRASES
 _STATUS_LABELS: Final = {
-    RunStatus.CLEAR: "Clear",
+    RunStatus.CLEAR: _CLEAR_WORD,
     RunStatus.ATTENTION_REQUIRED: "attention required",
     RunStatus.INCOMPLETE: "could not fully verify",
     RunStatus.FAILED: "check failed",
 }
-_CLEAR_BODY: Final = "No open findings; sources fresh; driver acceptance not verified."
+_CLEAR_BODY: Final = (
+    f"{_CLEAR_FINDINGS}; {_CLEAR_SOURCES}; driver acceptance not verified."
+)
 _ACCEPTANCE: Final = "Driver acceptance not verified."
+_NEED_ATTENTION: Final = "Open findings need attention."
 _FAILED_BODY: Final = "The ride check did not finish, so rides could not be verified."
 _RUN_FAILED_BODY: Final = (
     "The ride check did not finish, so rides could not be verified. "
     "Treat rides as unchecked until a check completes."
 )
 _RUN_FAILED: Final = "run-failed"
+_RUN_LEVEL_KINDS: Final = frozenset({PushKind.STATUS, PushKind.REPORT})
 _OPS_TITLES: Final = {
     "ops:run_failed": (
         "Ops: ride check run failed",
@@ -221,6 +229,12 @@ _OPS_TITLES: Final = {
         "The latest ride check could not fully verify. See the status card.",
     ),
 }
+_ESCALATED_WORDS: Final = {
+    Severity.CRITICAL: "now critical",
+    Severity.INCOMPLETE: "now could not verify",
+}
+_ESCALATED_DEFAULT: Final = "escalated"
+_UNKNOWN_TAG: Final = "an unknown tag"
 _OPS_OTHER: Final = (
     "Ops: service needs attention",
     "A service check needs the operator's attention. See the service log.",
@@ -402,10 +416,23 @@ def _safe_issue_id(issue_id: str | None) -> str | None:
     return None
 
 
-def _suffix(lifecycle: Lifecycle | None, issue_id: str | None) -> str:
+def _lifecycle_word(pushed: PlannedPush, severity: Severity | None) -> str | None:
+    """Return the lifecycle word; an escalation replaces new, back again, still open."""
+    if pushed.escalated:
+        return (
+            _ESCALATED_WORDS.get(severity, _ESCALATED_DEFAULT)
+            if severity
+            else _ESCALATED_DEFAULT
+        )
+    if pushed.tracked is None:
+        return None
+    return _LIFECYCLE_WORDS.get(pushed.tracked.lifecycle)
+
+
+def _suffix(word: str | None, issue_id: str | None) -> str:
     parts: list[str] = []
-    if lifecycle is not None and lifecycle in _LIFECYCLE_WORDS:
-        parts.append(_LIFECYCLE_WORDS[lifecycle])
+    if word is not None:
+        parts.append(word)
     if issue_id is not None:
         parts.append(f"ref {issue_id}")
     return f" ({', '.join(parts)})" if parts else ""
@@ -453,7 +480,7 @@ def _finding_piece(
             driver=names.driver(subject.driver_id),
             source=_source(keys),
         )
-        tail = _suffix(tracked.lifecycle if tracked is not None else None, issue_id)
+        tail = _suffix(_lifecycle_word(pushed, severity), issue_id)
     prefix = "Urgent ride check" if pushed.kind is PushKind.URGENT else "Ride check"
     return _Piece(
         title=f"[{severity_label}] {prefix}: {label}",
@@ -461,16 +488,21 @@ def _finding_piece(
     )
 
 
-def _clamp(value: int) -> int:
-    return max(0, int(value))
+def _clamp(value: object) -> int:
+    """Return a count, or 0 for anything that is not a non-negative integer."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
 
 
-def _open_line(counts: Mapping[str, int] | None) -> str | None:
+def _open_counts(counts: Mapping[str, int] | None) -> tuple[int, int] | None:
+    """Return the open ``(critical, warning)`` counts, or None without counts."""
     if counts is None:
         return None
-    critical = _clamp(counts.get(Severity.CRITICAL.value, 0))
-    warning = _clamp(counts.get(Severity.WARNING.value, 0))
-    return f"Open: {critical} critical, {warning} warning."
+    return (
+        _clamp(counts.get(Severity.CRITICAL.value, 0)),
+        _clamp(counts.get(Severity.WARNING.value, 0)),
+    )
 
 
 def _reasons_line(counts: Mapping[str, int] | None) -> str | None:
@@ -500,9 +532,12 @@ def _run_level_piece(pushed: PlannedPush, counts: Mapping[str, int] | None) -> _
         return _Piece(title, (_CLEAR_BODY,))
     if status is RunStatus.FAILED:
         return _Piece(title, (_FAILED_BODY,))
-    open_line = _open_line(counts)
+    opened = _open_counts(counts)
+    open_line = f"Open: {opened[0]} critical, {opened[1]} warning." if opened else None
     if status is RunStatus.ATTENTION_REQUIRED:
-        lead = open_line or "Open findings need attention."
+        # An attention-required run never claims "0 open": without usable
+        # counts it says only that open findings need attention.
+        lead = open_line if opened and any(opened) else _NEED_ATTENTION
         return _Piece(title, (f"{lead} {_ACCEPTANCE}",))
     lines = ["Ride check: could not fully verify."]
     reasons = _reasons_line(counts)
@@ -526,7 +561,7 @@ def _piece(
     policy: NotificationPolicy,
     counts: Mapping[str, int] | None,
 ) -> _Piece:
-    if pushed.kind in {PushKind.STATUS, PushKind.REPORT}:
+    if pushed.kind in _RUN_LEVEL_KINDS:
         return _run_level_piece(pushed, counts)
     if pushed.subject_key == _RUN_FAILED:
         return _run_failed_piece(pushed)
@@ -537,13 +572,18 @@ def _piece(
 
 
 def _shadow_header(first: PlannedPush) -> str:
-    tag = _TAG_CHARS.sub("", first.intended_tag)[:_TAG_LIMIT]
+    tag = _TAG_CHARS.sub("", first.intended_tag)[:_TAG_LIMIT] or _UNKNOWN_TAG
+    head = f"SHADOW: production would send this to {tag}"
+    if first.kind in _RUN_LEVEL_KINDS:
+        # D6: a status or report is dropped, not held, in quiet hours, so the
+        # header says nothing about them.
+        return f"{head}."
     note = (
         "bypasses quiet hours"
         if first.kind is PushKind.URGENT
         else "held during quiet hours"
     )
-    return f"SHADOW: production would send this to {tag} ({note})."
+    return f"{head} ({note})."
 
 
 def _clip(value: str, limit: int) -> str:
@@ -589,10 +629,15 @@ def render(
         the first body line names the tag production would use.
 
     Raises:
-        ValueError: ``pushes`` is empty.
+        ValueError: ``pushes`` is empty, or holds several pushes and any of
+            them is not a finding push (status, report, run-failed or ops
+            text must never sit beside finding items).
     """
     if not pushes:
         msg = "render needs at least one planned push"
+        raise ValueError(msg)
+    if len(pushes) > 1 and not all(_is_finding_push(each) for each in pushes):
+        msg = "a chunk of several pushes may hold findings only"
         raise ValueError(msg)
     pieces = [_piece(each, names, policy, counts) for each in pushes]
     title = (
@@ -607,12 +652,23 @@ def render(
     return RenderedPush(title=_clip(title, TITLE_LIMIT), body=_fit_body(header, pieces))
 
 
+def _is_finding_push(pushed: PlannedPush) -> bool:
+    """Report whether a push is a per-finding push (not run-level, run-failed or ops)."""
+    return (
+        pushed.kind in {PushKind.NOTICE, PushKind.URGENT}
+        and pushed.subject_key != _RUN_FAILED
+    )
+
+
 def _notice_order(pushed: PlannedPush) -> tuple[int, bool, datetime]:
     """Sort key: most severe first, then soonest, then no time last."""
     severity = pushed.tracked.finding.severity if pushed.tracked else pushed.severity
     rank = severity_rank(severity) if severity is not None else 0
     due = pushed.subject.due_at if pushed.subject is not None else None
-    return (-rank, due is None, due if due is not None else _EPOCH)
+    if due is None:
+        return (-rank, True, _EPOCH)
+    # A naive time is read as UTC (as ``_to_zone`` does), so mixed input sorts.
+    return (-rank, False, due if due.tzinfo is not None else due.replace(tzinfo=UTC))
 
 
 def chunk_pushes(pushes: Iterable[PlannedPush]) -> tuple[tuple[PlannedPush, ...], ...]:
@@ -647,6 +703,34 @@ def chunk_pushes(pushes: Iterable[PlannedPush]) -> tuple[tuple[PlannedPush, ...]
     return (*urgent, *chunks, *others)
 
 
+def status_counts(result: AssessmentResult) -> Mapping[str, int]:
+    """Build the ``counts`` mapping ``render`` expects for a status or report.
+
+    This is not ``AssessmentResult.counts()``, whose ``incomplete`` key the
+    renderer cannot turn into reasons.
+
+    Args:
+        result: The run's result (its open findings are counted).
+
+    Returns:
+        ``critical`` and ``warning``: the open findings of that severity
+        (always present). Plus one key per rule ID holding the number of that
+        rule's findings with ``incomplete`` severity (the reasons).
+    """
+    tally: Counter[str] = Counter()
+    for tracked in result.findings:
+        severity = tracked.finding.severity
+        if severity is Severity.INCOMPLETE:
+            tally[tracked.finding.rule_id] += 1
+        else:
+            tally[severity.value] += 1
+    return {
+        Severity.CRITICAL.value: tally.pop(Severity.CRITICAL.value, 0),
+        Severity.WARNING.value: tally.pop(Severity.WARNING.value, 0),
+        **dict(tally),
+    }
+
+
 __all__ = [
     "BODY_LIMIT",
     "GENERIC_DRIVER",
@@ -659,4 +743,5 @@ __all__ = [
     "RuleTemplate",
     "chunk_pushes",
     "render",
+    "status_counts",
 ]

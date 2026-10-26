@@ -6,10 +6,11 @@ finding, so every assertion here is on the rendered title and body.
 
 from __future__ import annotations
 
+import inspect
 import re
 import string
 from contextlib import nullcontext
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import UTC, date, datetime, timedelta
 from string import Formatter
 from unittest.mock import patch
@@ -49,6 +50,7 @@ from family_logistics.domain.notification_text import (
     RuleTemplate,
     chunk_pushes,
     render,
+    status_counts,
 )
 from family_logistics.domain.rules import RULES, make_finding
 
@@ -136,7 +138,7 @@ def push(
     return PlannedPush(
         subject_key=f"issue:{found.issue_id}",
         kind=kind,
-        intended_tag=tag or tags[kind],
+        intended_tag=tags[kind] if tag is None else tag,
         episode_start=lifecycle is not Lifecycle.ONGOING,
         rule_id=found.rule_id,
         severity=found.severity,
@@ -281,8 +283,10 @@ class TestItemWording:
     def test_severity_labels(self, severity, label):
         found = finding("DEST-004", severity=severity)
         rendered = render_one(push(found, kind=PushKind.NOTICE))
-        assert f"{label} Ride check:" in rendered.title or label in rendered.title
-        assert f"- {label} " in rendered.body
+        assert rendered.title == (
+            f"[shadow] {label} Ride check: destination missing or unverified"
+        )
+        assert f"- {label} Sam: the destination" in rendered.body
 
     @pytest.mark.parametrize(
         ("lifecycle", "word"),
@@ -348,13 +352,47 @@ class TestItemWording:
 
 class TestNames:
     def test_external_child_rendered_as_initial(self):
-        """T-text-3."""
-        directory = NameDirectory.from_rows([], [("ext-q", "Ellis")])
-        rendered = render_one(
-            push(subj=subject(((("ext-q"), PassengerKind.EXTERNAL),))), names=directory
+        """T-text-3: each external renders its own initial, in subject order."""
+        directory = NameDirectory.from_rows([], [("ext-e", "E"), ("ext-r", "R")])
+        both = subject((("ext-r", PassengerKind.EXTERNAL), EXT_E))
+        rendered = render_one(push(subj=both), names=directory)
+        assert "- [CRITICAL] R. and E.: the destination" in rendered.body
+        assert directory.passenger("ext-e", PassengerKind.EXTERNAL) == "E."
+        assert directory.passenger("ext-r", PassengerKind.EXTERNAL) == "R."
+
+    def test_a_swap_of_two_externals_is_visible_in_the_text(self):
+        directory = NameDirectory.from_rows([], [("ext-e", "E"), ("ext-r", "R")])
+        first = render_one(
+            push(subj=subject((EXT_E,))), names=directory, mode="production"
         )
-        assert "E.:" in rendered.body
-        assert "Ellis" not in all_text(rendered)
+        second = render_one(
+            push(subj=subject((("ext-r", PassengerKind.EXTERNAL),))),
+            names=directory,
+            mode="production",
+        )
+        assert "E.: the destination" in first.body
+        assert "R.: the destination" in second.body
+        assert first.body != second.body
+
+    def test_driver_and_passenger_names_do_not_swap(self):
+        directory = NameDirectory.from_rows(
+            [
+                ("morgan", "Morgan Example", "parent"),
+                ("riley", "Riley Example", "parent"),
+            ],
+            [],
+        )
+        riley = ("riley", PassengerKind.FAMILY)
+        rendered = render_one(
+            push(finding("TIME-007"), subj=subject((riley,), "morgan")),
+            names=directory,
+            mode="production",
+        )
+        assert rendered.body.startswith(
+            "- [CRITICAL] Riley: the pickup or drop-off (Fri 23 Oct 15:30) "
+            "with Morgan is not feasible."
+        )
+        assert "Example" not in rendered.body
 
     def test_the_household_external_pseudonym_renders_its_initial(self):
         rendered = render_one(push(subj=subject((EXT_E,))))
@@ -522,6 +560,7 @@ def is_clear_run(rendered: RenderedPush) -> bool:
     return bool(CLEAR_REGEX.search(all_text(rendered)))
 
 
+ACCEPTANCE = "Driver acceptance not verified."
 REASONS_LINE = (
     "Reasons: data sources: 1, travel times or places: 3, "
     "vehicle capacities: 2, other checks: 4."
@@ -610,7 +649,45 @@ class TestRunLevelWording:
             mode="production",
             counts={"critical": -5, "warning": 3},
         )
-        assert rendered.body.startswith("Open: 0 critical, 3 warning.")
+        assert rendered.body == "Open: 0 critical, 3 warning. " + ACCEPTANCE
+
+    def test_a_non_numeric_count_degrades_to_zero(self):
+        junk: dict[str, object] = {
+            "critical": "x",
+            "warning": -1,
+            "ROUTE-010": None,
+            "DATA-011": 2.5,
+            "CAP-014": float("nan"),
+            "PARSE-001": True,
+        }
+        rendered = render_one(
+            run_push(PushKind.STATUS, RunStatus.INCOMPLETE),
+            mode="production",
+            counts=junk,  # type: ignore[arg-type]
+        )
+        assert rendered.body.splitlines() == [
+            "Ride check: could not fully verify.",
+            "Open: 0 critical, 0 warning. " + ACCEPTANCE,
+        ]
+
+    @pytest.mark.parametrize("counts", [None, {}, {"critical": 0, "warning": 0}])
+    def test_attention_required_never_claims_zero_open(self, counts):
+        rendered = render_one(
+            run_push(PushKind.STATUS, RunStatus.ATTENTION_REQUIRED),
+            mode="production",
+            counts=counts,
+        )
+        assert rendered.body == "Open findings need attention. " + ACCEPTANCE
+
+    def test_the_clear_text_is_built_from_the_policy_phrases(self):
+        rendered = render_one(
+            run_push(PushKind.STATUS, RunStatus.CLEAR), mode="production"
+        )
+        word, no_findings, fresh = CLEAR_PHRASES
+        assert rendered.title == f"Ride check: {word}"
+        assert (
+            rendered.body == f"{no_findings}; {fresh}; driver acceptance not verified."
+        )
 
     def test_run_failed_push_wording(self):
         urgent = PlannedPush("run-failed", PushKind.URGENT, "fl-urgent", run_wide=True)
@@ -639,25 +716,58 @@ class TestRunLevelWording:
     def test_shadow_header_names_production_tag(self):
         """T-text-7."""
         cases = [
-            (push(), "fl-urgent", "bypasses quiet hours"),
-            (push(kind=PushKind.NOTICE), "fl-warning", "held during quiet hours"),
-            (run_push(PushKind.STATUS, RunStatus.CLEAR), "fl-status", "held during"),
-            (run_push(PushKind.REPORT, RunStatus.CLEAR), "fl-report", "held during"),
-            (ops_push("ops:run_failed"), "fl-ops", "held during"),
+            (
+                push(),
+                "SHADOW: production would send this to fl-urgent (bypasses quiet hours).",
+            ),
+            (
+                push(kind=PushKind.NOTICE),
+                "SHADOW: production would send this to fl-warning (held during quiet hours).",
+            ),
+            (
+                ops_push("ops:run_failed"),
+                "SHADOW: production would send this to fl-ops (held during quiet hours).",
+            ),
+            (
+                run_push(PushKind.STATUS, RunStatus.CLEAR),
+                "SHADOW: production would send this to fl-status.",
+            ),
+            (
+                run_push(PushKind.REPORT, RunStatus.CLEAR),
+                "SHADOW: production would send this to fl-report.",
+            ),
         ]
-        for pushed, tag, note in cases:
+        for pushed, header in cases:
             rendered = render_one(pushed)
             assert rendered.title.startswith("[shadow] ")
-            first = rendered.body.splitlines()[0]
-            assert first.startswith(f"SHADOW: production would send this to {tag} (")
-            assert note in first
+            assert rendered.body.splitlines()[0] == header
 
     def test_the_header_uses_the_pushes_intended_tag_sanitised(self):
         rendered = render_one(push(tag="fl-custom CANARY\n{x}" + "z" * 80))
         first = rendered.body.splitlines()[0]
-        assert "\n" not in first.removeprefix("SHADOW: ")
-        assert "{" not in first
-        assert len(first) < 140
+        assert first == (
+            "SHADOW: production would send this to "
+            f"fl-customCANARYx{'z' * 24} (bypasses quiet hours)."
+        )
+
+    @pytest.mark.parametrize("tag", ["", "  \n", "{}!"])
+    def test_a_tag_that_sanitises_to_nothing_is_not_printed_blank(self, tag):
+        urgent = render_one(push(tag=tag))
+        status = render_one(
+            PlannedPush(
+                subject_key="run:r",
+                kind=PushKind.STATUS,
+                intended_tag=tag,
+                run_status=RunStatus.CLEAR,
+            )
+        )
+        assert urgent.body.splitlines()[0] == (
+            "SHADOW: production would send this to an unknown tag "
+            "(bypasses quiet hours)."
+        )
+        assert status.body.splitlines()[0] == (
+            "SHADOW: production would send this to an unknown tag."
+        )
 
     def test_clear_words_appear_nowhere_but_the_clear_text(self):
         """T-text-6 (templates and fixed text)."""
@@ -1097,7 +1207,29 @@ class TestLengths:
         assert rendered.body.count("\n") == 2
 
     def test_a_very_long_title_is_clipped(self):
-        assert len(max(RULE_TEMPLATES.values(), key=lambda t: len(t.label)).label) < 80
+        long_label = RuleTemplate("x" * 200, "{who}")
+        with patch.object(text_module, "RULE_TEMPLATES", {"DEST-004": long_label}):
+            rendered = render_one(push())
+        assert len(rendered.title) == TITLE_LIMIT
+        assert rendered.title.endswith("...")
+        assert rendered.title.startswith("[shadow] [CRITICAL] Urgent ride check: xxx")
+
+    @pytest.mark.parametrize(
+        "other",
+        [
+            run_push(PushKind.STATUS, RunStatus.CLEAR),
+            run_push(PushKind.REPORT, RunStatus.ATTENTION_REQUIRED),
+            ops_push("ops:run_failed"),
+            PlannedPush("run-failed", PushKind.URGENT, "fl-urgent"),
+        ],
+    )
+    def test_render_refuses_a_chunk_mixing_run_text_with_findings(self, other):
+        mixed = [push(kind=PushKind.NOTICE), other]
+        reversed_mix = [other, push(kind=PushKind.NOTICE)]
+        with pytest.raises(ValueError, match="findings"):
+            render(mixed, names=NAMES, policy=policy())
+        with pytest.raises(ValueError, match="findings"):
+            render(reversed_mix, names=NAMES, policy=policy())
 
     def test_render_refuses_an_empty_chunk(self):
         empty: list[PlannedPush] = []
@@ -1155,6 +1287,20 @@ class TestChunking:
         (chunk,) = chunk_pushes([untimed, timed])
         assert chunk == (timed, untimed)
 
+    def test_naive_and_aware_times_sort_together_as_utc(self):
+        aware = push(
+            finding(keys=("a",)),
+            kind=PushKind.NOTICE,
+            subj=subject(due_at=datetime(2026, 10, 23, 22, 30, tzinfo=UTC)),
+        )
+        naive_earlier = push(
+            finding(keys=("b",)),
+            kind=PushKind.NOTICE,
+            subj=subject(due_at=datetime.fromisoformat("2026-10-23T22:00:00")),
+        )
+        (chunk,) = chunk_pushes([aware, naive_earlier])
+        assert chunk == (naive_earlier, aware)
+
     def test_chunks_use_the_policy_item_limit(self):
         many = [push(finding(keys=(f"k{i}",)), kind=PushKind.NOTICE) for i in range(9)]
         assert [len(c) for c in chunk_pushes(many)] == [MAX_ITEMS_PER_PUSH, 1]
@@ -1166,15 +1312,130 @@ class TestRenderedPush:
         with pytest.raises(AttributeError):
             rendered.title = "x"  # type: ignore[misc]
 
-    def test_replace_keeps_types(self):
-        rendered = render_one(push())
-        assert replace(rendered, title="t").title == "t"
-
-    def test_render_reads_no_clock(self):
-        before = render_one(push())
-        after = render_one(push())
-        assert before == after
+    def test_render_reads_no_clock_and_logs_nothing(self):
+        source = inspect.getsource(text_module)
+        for needle in (
+            ".now(",
+            ".today(",
+            "utcnow",
+            "time.time(",
+            "monotonic(",
+            "getLogger",
+            "import logging",
+            "structlog",
+            "open(",
+        ):
+            assert needle not in source
 
     def test_a_time_before_the_epoch_does_not_matter(self):
         early = subject(due_at=datetime(1999, 1, 1, tzinfo=UTC), due_end=None)
         assert "(Thu 31 Dec 16:00)" in render_one(push(subj=early)).body
+
+
+# ---------------------------------------------------------------------------
+# status_counts: the pinned shape render() expects
+# ---------------------------------------------------------------------------
+
+
+def open_result(*found: Finding, status=RunStatus.INCOMPLETE) -> AssessmentResult:
+    return AssessmentResult(
+        status, tuple(TrackedFinding(f, Lifecycle.NEW) for f in found), (), (), NOW
+    )
+
+
+class TestStatusCounts:
+    def test_it_pins_the_keys_and_counts(self):
+        many = [
+            finding("TIME-007", keys=("a",)),
+            finding("DEST-004", keys=("b",)),
+            finding("CONF-008", keys=("c",)),
+            finding("ROUTE-010", keys=("d",)),
+            finding("ROUTE-010", keys=("e",)),
+            finding("ROUTE-010", keys=("f",)),
+            finding("DATA-011", keys=("source:icloud",)),
+            finding("CAP-014", keys=("g",), severity=Severity.INCOMPLETE),
+            finding("CAP-014", keys=("h",), severity=Severity.WARNING),
+        ]
+        counts = status_counts(open_result(*many))
+        assert dict(counts) == {
+            "critical": 2,
+            "warning": 2,
+            "ROUTE-010": 3,
+            "DATA-011": 1,
+            "CAP-014": 1,
+        }
+
+    def test_an_empty_result_has_zero_open_counts_only(self):
+        assert dict(status_counts(open_result(status=RunStatus.CLEAR))) == {
+            "critical": 0,
+            "warning": 0,
+        }
+
+    def test_it_is_not_the_engine_counts_shape(self):
+        result = open_result(finding("ROUTE-010", keys=("a",)))
+        assert "incomplete" in result.counts()
+        assert "incomplete" not in status_counts(result)
+
+    def test_a_failed_result_counts_its_carried_findings(self):
+        failed = failed_result(NOW, "boom", [finding(keys=("a",))])
+        assert status_counts(failed)["critical"] == 1
+
+    def test_an_incomplete_run_shows_its_reasons_in_the_rendered_status(self):
+        result = open_result(
+            finding("ROUTE-010", keys=("a",)),
+            finding("ROUTE-010", keys=("b",)),
+            finding("DATA-011", keys=("source:ha_snapshot",)),
+            finding("TIME-007", keys=("c",)),
+        )
+        rendered = render_one(
+            run_push(PushKind.STATUS, RunStatus.INCOMPLETE),
+            mode="production",
+            counts=status_counts(result),
+        )
+        assert rendered.body.splitlines() == [
+            "Ride check: could not fully verify.",
+            "Reasons: data sources: 1, travel times or places: 2.",
+            "Open: 1 critical, 0 warning. " + ACCEPTANCE,
+        ]
+
+    def test_the_engine_counts_would_lose_the_reasons(self):
+        """Why PR 5 must not pass ``result.counts()``."""
+        result = open_result(finding("ROUTE-010", keys=("a",)))
+        rendered = render_one(
+            run_push(PushKind.STATUS, RunStatus.INCOMPLETE),
+            mode="production",
+            counts=result.counts(),
+        )
+        assert "Reasons" not in rendered.body
+
+
+# ---------------------------------------------------------------------------
+# escalated: the "now critical" lifecycle word (ADR D2)
+# ---------------------------------------------------------------------------
+
+
+class TestEscalated:
+    def test_the_field_is_last_and_defaults_false(self):
+        names = [f.name for f in fields(PlannedPush)]
+        assert names[-1] == "escalated"
+        assert PlannedPush("k", PushKind.NOTICE, "fl-warning").escalated is False
+
+    @pytest.mark.parametrize("lifecycle", list(Lifecycle))
+    def test_an_escalated_critical_finding_says_now_critical(self, lifecycle):
+        found = finding()
+        escalated = replace(push(found, lifecycle=lifecycle), escalated=True)
+        rendered = render_one(escalated)
+        assert f"(now critical, ref {found.issue_id})" in rendered.body
+        for word in ("new", "back again", "still open"):
+            assert f"({word}," not in rendered.body
+
+    def test_an_escalated_incomplete_finding_is_not_called_critical(self):
+        found = finding("ROUTE-010", severity=Severity.INCOMPLETE)
+        rendered = render_one(replace(push(found), escalated=True))
+        assert f"(now could not verify, ref {found.issue_id})" in rendered.body
+        assert "now critical" not in rendered.body
+
+    def test_not_escalated_keeps_the_lifecycle_word(self):
+        found = finding()
+        rendered = render_one(push(found, lifecycle=Lifecycle.ONGOING))
+        assert f"(still open, ref {found.issue_id})" in rendered.body

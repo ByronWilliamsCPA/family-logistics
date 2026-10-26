@@ -219,6 +219,9 @@ class PlannedPush:
         tracked: The finding with its lifecycle, for rendering.
         subject: The derived subject, for rendering.
         run_status: The run's status, for ``status`` and ``report`` pushes.
+        escalated: The severity or kind rose since the last delivery. ``plan``
+            never sets it (it needs the state row); the service sets it after
+            ``decide`` so the renderer can say ``now critical``.
     """
 
     subject_key: str
@@ -232,6 +235,7 @@ class PlannedPush:
     tracked: TrackedFinding | None = None
     subject: Subject | None = None
     run_status: RunStatus | None = None
+    escalated: bool = False
 
 
 @dataclass(frozen=True, slots=True)
