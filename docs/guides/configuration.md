@@ -53,6 +53,7 @@ shows non-secret values only.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `FL_HA_TOKEN` | unset | **Secret.** Bearer token Home Assistant presents; at least 32 characters; `serve` refuses to start without it |
+| `FL_HA_SCHOOLS` | empty | JSON list of schools whose schedules Home Assistant pushes to the snapshot ingest (`POST /api/v1/ingest/ha-snapshot`, added by the ingest route change; until that route exists the value is validated but unused). Each entry has `location_id` (registry location), `person_ids` (registry people who attend it, 1 to 16; a person belongs to one school), `bell_calendars` and `district_calendars` (`calendar.*` entity IDs, up to 8 each, at least one in total). A bell calendar belongs to one school; only a district calendar may serve several. A repeated JSON key is rejected rather than silently dropped. The ingest accepts only listed calendars; empty accepts none and the ingest answers 503. At most 8 schools. Keep real entity IDs in the private deployment repository |
 | `FL_PROXY_TRUSTED_CIDRS` | empty | Reverse-proxy addresses whose identity headers are believed; empty trusts none |
 | `FL_UI_ALLOWED_USERS` | empty | Single sign-on usernames allowed into the registry UI; empty denies everyone |
 | `FL_DATA_KEY` | unset | **Secret.** Fernet key encrypting protected addresses at rest; required before any address is stored, and `serve` refuses to start without it when `FL_NOTIFICATION_MODE=production` |
