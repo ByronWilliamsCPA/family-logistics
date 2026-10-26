@@ -86,7 +86,8 @@ affected entity keys) and the lifecycle `new`, `ongoing`, `resolved`,
   engine, never from the narrative.
 - LLM unavailable, timed out, or schema-invalid: the report ships with a
   `narrative_unavailable` marker. This is not a run failure.
-- Notifications carry engine counts and statuses only, through the dedicated
+- Notifications carry engine-decided findings, counts and statuses, rendered
+  from templates ([ADR 0008](0008-notification-service.md)), through the dedicated
   `fl-*` Apprise tags (never bare severity tags); a `failed` or `incomplete`
   run is never announced as clear on any tag.
 - `FL_LLM_ENABLED=false` by default. Enabling it is an M5 task, gated on the
