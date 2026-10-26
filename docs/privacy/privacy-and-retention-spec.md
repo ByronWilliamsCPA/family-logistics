@@ -50,7 +50,7 @@ send more than a channel needs, and treat other families' data as on loan.
 | Finding | issue_id, rule_id, severity, affected IDs, first/last seen, resolved_at, evidence | C | Evidence references IDs, not raw notes text. |
 | Analysis run | run_id, trigger, window, freshness, rules version, state, counts, output | I (output C) | Report HTML stored as an artifact with run-log retention. |
 | Audit | timestamp, actor, object, prior hash, new hash, hash key version, action, correlation ID | I | Hashes only, never content. The hashes are HMAC-SHA256 of a canonical state under `FL_AUDIT_KEY` (kept in the secret store, never in the database), and each row records the key version. Holding the table alone does not let anyone confirm a guessed state; whoever also holds the key can, so rows stay pseudonymous, not anonymous. The table is append-only: the database rejects updates, overwrites and deletes of rows younger than 365 days. |
-| HA snapshot | school/district events, zones, fetched_at | C | Only the configured school calendars and zones; no person-tracker or device-location entities are ever accepted. |
+| HA snapshot | parsed school days (person, date, location, start, end, kind), fetched_at, received_at, content hash, day count | C | Event text, descriptions, calendar entity IDs and zones are checked or classified on arrival and never stored or logged. Only the configured school calendars and zones are accepted; no person-tracker or device-location entities are ever accepted. |
 | Route cache | endpoints (location IDs), bucket, duration, source, age | C | Keyed by location ID, not address. |
 
 Not collected, ever: GPS or device location of children, phone numbers of

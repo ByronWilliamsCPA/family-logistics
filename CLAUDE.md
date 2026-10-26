@@ -52,8 +52,10 @@ iCloud ride commitments before a child is stranded.
 **Repository**: <https://github.com/ByronWilliamsCPA/family-logistics>
 **Status**: M0 (discovery). Implemented: the domain core, the SQLite schema
 with Alembic migrations and an append-only audit log, the Apprise client,
-structured logging and startup checks. Collection, scheduling, notification
-wiring and the Home Assistant API arrive in M1 to M5.
+structured logging and startup checks, and the Home Assistant school snapshot
+ingest (`POST /api/v1/ingest/ha-snapshot`, stored but not yet read by any run).
+Collection wiring, scheduling, notification wiring and the rest of the Home
+Assistant API arrive in M1 to M5.
 **Distribution**: container image `ghcr.io/byronwilliamscpa/family-logistics`
 only. Not published to PyPI.
 
@@ -129,13 +131,13 @@ uv run family-logistics migrate            # schema to head (serve refuses an ol
 ```text
 src/family_logistics/
 ├── adapters/      # caldav (read-only transport), routing, apprise, home_assistant, llama_cpp
-├── api/           # FastAPI app, /healthz, Home Assistant routes (M3)
+├── api/           # FastAPI app, /healthz, Home Assistant routes (snapshot ingest; M3-M4 add the rest)
 ├── core/          # config, crypto, database, exceptions
 ├── db/            # schema, audit log, migrations_api, Alembic migrations/
 ├── domain/        # models, events, parser, confirmation, change_impact,
 │                  # capacity, stop_order, registry, rules, run_status
 ├── middleware/    # correlation IDs, security headers
-├── services/      # collector, scheduler, assessments, notifications (M1-M3)
+├── services/      # collector, assessments, school_snapshot; scheduler, notifications (M1-M3)
 ├── utils/         # structured logging
 └── cli.py
 tests/

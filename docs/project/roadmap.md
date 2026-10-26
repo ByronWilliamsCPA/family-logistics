@@ -54,12 +54,12 @@ live is a separate go-live step after MVP (Step 3). M5 (LLM narrative and
 hardening) and M6 (meals) follow MVP, except for the two M5 items that must land
 before go-live, listed in Step 3.
 
-Status as of main at 57a6146 (2026-10-25). Merged: compliance alignment, ops
+Status as of main at e5adcbf (2026-10-25). Merged: compliance alignment, ops
 foundations and public-repo data guards (#2), pilot contracts and core schema
 (#4), registry and seed loader (#5), the engine (#6), the collector (#7),
 review fixes (#13, #14), the assessment orchestrator (#17), this roadmap (#18),
 the fix that makes a missing school snapshot incomplete (#26) and dependency
-updates (#8, #9, #10, #11, #16).
+updates (#8, #9, #10, #11, #15, #16).
 
 ### Step 1: Merged M1 and M2 work, and open gate items
 
@@ -68,7 +68,9 @@ updates (#8, #9, #10, #11, #16).
 | #7 `feat/m1-collector` | Merged | M1 ingestion half: read-only CalDAV collector, recurrence expansion, source persistence, `collect` CLI |
 | #6 `feat/m2-engine` | Merged | M2 engine: location timeline, coverage, driver and feasibility rules, finding lifecycle, `assess()` |
 | #17 `feat(assessments)` | Merged | Assessment orchestrator: collected rows to parsed rides, `assess()` and a stored run; run and finding persistence; the previous run's rides persisted (migration `0003_trip_snapshot`) so PASS-003 and CONF-008 work across runs. A run that raises is stored as failed and never reads as clear. |
-| #8, #9, #10, #11 Renovate | Merged | Dependency hygiene (base image digest, GitHub Actions, pre-commit hooks). #11 is a major bump of `pre-commit-hooks` (v6 drops two hooks) and `conventional-pre-commit` (v4 skips merge commits by default). |
+| #18 `docs(roadmap)` | Merged | This roadmap |
+| #26 `fix(assessments)` | Merged | A run given no school snapshot is reported incomplete (DATA-011), never clear |
+| #8, #9, #10, #11, #15, #16 Renovate | Merged | Dependency hygiene (base image digest, GitHub Actions, pre-commit hooks). #11 is a major bump of `pre-commit-hooks` (v6 drops two hooks) and `conventional-pre-commit` (v4 skips merge commits by default). |
 
 Open items that block the M1 and M2 exit gates, or that must be closed before
 the M3 shadow dry-run is trusted. None of these is a PR yet:
@@ -97,7 +99,7 @@ the M3 shadow dry-run is trusted. None of these is a PR yet:
 
 | Milestone | PR | Replaces | Completes |
 |-----------|----|----------|-----------|
-| M3 (ADR 0007 target: M2) | Home Assistant adapter and snapshot ingest | `adapters/home_assistant` stub | School and location snapshot (clears the SCHOOL-009 warnings on every weekday), `POST /api/v1/ingest/ha-snapshot`. ADR 0007 targets M2, but the adapter is still a stub, so this is the first M3 PR: it must land before the shadow dry-run so school checks are not incomplete. In flight as three stacked PRs: storage, mapper, route. Merging them stores the snapshot but does not make any run read it. |
+| M3 (ADR 0007 target: M2) | Home Assistant adapter and snapshot ingest | `adapters/home_assistant` stub | School snapshot (parsed school days; zones are validated and not stored), `POST /api/v1/ingest/ha-snapshot`. A school with no events in the window is stored and flagged uncertain through SCHOOL-009, which never blocks the ingest. ADR 0007 targets M2, but the adapter is still a stub, so this is the first M3 PR: it must land before the shadow dry-run so school checks are not incomplete. In flight as three stacked PRs: storage, mapper, route. Merging them stores the snapshot but does not make any run read it. |
 | M3 | Routing provider and budget | `adapters/routing` base only | `ha_relay`, the default provider in M3 (ADR 0006), with `GET /api/v1/route-requests` and `POST /api/v1/route-results` on `api/ha.py`; optionally `google_routes`; caching, budget warning. Unknown travel time stays incomplete (ROUTE-010). |
 | M3 | Notification service | `services/notifications.py` stub | Finding rendering, deduplication, shadow-mode default, quiet hours, imminent-ride windows, dedicated `fl-*` tags only. |
 | M3 | Scheduler and ops alerts | `services/scheduler.py` stub | Weekly, daily and incremental jobs, on-demand coalescing, `ops_alert()` wired to failed or incomplete runs, collection failures, a degraded database and the routing budget. Becomes the first production caller of `AssessmentService.run`, so it must also add a test for overlapping runs with the chosen serialization policy (see the `#CRITICAL` in `services/assessments.py`). **Gate: live dry-run reports in shadow mode.** |
@@ -105,7 +107,8 @@ the M3 shadow dry-run is trusted. None of these is a PR yet:
 | M4 | Family validation card and registry UI | none | The card and registry editing in Home Assistant. **Gate: both parents use the calendar as the only ride editor.** |
 
 The scheduler (M3) and the on-demand API (M4) must call
-`AssessmentService.run(trigger, school=SchoolSnapshotRepository.latest())`.
+`AssessmentService.run(trigger, school=repository.latest())`, where `repository` is a
+`SchoolSnapshotRepository`.
 Until they do, runs report INCOMPLETE (DATA-011), even after the snapshot
 ingest merges.
 
