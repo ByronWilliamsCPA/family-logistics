@@ -8,12 +8,29 @@ scheduler wires them (``services/scheduler.py``, the M3 gate).
 
 A delivery failure never raises: the push stays owed and a later dispatch
 retries it (an urgent push once more in the same dispatch). Only
-``NotificationTagError`` and ``DatabaseError`` escape; the run is already
-stored, so neither changes it.
+``NotificationTagError`` and ``DatabaseError`` escape (a failed completion or
+release is a ``NotificationStateError``, a ``DatabaseError`` that names the
+operation and carries the ``DispatchReport``); the run is already stored, so
+neither changes it. In production mode a missing Apprise client is a
+``ConfigurationError`` at construction; only shadow mode may run without one.
+
+The scheduler PR owes two things this service cannot do alone (ADR 0008, D11):
+serialize ``dispatch`` and ``dispatch_unavailable`` calls (the watermark is
+checked at claim time only, so two concurrent dispatches of different runs can
+deliver the older status after the newer one), and know that
+``dispatch_unavailable`` advances the watermark to now, so a slower run that
+started earlier is refused as a whole (stale) and its pushes wait for the next
+run.
+
+The audit trail records a push only after its completion was written (D10). A
+delivery whose completion failed is therefore not audited; its resend, after
+``CLAIM_TTL``, is.
 
 #CRITICAL: Security: children's data. Nothing here reads a finding's message,
-suggestion, entity keys, notes, addresses, UIDs, calendar IDs or names; pushes
-come from ``domain.notification_text`` and logs and audit rows carry only
+suggestion, entity keys, notes, addresses, UIDs, calendar IDs or error text.
+Family first names and external initials reach only the renderer (the name
+directory is loaded once per dispatch, ``_names``); pushes come from
+``domain.notification_text`` and logs and audit rows carry no names, only
 counts, IDs, kinds, tags, decisions, reason codes and error class names.
 #VERIFY: tests/unit/test_notification_service_canary.py.
 #CRITICAL: Timing: a failed or incomplete run is never reported as clear, and an
@@ -44,7 +61,11 @@ from typing import TYPE_CHECKING, Final, Literal, Self
 from sqlalchemy.exc import SQLAlchemyError
 
 from family_logistics.adapters.apprise.client import AppriseClient
-from family_logistics.core.exceptions import DatabaseError, ProjectBaseError
+from family_logistics.core.exceptions import (
+    ConfigurationError,
+    DatabaseError,
+    ProjectBaseError,
+)
 from family_logistics.db.audit import AuditRepository
 from family_logistics.db.notifications import (
     NotificationStateBusyError,
@@ -128,7 +149,7 @@ class DispatchReport:
     interval and was dropped.
     """
 
-    run_id: str | None
+    run_id: str
     mode: Literal["shadow", "production"]
     sent: int = 0
     failed: int = 0
@@ -142,6 +163,31 @@ class DispatchReport:
     unconfigured: bool = False
     released: int = 0
     status_stale: bool = False
+
+
+class NotificationStateError(DatabaseError):
+    """A claim's completion or release could not be written.
+
+    Raised after every other send of the dispatch was attempted, so the report
+    says what was delivered. ``report.urgent_failed`` and ``report.sent`` let
+    the scheduler run the extra urgent dispatch ADR 0008 (D8) promises even
+    though the state write failed. The unwritten claim expires after
+    ``CLAIM_TTL`` and a later dispatch sends again (at-least-once).
+
+    Args:
+        message: A fixed description with no household text.
+        operation: ``complete`` or ``release``, whichever failed first.
+        report: What the dispatch did before it raised.
+    """
+
+    def __init__(self, message: str, *, operation: str, report: DispatchReport) -> None:
+        super().__init__(
+            message,
+            operation=operation,
+            table="notification_state",
+            error_code="NOTIFICATION_STATE_UNWRITABLE",
+        )
+        self.report = report
 
 
 @dataclass(slots=True)
@@ -194,12 +240,17 @@ class NotificationService:
     Args:
         engine: Database engine at the schema head.
         settings: Application settings (mode, tags, quiet hours, audit key).
-        client: The Apprise client, or None when ``FL_APPRISE_URL`` is unset
-            (a dispatch then plans, logs and writes nothing).
+        client: The Apprise client, or None when ``FL_APPRISE_URL`` is unset.
+            Only shadow mode allows None (a dispatch then plans, logs and
+            writes nothing); production refuses it (D8).
         audit: The audit repository; built from the settings when ``None`` and
             ``FL_AUDIT_KEY`` is set, else no audit rows are written.
         clock: The current aware time (replaceable in tests).
         sleep: The wait before an urgent retry and between lock retries.
+
+    Raises:
+        ConfigurationError: ``FL_NOTIFICATION_MODE`` is ``production`` and
+            there is no Apprise client, so every push would be dropped.
     """
 
     def __init__(  # noqa: PLR0913 - the collaborators are keyword-only (ADR 0008)
@@ -212,6 +263,13 @@ class NotificationService:
         clock: Callable[[], datetime] = _utc_now,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        if client is None and settings.notification_mode == "production":
+            # #CRITICAL: External resources: production without Apprise would
+            # drop every push and report nothing wrong. ``serve`` already
+            # refuses to start this way; this guards any other caller.
+            # #VERIFY: tests/unit/test_notification_service.py (unconfigured).
+            msg = "production notifications need FL_APPRISE_URL"
+            raise ConfigurationError(msg, details={"setting": "apprise_url"})
         self._engine = engine
         self._settings = settings
         self._client = client
@@ -239,7 +297,8 @@ class NotificationService:
 
         Returns:
             The service; its client is None when ``FL_APPRISE_URL`` is unset
-            (an unusable URL, key or tag set raises ``ConfigurationError``).
+            (an unusable URL, key or tag set raises ``ConfigurationError``, and
+            so does a missing URL in production mode).
         """
         return cls(
             engine, settings, AppriseClient.from_settings(settings, transport=transport)
@@ -267,8 +326,9 @@ class NotificationService:
             Raises ``NotificationTagError`` for a tag the client does not own
             (unsent claims are released first) and ``DatabaseError`` when the
             state is not writable (nothing sent if the claim failed; a failed
-            completion leaves its claim to expire and raises after the other
-            sends were attempted). A delivery failure never raises.
+            completion or release leaves its claim to expire and raises a
+            ``NotificationStateError``, with the report attached, after the
+            other sends were attempted). A delivery failure never raises.
         """
         now = self._clock()
         policy = NotificationPolicy.from_settings(self._settings)
@@ -437,7 +497,9 @@ class NotificationService:
                 items=len(chunk),
                 error=refusal,
             )
-            self._count_failure(d, chunk)
+            # A render refusal is a programming error: it is failed but never
+            # urgent_failed, because a re-dispatch would refuse the same way.
+            d.tally["failed"] += 1
             self._release(d, chunk)
             return
         tag = delivery_tag(first.kind, d.policy)
@@ -563,9 +625,10 @@ class NotificationService:
             The report.
 
         Raises:
-            DatabaseError: A completion or release could not be written after
-                the other sends were attempted (the claim expires and a later
-                dispatch sends again).
+            NotificationStateError: A completion or release could not be
+                written after the other sends were attempted (the claim expires
+                and a later dispatch sends again). It names the operation that
+                failed and carries the report.
         """
         n = d.tally
         if self._audit is None and n["sent"]:
@@ -598,12 +661,10 @@ class NotificationService:
             unresolved=report.unresolved,
         )
         if d.state_error is not None:
-            msg = "notification state could not be written (completion)"
-            raise DatabaseError(
-                msg,
-                operation="complete",
-                table="notification_state",
-                error_code="NOTIFICATION_STATE_UNWRITABLE",
+            operation = str(d.state_error.details.get("operation", "complete"))
+            msg = f"notification state could not be written ({operation})"
+            raise NotificationStateError(
+                msg, operation=operation, report=report
             ) from d.state_error
         return report
 
@@ -658,4 +719,8 @@ def _account(item: PushDecision, tally: Counter[str], stale: bool) -> bool:
     return False
 
 
-__all__ = ["DispatchReport", "NotificationService"]
+__all__ = [
+    "DispatchReport",
+    "NotificationService",
+    "NotificationStateError",
+]

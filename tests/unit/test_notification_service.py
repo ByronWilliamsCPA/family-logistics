@@ -44,7 +44,7 @@ from family_logistics.adapters.apprise.client import (
     AppriseClient,
     NotificationTagError,
 )
-from family_logistics.core.exceptions import DatabaseError
+from family_logistics.core.exceptions import ConfigurationError, DatabaseError
 from family_logistics.db import schema
 from family_logistics.db.notifications import NotificationStateBusyError
 from family_logistics.domain.engine import failed_result
@@ -60,6 +60,7 @@ from family_logistics.services import notifications as service_module
 from family_logistics.services.notifications import (
     DispatchReport,
     NotificationService,
+    NotificationStateError,
 )
 
 pytestmark = pytest.mark.unit
@@ -151,6 +152,28 @@ class TestQuietHours:
         assert posts.tags == ["fl-urgent"]
         assert report.sent == 1
         assert report.held == 0
+
+    def test_a_second_escalation_the_same_night_is_held_not_sent(self, engine):
+        """The quiet-hours bypass is spent once per episode (D4, bypass_used)."""
+        service, posts, clock = make_service(engine, mode="production")
+        keys = (NIGHT_RIDE_KEY, "route")
+        unverified = finding("DEST-004", keys, Severity.INCOMPLETE)
+        worse = finding("DEST-004", keys, Severity.CRITICAL)
+        assert key_of(unverified) == key_of(worse)
+        first = go(service, clock, NIGHT, unverified, rides=NIGHT_RIDES)
+        assert (first.sent, first.held) == (1, 0)
+        assert get_row(engine, key_of(unverified), "production").bypass_used is True
+        second = go(
+            service,
+            clock,
+            NIGHT + timedelta(minutes=20),
+            worse,
+            run_id="run-2",
+            lifecycle=Lifecycle.ONGOING,
+            rides=NIGHT_RIDES,
+        )
+        assert (second.sent, second.held) == (0, 1)
+        assert posts.tags == ["fl-urgent"]
 
     def test_ride_in_progress_is_urgent_at_night(self, engine):
         """T-svc-3b: five minutes into the window, during quiet hours."""
@@ -246,6 +269,40 @@ class TestDeliveryFailure:
         assert (report.sent, report.failed, report.urgent_failed) == (1, 0, 0)
         assert len(posts.payloads) == 2
         assert clock.sleeps == [URGENT_RETRY_DELAY.total_seconds()]
+
+    def test_the_urgent_retry_is_skipped_past_the_send_deadline(self, engine):
+        """The retry would start after the deadline: no wait, no second call."""
+        clock = Clock()
+        calls: list[int] = []
+
+        def slow_first_call() -> None:
+            if not calls:
+                clock.advance(SEND_DEADLINE - URGENT_RETRY_DELAY / 2)
+            calls.append(1)
+
+        posts = Posts([500, 200], on_post=slow_first_call)
+        service, _, _ = make_service(engine, posts=posts, clock=clock)
+        urgent = finding()
+        report = go(service, clock, NOW, urgent)
+        assert len(posts.payloads) == 1
+        assert clock.sleeps == []
+        assert (report.sent, report.failed, report.urgent_failed) == (0, 1, 1)
+        assert get_row(engine, key_of(urgent)).delivered is False
+
+    def test_the_urgent_retry_still_runs_just_inside_the_deadline(self, engine):
+        clock = Clock()
+        calls: list[int] = []
+
+        def slow_first_call() -> None:
+            if not calls:
+                clock.advance(SEND_DEADLINE - URGENT_RETRY_DELAY * 2)
+            calls.append(1)
+
+        posts = Posts([500, 200], on_post=slow_first_call)
+        service, _, _ = make_service(engine, posts=posts, clock=clock)
+        report = go(service, clock, NOW, finding())
+        assert len(posts.payloads) == 2
+        assert (report.sent, report.urgent_failed) == (1, 0)
 
     def test_urgent_retry_then_release_leaves_the_push_owed(self, engine):
         """T-svc-7b: two 500s count as urgent_failed; the claim is released."""
@@ -583,16 +640,54 @@ class TestCrashRecovery:
         assert len(posts_after.payloads) == 1
         assert get_row(engine, key_of(urgent)).delivered is True
 
-    def test_a_failed_release_raises_after_the_other_sends(self, engine, monkeypatch):
+    def test_a_failed_completion_names_complete_and_carries_the_report(
+        self, engine, monkeypatch
+    ):
         service, posts, clock = make_service(engine, posts=Posts([500]))
 
         def broken(*args, **kwargs):
             raise OperationalError("update", {}, Exception("locked"))
 
         monkeypatch.setattr(service._repo, "complete", broken)
-        with pytest.raises(DatabaseError, match="could not be written"):
+        with pytest.raises(NotificationStateError, match=r"\(complete\)") as caught:
             go(service, clock, NOW, warning(0), warning(1))
         assert len(posts.payloads) == 1
+        assert caught.value.details["operation"] == "complete"
+        assert (caught.value.report.failed, caught.value.report.sent) == (1, 0)
+
+    def test_a_failed_release_after_a_send_names_release_and_the_report(
+        self, engine, monkeypatch
+    ):
+        """The urgent push is sent; the deadline releases the notice; that fails."""
+        clock = Clock()
+        posts = Posts(on_post=lambda: clock.advance(SEND_DEADLINE))
+        service, _, _ = make_service(engine, posts=posts, clock=clock)
+
+        def locked(*args, **kwargs):
+            raise OperationalError("update", {}, Exception("locked"))
+
+        monkeypatch.setattr(service._repo, "release", locked)
+        held = warning()
+        with pytest.raises(NotificationStateError, match=r"\(release\)") as caught:
+            go(service, clock, NOW, finding(), held)
+        assert len(posts.payloads) == 1
+        report = caught.value.report
+        assert (report.sent, report.released, report.failed) == (1, 1, 0)
+        assert get_row(engine, key_of(held)).claim_token is not None
+
+    def test_the_error_report_shows_a_failed_urgent_for_the_scheduler(
+        self, engine, monkeypatch
+    ):
+        service, _posts, clock = make_service(engine, posts=Posts([500, 500]))
+
+        def locked(*args, **kwargs):
+            raise OperationalError("update", {}, Exception("locked"))
+
+        monkeypatch.setattr(service._repo, "complete", locked)
+        with pytest.raises(NotificationStateError) as caught:
+            go(service, clock, NOW, finding())
+        assert caught.value.report.urgent_failed == 1
+        assert isinstance(caught.value, DatabaseError)
 
     def test_the_send_deadline_releases_what_is_unsent(self, engine):
         clock = Clock()
@@ -619,9 +714,11 @@ class TestCrashRecovery:
         service, posts, clock = make_service(engine)
         monkeypatch.setattr(service._repo, "release", locked)
         urgent = finding()
-        with pytest.raises(DatabaseError, match="could not be written"):
+        with pytest.raises(NotificationStateError, match=r"\(release\)") as caught:
             go(service, clock, NOW, urgent)
         assert posts.payloads == []
+        assert caught.value.report.failed == 1
+        assert caught.value.report.urgent_failed == 0
         assert get_row(engine, key_of(urgent)).claim_token is not None
 
     def test_a_claim_failure_raises_and_sends_nothing(self, engine, monkeypatch):
@@ -651,6 +748,21 @@ class TestUnconfigured:
         names = [e["event"] for e in events]
         assert "notification.not_configured" in names
         assert posts.payloads == []
+
+    def test_production_without_a_client_is_refused(self, engine):
+        """D8: only shadow mode may run without Apprise."""
+        with pytest.raises(ConfigurationError, match="FL_APPRISE_URL"):
+            make_service(engine, mode="production", configured=False)
+
+    def test_production_from_settings_without_a_url_is_refused(self, engine):
+        with pytest.raises(ConfigurationError, match="FL_APPRISE_URL"):
+            NotificationService.from_settings(
+                engine, make_settings(notification_mode="production")
+            )
+
+    def test_production_with_a_client_is_allowed(self, engine):
+        service, _posts, _clock = make_service(engine, mode="production")
+        service.close()
 
 
 class TestAudit:
@@ -735,7 +847,8 @@ class TestDirectoryAndRenderFailure:
         urgent = finding()
         with captured_events(monkeypatch) as events:
             report = go(service, clock, NOW, urgent)
-        assert (report.sent, report.failed, report.urgent_failed) == (0, 1, 1)
+        # Failed, but not urgent_failed: a re-dispatch would refuse the same way.
+        assert (report.sent, report.failed, report.urgent_failed) == (0, 1, 0)
         assert posts.payloads == []
         row = get_row(engine, key_of(urgent))
         assert (row.delivered, row.claim_token, row.failed_attempts) == (False, None, 0)
@@ -745,6 +858,62 @@ class TestDirectoryAndRenderFailure:
         monkeypatch.undo()
         retried = go(service, clock, NOW, urgent)
         assert retried.sent == 1
+
+
+class TestEscalationWording:
+    """A push says which dimension rose, never repeating what was already read."""
+
+    def test_a_kind_only_rise_says_now_imminent_not_now_critical(self, engine):
+        """Critical as a notice the morning, imminent (urgent) in the afternoon."""
+        service, posts, clock = make_service(
+            engine, mode="production", clock=Clock(FAR)
+        )
+        critical = finding()
+        go(service, clock, FAR, critical)
+        assert posts.tags == ["fl-warning"]
+        go(service, clock, NOW, critical, run_id="run-2", lifecycle=Lifecycle.ONGOING)
+        assert posts.tags == ["fl-warning", "fl-urgent"]
+        body = posts.bodies[-1]
+        assert "(now imminent, ref" in body
+        assert "now critical" not in body
+        assert "(new," not in posts.bodies[-1]
+
+    def test_a_severity_rise_says_now_critical(self, engine):
+        service, posts, clock = make_service(
+            engine, mode="production", clock=Clock(FAR)
+        )
+        keys = (RIDE_KEY, "route")
+        go(service, clock, FAR, finding("CONF-008", keys, Severity.WARNING))
+        later = FAR + timedelta(minutes=10)
+        go(
+            service,
+            clock,
+            later,
+            finding("CONF-008", keys, Severity.CRITICAL),
+            run_id="run-2",
+            lifecycle=Lifecycle.ONGOING,
+        )
+        assert posts.tags == ["fl-warning", "fl-warning"]
+        assert "(now critical, ref" in posts.bodies[-1]
+        assert "now imminent" not in posts.bodies[-1]
+
+    def test_a_rise_in_both_says_now_critical(self, engine):
+        service, posts, clock = make_service(
+            engine, mode="production", clock=Clock(FAR)
+        )
+        keys = (RIDE_KEY, "route")
+        go(service, clock, FAR, finding("CONF-008", keys, Severity.WARNING))
+        go(
+            service,
+            clock,
+            NOW,
+            finding("CONF-008", keys, Severity.CRITICAL),
+            run_id="run-2",
+            lifecycle=Lifecycle.ONGOING,
+        )
+        assert posts.tags == ["fl-warning", "fl-urgent"]
+        assert "(now critical, ref" in posts.bodies[-1]
+        assert "now imminent" not in posts.bodies[-1]
 
 
 class TestReport:
@@ -771,11 +940,15 @@ class TestReport:
         assert len(unresolved) == report.unresolved
         assert all(e["rule_id"] == "RIDE-005" for e in unresolved)
 
-    def test_close_closes_the_client(self, engine):
+    def test_close_closes_the_client(self, engine, monkeypatch):
         service, _posts, _clock = make_service(engine)
+        closed: list[str] = []
+        monkeypatch.setattr(service._client, "close", lambda: closed.append("closed"))
         service.close()
+        assert closed == ["closed"]
         unconfigured, _, _ = make_service(engine, configured=False)
         unconfigured.close()
+        assert unconfigured._client is None
 
     def test_from_settings_builds_a_service(self, engine):
         built = NotificationService.from_settings(
