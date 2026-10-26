@@ -18,10 +18,15 @@ The app caches each result for the same weekday and 15-minute bucket for up to
 incomplete); the app never guesses a duration. See
 [ADR 0006](../ADRs/0006-route-provider-abstraction.md) for the decisions.
 
-!!! warning "Unverified assumption"
+!!! warning "Unverified assumptions"
     `#ASSUME`: Home Assistant resolves a bare time-of-day `departure_time`
     (for example `08:00:00`) to the **next** occurrence of that time, not to
-    "now". This has not been verified.
+    "now", and the price it returns depends on that time at all. Neither has
+    been verified.
+    `#ASSUME`: Home Assistant's configured time zone equals `FL_TIMEZONE`,
+    because `departure_time` is a bare local time that Home Assistant reads in
+    its own zone. If they differ, results are silently filed under the wrong
+    bucket or weekday.
     `#VERIFY`: run the deployment checklist below before trusting any result.
 
 ## Endpoints
@@ -53,9 +58,19 @@ Returns the **due** requests, oldest first, at most 50:
   address off the relay.
 - `weekday` is `mon` to `sun`; `departure_time` is a local `HH:MM:SS`.
 - A request is **due** when its weekday matches the weekday of the next local
-  occurrence of `departure_time` at poll time. Others stay queued. A request that
-  has expired or been answered is not returned. A request whose location has
-  neither a zone nor a readable address is left out.
+  occurrence of `departure_time` at poll time **and** that occurrence is at least
+  30 minutes away, so Home Assistant's latency and clock skew cannot carry the
+  pricing call across the start time. A Friday `08:00:00` request is returned on
+  Friday until 07:30 and then waits a week. Others stay queued. A request that
+  has expired or been answered is not returned. A start time that does not exist
+  or occurs twice on either of the next two local days (a daylight saving
+  change) is not returned either.
+- A request whose location has neither a zone nor a readable address (an
+  address that cannot be decrypted, or no `FL_DATA_KEY`) is left out. This fails
+  closed: the leg stays unknown. It still occupies the queue (500 requests) until
+  it expires after 8 days, which is how it clears. The limit of 50 per poll
+  counts only the requests that can be routed, so unroutable ones cannot starve
+  the rest.
 
 ### POST /api/v1/route-results
 
@@ -65,21 +80,31 @@ Returns the **due** requests, oldest first, at most 50:
 
 - `duration_seconds` must be an integer from 1 to 43200 (12 hours). Strings,
   floats, booleans, null, zero and negatives get a 422 and nothing is stored.
-- 1 to 100 results per call; more, none, or a malformed body is a 422.
+- 1 to 100 results per call; more, none, or a malformed body is a 422. The 422
+  body lists each problem's location, type and message and never echoes what
+  you posted.
+- The body is read after the token is checked and may not exceed 64 KiB: more is
+  a 413. A request without a valid token gets the 401 whatever its body.
 - Each item is judged on its own and the response is 200:
   `accepted`, `unchanged` (the same duration posted again) or `rejected` with a
-  reason: `unknown_request`, `expired` or `conflict` (a different duration for an
-  answered request).
+  reason: `unknown_request`, `expired`, `conflict` (a different duration for an
+  answered request) or `not_due` (see below).
+- `not_due` means the request's start time has come round since it was served,
+  so Home Assistant would have priced the following day. Nothing is stored and
+  the request stays pending; it is served again in its next due window. Post
+  results soon after each poll: one that arrives after the start time is refused
+  even if the right day was priced.
 - Only `request_id` and `duration_seconds` are read. Any weekday or endpoint you
   add is ignored: the app already knows them from its own request row.
-- 503 with `Retry-After` means the database was busy; nothing was stored. Post
-  again later.
+- 503 with `Retry-After` means the database was busy (another writer held the
+  lock); nothing was stored. Post again later. A 503 without `Retry-After` is a
+  store error that waiting will not cure; check the app's logs.
 
 ## Example automation
 
-Placeholders only: replace `fl.example.invalid`, the entry id and the secret.
-Find the `google_travel_time` config entry id in Home Assistant (the integration
-page, or Developer tools).
+Placeholders only: replace `fl.example.invalid`, the config entry id and the
+secret. Find the `google_travel_time` config entry id in Home Assistant (the
+integration page, or Developer tools).
 
 ```yaml
 # configuration.yaml
@@ -115,7 +140,7 @@ rest_command:
         sequence:
           - action: google_travel_time.get_travel_times
             data:
-              entry_id: "0123456789ABCDEFGHIJKLMNOP"
+              config_entry_id: "0123456789ABCDEFGHIJKLMNOP"
               origin: "{{ repeat.item.origin.value }}"
               destination: "{{ repeat.item.destination.value }}"
               departure_time: "{{ repeat.item.departure_time }}"
@@ -136,22 +161,43 @@ Notes:
   slowest returned route instead is an open owner decision.
 - `int(0)` turns a missing duration into 0, which the app refuses with a 422 so
   the failure is visible in the Home Assistant trace instead of storing a guess.
-- The response shape above was verified on Home Assistant Core 2026.10.2. Check
+- The response shape above was verified on Home Assistant Core 2026.10.x. Check
   it again after a Home Assistant upgrade; the app's strict validation makes a
   changed shape fail visibly.
+- Editing a zone's geometry inside Home Assistant (same entity id) does not
+  invalidate the cache: the app only sees the entity id. After such an edit,
+  wait out the affected entries (28 days) or clear them. There is no admin
+  command for this yet; change the location's zone id or verification state
+  (which fires the invalidation trigger) or delete that location's rows from
+  `route_cache` in the database.
 
 ## Deployment checklist
+
+None of the checks below has been done yet; until they pass, nothing here is
+verified.
 
 1. Set `FL_HA_TOKEN`, `FL_AUDIT_KEY` and, if any location has no zone,
    `FL_DATA_KEY`. Confirm both routes return 401 without the token.
 2. Give each location that is a routing endpoint a Home Assistant zone, so no
    address is sent.
-3. **Compare the same `google_travel_time` request in the evening and again
-   before 08:00. Matching durations mean Home Assistant resolves a bare
-   time-of-day to the next occurrence.** Different durations mean it prices
-   "now": do not use the results, and rework the request shape. Record the
-   outcome in the deployment repository.
-4. Keep notifications in shadow mode until step 3 has passed.
-5. Check one full cycle: a run that needs a leg is incomplete (ROUTE-010), the
+3. Confirm Home Assistant's time zone equals `FL_TIMEZONE` (Home Assistant
+   Settings, General, time zone). `departure_time` is a bare local time that Home
+   Assistant reads in its own zone, so a mismatch silently files results under
+   the wrong bucket or weekday.
+4. **Check that the price depends on `departure_time` at all.** Run the same
+   `google_travel_time` request (a leg that is slow in the morning) with
+   `departure_time` `03:00:00` and again with `08:00:00`, and compare `duration`
+   with each other and with the static (traffic-unaware) duration. If the
+   duration equals the static duration at every time, the integration returns no
+   time-dependent signal and the whole weekday-and-bucket model carries none: do
+   not use the results, and record that in the deployment repository.
+5. **Only if step 4 shows a difference, compare the same request in the evening
+   and again before 08:00. Matching durations mean Home Assistant resolves a
+   bare time-of-day to the next occurrence.** Matching durations alone, without
+   step 4, would also come from a traffic-unaware price. Different durations mean
+   it prices "now": do not use the results, and rework the request shape. Record
+   the outcome in the deployment repository.
+6. Keep notifications in shadow mode until steps 3 to 5 have passed.
+7. Check one full cycle: a run that needs a leg is incomplete (ROUTE-010), the
    next poll lists it, the post is accepted, and the following run is clear.
-6. Decide first route versus slowest route (open owner decision).
+8. Decide first route versus slowest route (open owner decision).

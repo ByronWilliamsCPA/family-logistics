@@ -60,7 +60,7 @@ Providers (`FL_ROUTE_PROVIDER`):
 
 | Provider | How it works | Use |
 |----------|--------------|-----|
-| `ha_relay` | The app publishes needed legs at `GET /api/v1/route-requests`; an HA automation runs the `google_travel_time.get_travel_times` action and posts results to `POST /api/v1/route-results`. Each leg endpoint is a zone entity id, or, for a location with no zone, its address, except that another family's zone-less home is withheld (ROUTE-010). Results are cached by origin, destination, weekday and 15-minute time-of-day bucket with age and source, and stay valid for that weekday bucket for up to 28 days (see [Owner decisions](#owner-decisions-2026-10-25)). | Default in M3 |
+| `ha_relay` | The app publishes needed legs at `GET /api/v1/route-requests`; an HA automation runs the `google_travel_time.get_travel_times` action and posts results to `POST /api/v1/route-results`. Each leg endpoint is a zone entity id, or, for a location with no zone, its address, except that another family's zone-less home is withheld (ROUTE-010). Results are cached by origin, destination, weekday and 15-minute time-of-day bucket; the cache stores the duration and the time the app received it, and a hit is returned with that age and the source `ha_relay`. An entry stays valid for that weekday bucket for up to 28 days (see [Owner decisions](#owner-decisions-2026-10-25)). | Default in M3 |
 | `google_routes` | Direct `computeRoutes` call with a key restricted to the Routes API and the deployment's egress IP. An in-app monthly spend counter is the hard stop: at $8 Morgan gets a warning (Apprise tag `fl-ops`); at `FL_ROUTES_MONTHLY_BUDGET_USD` (10) discretionary calls stop, non-routing validation continues, and any trip without a recent valid estimate is marked travel-feasibility `incomplete` (ROUTE-010). Google Cloud budget alerts at $8 and $10 are a second signal only (they do not stop spend). | M3, PR 3 (see [Delivery](#delivery)) |
 | `static` | Fixed matrix from fixtures. | Tests and simulations |
 
@@ -120,8 +120,10 @@ Unofficial scraping and undocumented routing APIs are prohibited.
    different bucket, or a leg whose bucket has no observation in the last 28
    days (that leg is unknown, ROUTE-010).
 3. **Invalidation.** Editing a location's address, coordinates or
-   `ha_zone_entity_id`, merging it into another location, or re-verifying it
-   drops that location's route cache entries. A corrected pickup address must
+   `ha_zone_entity_id`, or changing its verification state, drops that
+   location's route cache entries. No location merge operation exists yet; a
+   future one must change those columns or delete the merged row, and the
+   database trigger and cascades cover both. A corrected pickup address must
    never be answered from the old address's travel time for up to 28 days: a
    too-short cached duration reads as feasible, which is the unsafe direction.
    Separately, an entry is purged 28 days after the last observation for its
@@ -149,11 +151,14 @@ days, or from another weekday or bucket, is not served
 (`test_an_observation_older_than_28_days_is_not_served` and
 `test_another_bucket_or_weekday_is_not_borrowed`); and in
 `tests/unit/test_route_relay_invalidation.py`
-`test_location_edit_drops_its_route_cache_entries`, which shows that editing,
-merging or re-verifying a location drops that location's cached entries and
-pending requests so the next estimate is unknown (ROUTE-010) until Home
-Assistant posts a fresh result. Revisit the 28-day window after the shadow
-dry-run if estimates drift.
+`test_location_edit_drops_its_route_cache_entries`, which shows that a zone edit
+drops that location's cached entries and pending requests (as origin and as
+destination) so the next estimate is unknown (ROUTE-010) until Home Assistant
+posts a fresh result. The other tests in that file cover an address change
+(including a first address), coordinates, re-verification, deleting the
+location and a raw SQL update; no test covers a merge because no merge
+operation exists. Revisit the 28-day window after the shadow dry-run if
+estimates drift.
 ```
 
 ### How `ha_relay` works (PR 2)
@@ -180,45 +185,87 @@ and request tables reference `location` with `ON DELETE CASCADE`, and a trigger
 (`trg_location_route_relay_invalidate`, migration `0005`) deletes a location's
 cache entries and pending requests, as origin or destination, whenever its id,
 zone, address, coordinates or verification state change. Every mutation path
-therefore drops them: a registry upsert, a merge, a re-verification, a seed
-re-apply or a raw SQL update. A registry upsert that does not change the
-plaintext reuses the stored ciphertext, so re-applying an unchanged seed does
-not flush the cache.
+therefore drops them: a registry upsert, a re-verification, a seed re-apply or a
+raw SQL update, and deleting a location cascades. A future merge must go
+through those columns or delete the row, both of which are covered. A registry
+upsert that does not change the plaintext reuses the stored ciphertext, so
+re-applying an unchanged seed does not flush the cache.
+
+The trigger sees only what the app stores. Editing a zone's geometry inside Home
+Assistant under the same entity id changes nothing in the app, so it does not
+invalidate the cache; after such an edit, wait out the affected entries (28
+days) or clear them. There is no admin command to clear them yet: change the
+location's zone id or verification state (which fires the trigger) or delete the
+location's rows from `route_cache` directly.
 
 ### Unverified assumption and deployment checklist
 
 ```text
 #ASSUME: External resources: Home Assistant resolves a bare time-of-day
 `departure_time` (for example `08:00:00`, no date) to the NEXT occurrence of
-that time, not to "now". This is NOT verified.
-#VERIFY: Before enabling notifications, the owner compares the same request in
-the evening and again before 08:00 the next morning. Matching durations mean
-next-occurrence. Different durations mean "now" is being priced and the cached
-weekday bucket would be mislabelled; do not leave shadow mode, and rework the
-request shape.
+that time, not to "now", and prices it with traffic for that time. Neither part
+is verified.
+#VERIFY: Before enabling notifications, the owner runs two checks, in order.
+Step 1 (is there a time signal at all): run the same request with
+`departure_time` `03:00:00` and again with `08:00:00` and compare `duration`
+with each other and with the static (traffic-unaware) duration. If the duration
+equals the static duration at every time, the integration returns no
+time-dependent signal and the whole weekday-and-bucket model carries none: do not
+use the results. Step 2 (next occurrence or now), only if step 1 shows a
+difference: run the same request in the evening and again before 08:00 the next
+morning. Matching durations mean next-occurrence. Different durations mean "now"
+is being priced and the cached weekday bucket would be mislabelled; do not leave
+shadow mode, and rework the request shape.
+
+#ASSUME: External resources: Home Assistant's configured time zone equals
+`FL_TIMEZONE`. The bucket start is sent as a bare local `HH:MM:SS` that Home
+Assistant reads in its own zone; if they differ, results are silently filed
+under the wrong bucket or weekday and the app cannot detect it.
+#VERIFY: Home Assistant Settings, General, time zone equals `FL_TIMEZONE`.
 ```
 
-Deployment checklist item: **compare the same `google_travel_time` request in
-the evening and again before 08:00; matching durations mean next-occurrence.**
-Until that is done, the relay's results are not treated as verified and
-`FL_NOTIFICATION_MODE` stays `shadow`. The same item is in the
-[route relay guide](../guides/ha-route-relay.md).
+Matching evening and morning durations alone would also be produced by a
+traffic-unaware price, which is why step 1 comes first. None of this has been
+verified yet.
 
-Because of this assumption `GET /api/v1/route-requests` returns only **due**
-requests. A request is due when its weekday equals the weekday of the next local
-occurrence of its bucket's start time at poll time (so a Friday 08:00 request is
-due on Friday before 08:00 and not on Friday at 09:00, when the next 08:00 is
-Saturday's). The rest stay queued until their day. Under the assumption, the
-weekday and bucket on a result are then true. The poll never serves an expired
-or answered request.
+Deployment checklist items: **(1) confirm the duration changes with
+`departure_time` (03:00:00 against 08:00:00 against the static duration); (2)
+compare the same `google_travel_time` request in the evening and again before
+08:00, where matching durations mean next-occurrence; (3) confirm Home
+Assistant's time zone equals `FL_TIMEZONE`.** Until they are done, the relay's
+results are not treated as verified and `FL_NOTIFICATION_MODE` stays `shadow`.
+The same items are in the [route relay guide](../guides/ha-route-relay.md).
+
+Because of the next-occurrence assumption `GET /api/v1/route-requests` returns
+only **due** requests. A request is due when its weekday equals the weekday of
+the next local occurrence of its bucket's start time at poll time and that
+occurrence is at least 30 minutes away (`SERVE_LEAD_TIME`), so Home Assistant's
+latency and clock skew cannot carry the pricing call across the start time.
+A Friday 08:00 request is served on Friday up to 07:30, not at 07:50 (the next
+08:00 is 10 minutes away) and not at 09:00 (the next 08:00 is Saturday's). A
+Saturday 08:00 request is not served at 07:50 on Friday either, because a call
+made then would price Friday's 08:00; it is served once Friday 08:00 has passed.
+The rest stay queued until their day. The poll never serves an expired or
+answered request.
+
+The app also checks at receipt. `POST /api/v1/route-results` accepts a result
+only while its request is still due: the weekday of the next occurrence at
+receipt time must still equal the request's weekday. Otherwise the item is
+rejected with reason `not_due`, nothing is cached, the request stays pending and
+is served again in its next due window. Home Assistant should post soon after
+the poll; a result that arrives after the start time has passed is refused even
+if the right day was priced, because the app cannot tell the difference.
 
 ```text
 #EDGE: Timing: around a daylight saving change, a bucket start time may not
-exist (spring forward) or occur twice (fall back) on the due day.
-#VERIFY: `due_weekday` computes the next occurrence as an instant, skips a
-nonexistent local time to the next day and takes the first of an ambiguous one;
-tests/unit/test_route_relay_repo.py::TestDueRequests covers midnight and both
-DST edges.
+exist (spring forward) or occur twice (fall back) on a nearby day, and how Home
+Assistant reads such a time is unknown.
+#VERIFY: `due_weekday` fails closed: when the start time is nonexistent or
+ambiguous on either of the next two local days there is no occurrence, so the
+request is neither served nor answerable (`not_due`) until both days are
+unambiguous; tests/unit/test_route_relay_repo.py::TestDueRequests and
+TestRecordResults cover midnight, a spring-forward gap, a fall-back hour and its
+second pass. Check one request near a DST change in shadow mode.
 ```
 
 ### Result validation
@@ -230,23 +277,33 @@ for anything else, so a changed Home Assistant shape fails visibly:
   `MAX_ROUTE_DURATION_SECONDS` (12 hours). Strings, floats (even `600.0`),
   booleans, null, zero and negatives are refused.
 - `results` holds 1 to `MAX_RESULTS_PER_POST` (100) items and `request_id` is a
-  string of 1 to 64 characters. These Pydantic `max_length` limits are the body
-  cap.
-- An unknown, expired or already answered `request_id` is rejected **for that
-  item** with a reason (`unknown_request`, `expired`, `conflict`); the rest of
-  the batch is still applied and the response is 200, never a 5xx. Re-posting
+  string of 1 to 64 characters. These Pydantic limits bound the item count and
+  id length, not the body size.
+- The body is read inside the handler, after the router's bearer check, so an
+  unauthenticated request gets 401 (and counts toward the failure throttle)
+  whatever it sends. It is capped at 64 KiB (`MAX_BODY_BYTES`): more than that is
+  a 413, judged on `Content-Length` and on the bytes actually read. A body that
+  is not valid JSON, or fails the rules above, is a 422 whose body lists each
+  problem's location, type and message and never echoes the posted input.
+- An unknown, expired, no longer due or already answered `request_id` is
+  rejected **for that item** with a reason (`unknown_request`, `expired`,
+  `not_due`, `conflict`); the rest of the batch is still applied and the
+  response is 200, never a 5xx. Re-posting
   the same duration for an answered request is an idempotent no-op
   (`unchanged`); a different duration is a `conflict` for that item.
-- A held database write lock returns 503 with `Retry-After` and stores nothing;
-  a missing audit key returns 503 and stores nothing.
+- A write lock held past the timeout (SQLITE_BUSY or SQLITE_LOCKED) returns 503
+  with `Retry-After` and stores nothing; any other database error returns 503
+  without `Retry-After`, and a missing audit key returns 503 and stores nothing.
 - Each POST appends one audit row holding counts only (accepted, rejected,
   unchanged), in the action text and as a keyed hash of the counts. No address,
-  zone, request id or per-leg duration is audited, logged or put in an error.
+  zone, request id or per-leg duration is audited. No address, zone or per-leg
+  duration is logged or put in an error either. Request ids are logged (for an
+  unroutable request); addresses never are.
 
 ### Version note
 
 The Home Assistant action and response shape described here were verified on
-Home Assistant Core 2026.10.2. A different Core version may change the
+Home Assistant Core 2026.10.x. A different Core version may change the
 `google_travel_time.get_travel_times` response; the strict validation above is
 what makes such a change visible. Re-verify after a Home Assistant upgrade.
 
@@ -255,9 +312,13 @@ what makes such a change visible. Re-verify after a Home Assistant upgrade.
 - The first route in the response is used; whether to take the slowest route
   instead is an open owner decision.
 - A request whose endpoint cannot be resolved (a location with neither a zone
-  nor an address, or an address that cannot be decrypted) is left out of the poll
-  and logged by request id only. It stays pending until it expires, and the leg
-  stays unknown.
+  nor an address, or an address that cannot be decrypted or has no data key) is
+  left out of the poll and logged by request id only. This fails closed: the leg
+  stays unknown. Such a request still occupies the queue cap (500) until it
+  expires after 8 days, which is how it clears. The poll limit (50) counts only
+  routable requests, so unroutable ones queued ahead cannot starve them. A leg
+  whose endpoint has neither a zone nor a stored address is not queued at all
+  (logged by location id only).
 - Pending requests expire after 8 days (`REQUEST_TTL`), long enough for a weekly
   bucket to come round once. Expired requests are purged with
   `purge_expired_route_requests`, and cache entries 28 days after their last
