@@ -8,14 +8,14 @@ tags:
   - adr
   - caldav
   - security
-status: draft
+status: published
 owner: core-maintainer
 component: Strategy
 source: "Family Logistics development handoff v1.0, sections 2, 4.2 and 6"
 purpose: "Guarantee the app cannot modify iCloud calendars and that recurring rides are tracked per occurrence."
 ---
 
-> **Status**: `proposed`
+> **Status**: `published` (accepted 2026-10-25)
 
 **Decision Date**: 2026-10-21
 **Deciders**: Byron Williams

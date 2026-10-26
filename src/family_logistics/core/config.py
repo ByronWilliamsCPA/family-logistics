@@ -396,7 +396,8 @@ class Settings(BaseSettings):
         change_scan_minutes: Interval of the incremental change scan.
         notification_mode: ``shadow`` (default) is the safe mode: the Sunday
             report goes to Morgan only. ``production`` is a deliberate operator
-            decision taken jointly after the two-week shadow period. Recipient
+            decision taken jointly after the M3 shadow gate
+            (docs/project/roadmap.md). Recipient
             routing is configured in Apprise; today ``serve`` and ``config``
             are the only readers of this value.
         quiet_hours_start: Start of quiet hours (local time).
@@ -498,8 +499,8 @@ class Settings(BaseSettings):
     change_scan_minutes: int = Field(default=60, ge=5)
 
     # #CRITICAL: Safety: shadow mode is the default. Switching to production is
-    # a process decision (both parents, after the two-week shadow period); the
-    # code does not enforce that approval.
+    # a process decision (both parents, after the M3 shadow gate in
+    # docs/project/roadmap.md); the code does not enforce that approval.
     # #VERIFY: tests/unit/test_config_validation.py::TestDefaults asserts the
     # default is shadow; review the mode change in the deployment repository.
     notification_mode: Literal["shadow", "production"] = "shadow"

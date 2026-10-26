@@ -130,11 +130,11 @@ If a newer ADR replaces an existing one:
 
 | ADR | Title | Status | Date |
 |-----|-------|--------|------|
-| [0001](0001-deterministic-authority-and-llm-boundary.md) | Deterministic Engine Is the Sole Validation Authority | Proposed | 2026-10-21 |
+| [0001](0001-deterministic-authority-and-llm-boundary.md) | Deterministic Engine Is the Sole Validation Authority | Published (accepted 2026-10-25) | 2026-10-21 |
 | [0002](0002-event-contract-and-confirmation-code.md) | iCloud Event Contract v1 and Confirmation-Code Revisions | Proposed (needs owner approval) | 2026-10-21 |
-| [0003](0003-read-only-caldav-ingestion.md) | Read-Only CalDAV Ingestion with Occurrence Identity | Proposed | 2026-10-21 |
-| [0004](0004-passenger-level-commitments.md) | Passenger-Level Commitments and Change-Impact Analysis | Proposed | 2026-10-21 |
-| [0005](0005-sqlite-wal-single-writer.md) | SQLite WAL, Single Writer, Repository Interfaces | Proposed | 2026-10-21 |
+| [0003](0003-read-only-caldav-ingestion.md) | Read-Only CalDAV Ingestion with Occurrence Identity | Published (accepted 2026-10-25) | 2026-10-21 |
+| [0004](0004-passenger-level-commitments.md) | Passenger-Level Commitments and Change-Impact Analysis | Published (accepted 2026-10-25) | 2026-10-21 |
+| [0005](0005-sqlite-wal-single-writer.md) | SQLite WAL, Single Writer, Repository Interfaces | Published (accepted 2026-10-25) | 2026-10-21 |
 | [0006](0006-route-provider-abstraction.md) | Route Provider Abstraction and Constrained Stop Ordering | Proposed | 2026-10-21 |
 | [0007](0007-ha-initiated-data-exchange.md) | Home Assistant Initiates Every Exchange | Proposed | 2026-10-21 |
 

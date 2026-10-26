@@ -5,14 +5,15 @@ carries the bearer-token dependency at router level, so a route added to it
 cannot forget authentication. Failed attempts are throttled per client address
 and every authentication failure returns the same 401.
 
-``POST /api/v1/ingest/ha-snapshot`` (the school snapshot, ADR 0007) is the
-first business route. Once the body is read, its errors are built by hand
-(``_error``) rather than raised as ``HTTPException``, so no body can echo the
-rejected input: the snapshot is children's school data. Later milestones add
-the others to this router: M3 adds the route relay, GET /api/v1/route-requests and POST /api/v1/route-results
-(ADR 0006); M4 adds GET /api/v1/status, POST /api/v1/assessments and
-GET /api/v1/assessments/{run_id}. They inherit the dependency and must not be
-registered on any other router.
+``POST /api/v1/ingest/ha-snapshot`` (the school snapshot, ADR 0007; M3,
+merged in #29) is the first business route. Once the body is read, its errors
+are built by hand (``_error``) rather than raised as ``HTTPException``, so no
+body can echo the rejected input: the snapshot is children's school data. The
+route relay, GET /api/v1/route-requests and POST /api/v1/route-results
+(ADR 0006; M3, merged in #32), is defined in ``api/route_relay.py`` and
+registered on this router by ``create_app``. M4 adds GET /api/v1/status,
+POST /api/v1/assessments and GET /api/v1/assessments/{run_id}. Every route
+inherits the dependency and must not be registered on any other router.
 """
 
 from __future__ import annotations

@@ -98,8 +98,10 @@ plain text.
 
 1. Generate a key: `python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`.
 2. Stop the container and take a backup (see below).
-3. Re-encrypt stored addresses with the old and new keys (a re-key command is
-   planned with the registry in M1; until then no addresses are stored).
+3. Re-encrypt stored addresses with the old and new keys. The registry stores
+   Fernet-encrypted addresses; the re-key command is not yet delivered and is
+   tracked as an open carry-over in
+   [the roadmap](project/roadmap.md).
 4. Set the new key and start the container.
 
 Keep the previous key until a restore test with the new key succeeds.

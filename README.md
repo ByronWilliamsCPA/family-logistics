@@ -17,14 +17,25 @@ stranded, including children from other families who share a carpool. Results
 feed a Home Assistant status card and Apprise notifications. A local LLM may
 later explain findings, but it never decides them.
 
-**Status: M0 (discovery).** The domain core (notes parser, confirmation codes,
-passenger-level change impact, run status) is implemented and tested, as is the
-platform around it: Alembic schema migrations, a hash-only audit log, a minimal
-Apprise API client, and `serve` startup checks that refuse to start on missing
-secrets or an out-of-date schema. Collection, scheduling, notifications and the
-Home Assistant API arrive in milestones M1 to M5. Production notifications stay off
-(`FL_NOTIFICATION_MODE=shadow`) until the household approves the defaults and a
-two-week shadow period completes.
+**Status: between M2 and M3.** The read-only CalDAV collector (the M1
+ingestion half), the M2 rule engine and the assessment orchestrator are merged
+and tested, as is the platform around them: Alembic schema migrations, a
+hash-only audit log, a minimal Apprise API client, and `serve` startup checks
+that refuse to start on missing secrets or an out-of-date schema. M3 has
+started: the Home Assistant school snapshot ingest
+(`POST /api/v1/ingest/ha-snapshot`) and the first two of three routing parts
+(the null and `ha_relay` route providers with their factory, the route cache
+and the Home Assistant relay routes `GET /api/v1/route-requests` and
+`POST /api/v1/route-results`) are merged. `collect --once` and those three Home
+Assistant routes are the only wired production paths; no CLI command, API route
+or scheduler runs an assessment yet, and no service calls the route provider
+factory. Provider wiring, `google_routes`, notifications and the scheduler
+complete M3,
+and the Home Assistant UI arrives in M4; see the
+[roadmap](docs/project/roadmap.md). Production notifications stay off
+(`FL_NOTIFICATION_MODE=shadow`) until the household approves the defaults and
+the M3 shadow gate is met: 7 consecutive days in shadow mode with zero
+false-clear runs.
 
 Key rules:
 
@@ -111,7 +122,7 @@ private deployment repository.
 ```text
 src/family_logistics/
 ├── adapters/      # caldav (read-only transport), routing, apprise, home_assistant, llama_cpp
-├── api/           # FastAPI app, /healthz, Home Assistant routes (M3)
+├── api/           # FastAPI app, /healthz, Home Assistant routes (snapshot ingest, route relay; M4 adds the rest)
 ├── core/          # settings, crypto (address encryption), database, exceptions
 ├── db/            # table definitions, Alembic migrations, audit log repository
 ├── domain/        # models, notes parser, confirmation, change impact, rules, run status
