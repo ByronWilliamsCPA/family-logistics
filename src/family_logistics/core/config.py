@@ -20,11 +20,12 @@ from __future__ import annotations
 
 import base64
 import ipaddress
+import json
 import re
 from datetime import time
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Literal, Self, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -43,7 +44,6 @@ from pydantic_settings import (
     BaseSettings,
     NoDecode,
     SettingsConfigDict,
-    SettingsError,
 )
 
 from family_logistics.core.exceptions import ConfigurationError
@@ -164,6 +164,30 @@ MAX_SCHOOL_CALENDARS = 8
 
 CalendarEntityId = Annotated[str, StringConstraints(pattern=HA_CALENDAR_ENTITY_PATTERN)]
 RegistryId = Annotated[str, StringConstraints(pattern=REGISTRY_ID_PATTERN)]
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Build a JSON object, refusing a key that appears twice.
+
+    ``json.loads`` keeps only the last of two equal keys, which would silently
+    drop an earlier ``person_ids`` list from ``FL_HA_SCHOOLS``.
+
+    Args:
+        pairs: The key and value pairs of one JSON object, in document order.
+
+    Returns:
+        The object as a dict.
+
+    Raises:
+        ValueError: If a key repeats. The message never echoes the key.
+    """
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            msg = "FL_HA_SCHOOLS repeats a key within one JSON object"
+            raise ValueError(msg)
+        result[key] = value
+    return result
 
 
 class HaSchool(BaseModel):
@@ -434,7 +458,9 @@ class Settings(BaseSettings):
     source_max_staleness_minutes: int = Field(default=120, ge=15)
 
     ha_token: SecretStr | None = None
-    ha_schools: tuple[HaSchool, ...] = Field(default=(), max_length=MAX_HA_SCHOOLS)
+    ha_schools: Annotated[tuple[HaSchool, ...], NoDecode] = Field(
+        default=(), max_length=MAX_HA_SCHOOLS
+    )
 
     apprise_url: str | None = None
     # The saved Apprise configuration the app posts to (``/notify/{KEY}``).
@@ -670,17 +696,61 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return self
 
+    @field_validator("ha_schools", mode="before")
+    @classmethod
+    def _parse_ha_schools_json(cls, value: object) -> object:
+        """Parse the JSON text of ``FL_HA_SCHOOLS``, refusing repeated keys.
+
+        The field is ``NoDecode``, so the raw text arrives here instead of
+        being decoded by pydantic-settings (which keeps the last of two equal
+        keys and words its errors in a way that can quote the text).
+
+        Args:
+            value: Raw value from the environment or a constructor argument.
+
+        Returns:
+            The decoded list for string input (an empty one for blank text);
+            other values unchanged for validation.
+
+        Raises:
+            ValueError: If the text is not JSON or repeats an object key. The
+                message never echoes the text, and the decoder error is not
+                chained because it can quote it.
+        """
+        if not isinstance(value, str):
+            return value
+        if not value.strip():
+            return ()
+        # #CRITICAL: Security: the text can hold household calendar entity IDs
+        # and child identifiers, so no error built here may quote it.
+        # #VERIFY: tests/unit/test_config_ha_schools.py asserts that a malformed
+        # value and a repeated key are rejected without echoing the text.
+        try:
+            decoded = cast(
+                "object",
+                json.loads(value, object_pairs_hook=_reject_duplicate_json_keys),
+            )
+        except json.JSONDecodeError:
+            msg = "FL_HA_SCHOOLS value is not valid JSON"
+            raise ValueError(msg) from None
+        return decoded
+
     @model_validator(mode="after")
     def _ha_schools_are_distinct(self) -> Self:
-        """Require one entry per school and one school per person.
+        """Require one entry per school, one school per person, own bells.
+
+        A district calendar may serve several schools; a bell calendar (the
+        only source of start and end times) belongs to one school and cannot
+        double as another school's district calendar.
 
         Returns:
             The validated settings.
 
         Raises:
-            ValueError: If two entries name the same location, or one person
-                is listed under two schools (a person has one school day per
-                date). The message never echoes a value.
+            ValueError: If two entries name the same location, one person is
+                listed under two schools (a person has one school day per
+                date), or a bell calendar is shared with another school. The
+                message never echoes a value.
         """
         locations = [school.location_id for school in self.ha_schools]
         if len(set(locations)) != len(locations):
@@ -689,6 +759,13 @@ class Settings(BaseSettings):
         people = [pid for school in self.ha_schools for pid in school.person_ids]
         if len(set(people)) != len(people):
             msg = "FL_HA_SCHOOLS lists one person under two schools"
+            raise ValueError(msg)
+        bells = [cal for school in self.ha_schools for cal in school.bell_calendars]
+        districts = {
+            cal for school in self.ha_schools for cal in school.district_calendars
+        }
+        if len(set(bells)) != len(bells) or not districts.isdisjoint(bells):
+            msg = "FL_HA_SCHOOLS shares a bell calendar between two schools"
             raise ValueError(msg)
         return self
 
@@ -894,13 +971,6 @@ def load_settings() -> Settings:
             f"FL_{'_'.join(str(part) for part in error['loc']).upper()}: {error['msg']}"
             for error in exc.errors(include_input=False, include_url=False)
         ]
-    except SettingsError as exc:
-        # A JSON-valued setting (FL_HA_SCHOOLS) that is not JSON. The message
-        # names the field; the decoder error, which can quote the text, is
-        # neither kept nor chained.
-        field = re.search(r'field "([a-z_]+)"', str(exc))
-        name = field.group(1).upper() if field else "SETTINGS"
-        problems = [f"FL_{name}: value is not valid JSON"]
     # Raised outside the handler so the pydantic error, which carries the
     # rejected input, is neither the cause nor the context of this one.
     msg = "Invalid configuration: " + "; ".join(problems)
