@@ -32,7 +32,7 @@ from __future__ import annotations
 import enum
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 from alembic import command
 from alembic.config import Config
@@ -192,20 +192,20 @@ def ahead_message(current: str | None) -> str:
     )
 
 
-def _lock_refused(_exc: OperationalError) -> MigrationLockError:
+def _lock_refused(exc: OperationalError) -> NoReturn:
     """Describe a refused migration lock for the operator.
 
     Args:
-        _exc: The driver error from ``BEGIN IMMEDIATE``, not needed.
+        exc: The driver error from ``BEGIN IMMEDIATE``.
 
-    Returns:
-        The error to raise in its place.
+    Raises:
+        MigrationLockError: Always, chained to ``exc``.
     """
     msg = (
         "database is locked by another process (another instance "
         "may be migrating); schema unchanged"
     )
-    return MigrationLockError(msg, operation="migrate")
+    raise MigrationLockError(msg, operation="migrate") from exc
 
 
 @contextmanager

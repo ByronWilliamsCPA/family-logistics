@@ -235,21 +235,24 @@ def content_hash(days: Iterable[SchoolDay], fetched_at: datetime) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _snapshot_busy(exc: OperationalError) -> SchoolSnapshotBusyError | None:
+def _snapshot_busy(exc: OperationalError) -> None:
     """Translate lock contention into the busy error; ignore other faults.
 
     Args:
         exc: The driver error from ``BEGIN IMMEDIATE``.
 
-    Returns:
-        The busy error for SQLITE_BUSY or SQLITE_LOCKED, else None so that
-        any other fault (read-only database, disk I/O error) is re-raised
-        unchanged and never reported as busy.
+    Raises:
+        SchoolSnapshotBusyError: For SQLITE_BUSY or SQLITE_LOCKED, chained to
+            ``exc``. Any other fault (read-only database, disk I/O error)
+            returns normally, so the caller re-raises it unchanged and it is
+            never reported as busy.
     """
     if not is_lock_contention(exc.orig):
-        return None
+        return
     msg = "the database is locked by another writer; nothing stored"
-    return SchoolSnapshotBusyError(msg, operation="replace", error_code="SNAPSHOT_BUSY")
+    raise SchoolSnapshotBusyError(
+        msg, operation="replace", error_code="SNAPSHOT_BUSY"
+    ) from exc
 
 
 @contextmanager

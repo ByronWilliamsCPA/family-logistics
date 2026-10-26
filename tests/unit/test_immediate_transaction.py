@@ -156,8 +156,9 @@ def test_a_failed_begin_without_a_translator_propagates_unchanged(engine):
 
 
 def test_a_translator_replaces_the_begin_error(engine):
-    def to_runtime(_exc: OperationalError) -> BaseException:
-        return RuntimeError("translated")
+    def to_runtime(exc: OperationalError) -> None:
+        msg = "translated"
+        raise RuntimeError(msg) from exc
 
     def contend() -> None:
         with immediate_transaction(engine, on_begin_error=to_runtime):
@@ -171,9 +172,11 @@ def test_a_translator_replaces_the_begin_error(engine):
     assert isinstance(info.value.__cause__, OperationalError)
 
 
-def test_a_translator_returning_none_reraises_the_original(engine):
-    def keep(_exc: OperationalError) -> None:
-        return None
+def test_a_translator_that_returns_reraises_the_original(engine):
+    calls: list[OperationalError] = []
+
+    def keep(exc: OperationalError) -> None:
+        calls.append(exc)
 
     def contend() -> None:
         with immediate_transaction(engine, on_begin_error=keep):
@@ -181,9 +184,10 @@ def test_a_translator_returning_none_reraises_the_original(engine):
 
     with (
         fail_begin_immediate(engine, sqlite3.SQLITE_READONLY),
-        pytest.raises(OperationalError),
+        pytest.raises(OperationalError) as info,
     ):
         contend()
+    assert calls == [info.value]
 
 
 def test_the_translator_is_not_consulted_for_body_errors(engine):

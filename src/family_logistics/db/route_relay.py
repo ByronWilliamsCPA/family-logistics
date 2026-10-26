@@ -513,23 +513,23 @@ def is_lock_contention(error: OperationalError) -> bool:
     )
 
 
-def _relay_busy(exc: OperationalError) -> RouteRelayBusyError | None:
+def _relay_busy(exc: OperationalError) -> None:
     """Translate lock contention into the busy error; ignore other faults.
 
     Args:
         exc: The driver error from ``BEGIN IMMEDIATE``.
 
-    Returns:
-        The busy error for lock contention, else None so that any other
-        operational error is re-raised unchanged (a store error, not a
-        retryable busy state).
+    Raises:
+        RouteRelayBusyError: For lock contention, chained to ``exc``. Any other
+            operational error returns normally, so the caller re-raises it
+            unchanged (a store error, not a retryable busy state).
     """
     if not is_lock_contention(exc):
-        return None
+        return
     msg = "the database is locked by another writer; nothing stored"
-    return RouteRelayBusyError(
+    raise RouteRelayBusyError(
         msg, operation="route_relay", error_code="ROUTE_RELAY_BUSY"
-    )
+    ) from exc
 
 
 @contextmanager

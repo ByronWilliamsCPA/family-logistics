@@ -165,26 +165,27 @@ class _ClaimContext:
     policy: NotificationPolicy
 
 
-def _store_busy(exc: OperationalError) -> NotificationStateBusyError | None:
+def _store_busy(exc: OperationalError) -> None:
     """Translate lock contention into the busy error; ignore other faults.
 
     Args:
         exc: The driver error from ``BEGIN IMMEDIATE``.
 
-    Returns:
-        The busy error for SQLITE_BUSY or SQLITE_LOCKED, else None so that any
-        other fault (read-only database, disk I/O error) is re-raised
-        unchanged and never retried.
+    Raises:
+        NotificationStateBusyError: For SQLITE_BUSY or SQLITE_LOCKED, chained
+            to ``exc``. Any other fault (read-only database, disk I/O error)
+            returns normally, so the caller re-raises it unchanged and it is
+            never retried.
     """
     if not is_lock_contention(exc.orig):
-        return None
+        return
     msg = "the database is locked by another writer; notification state not written"
-    return NotificationStateBusyError(
+    raise NotificationStateBusyError(
         msg,
         operation="notification_state",
         table="notification_state",
         error_code="NOTIFICATION_STATE_BUSY",
-    )
+    ) from exc
 
 
 def _require_aware(name: str, value: datetime) -> None:

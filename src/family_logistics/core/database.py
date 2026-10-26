@@ -80,7 +80,7 @@ def immediate_transaction(
     engine: Engine,
     *,
     lock_timeout_ms: int = BUSY_TIMEOUT_MS,
-    on_begin_error: Callable[[OperationalError], BaseException | None] | None = None,
+    on_begin_error: Callable[[OperationalError], None] | None = None,
 ) -> Generator[Connection]:
     """Yield a connection inside ``BEGIN IMMEDIATE``; commit on success.
 
@@ -95,20 +95,18 @@ def immediate_transaction(
     Args:
         engine: The application engine.
         lock_timeout_ms: How long to wait for the write lock.
-        on_begin_error: Optional translator, consulted only when ``BEGIN
+        on_begin_error: Optional translator, called only when ``BEGIN
             IMMEDIATE`` itself fails (never for an error in the caller's
-            block). It returns the exception to raise in place of the driver
-            error (chained to it), or ``None`` to re-raise the driver error
-            unchanged.
+            block). It may raise a replacement error (chained to the driver
+            error with ``from``); if it returns, the driver error is
+            re-raised unchanged.
 
     Yields:
         Connection: A connection holding the database's write lock.
 
     Raises:
         OperationalError: If the lock is not granted in time or ``BEGIN``
-            fails and ``on_begin_error`` is absent or returns ``None``.
-        translated: The exception ``on_begin_error`` returned, in place of the
-            driver error (pydoclint reads the raised variable's name).
+            fails and ``on_begin_error`` is absent or returns without raising.
     """
     # #CRITICAL: Concurrency: every read-then-write sequence that must not
     # interleave with another writer (a claim, a replace, a migration) runs in
@@ -120,10 +118,9 @@ def immediate_transaction(
             try:
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
             except OperationalError as exc:
-                translated = None if on_begin_error is None else on_begin_error(exc)
-                if translated is None:
-                    raise
-                raise translated from exc
+                if on_begin_error is not None:
+                    on_begin_error(exc)
+                raise
             committed = False
             try:
                 yield connection
