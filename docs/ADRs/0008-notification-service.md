@@ -8,18 +8,18 @@ tags:
   - adr
   - privacy
   - security
-status: draft
+status: published
 owner: core-maintainer
 component: Strategy
 source: "Notification survey of 2026-10-26 (conflicts C1 to C3); independent review F1 to F14; privacy spec; runbook"
 purpose: "Fix the M3 notification service design precisely enough to implement and test it."
 ---
 
-> **Status**: `proposed`, revision 2. The owner delegated the design decisions below; each value that needs the
-> owner's approval before `FL_NOTIFICATION_MODE=production` is marked `#ASSUME` and collected in
-> [Owner-pending defaults](#owner-pending-defaults). Revision 2 answers an independent review (findings F1 to F14,
-> nits N1 to N9); the finding numbers are cited where a decision changed. The front matter reads `draft` because the
-> front-matter validator accepts only `draft`, `in-review` and `published` (see ADR 0006).
+> **Status**: `accepted` 2026-10-26, revision 2. The owner delegated the design decisions below and accepted the ADR;
+> the values that still need the owner's approval before `FL_NOTIFICATION_MODE=production` are marked `#ASSUME` and
+> collected in [Owner-pending defaults](#owner-pending-defaults). Revision 2 answers an independent review (findings
+> F1 to F14, nits N1 to N9); the finding numbers are cited where a decision changed. The front matter reads
+> `published` to match the other accepted ADRs (see ADR 0006 for the validator's allowed values).
 
 **Decision Date**: 2026-10-26
 **Deciders**: Byron Williams (owner, delegated); Riley (co-approver for family-facing behaviour, ADR 0001)

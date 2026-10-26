@@ -137,7 +137,7 @@ If a newer ADR replaces an existing one:
 | [0005](0005-sqlite-wal-single-writer.md) | SQLite WAL, Single Writer, Repository Interfaces | Published (accepted 2026-10-25) | 2026-10-21 |
 | [0006](0006-route-provider-abstraction.md) | Route Provider Abstraction and Constrained Stop Ordering | Proposed | 2026-10-21 |
 | [0007](0007-ha-initiated-data-exchange.md) | Home Assistant Initiates Every Exchange | Proposed | 2026-10-21 |
-| [0008](0008-notification-service.md) | Notification Service and Push Routing | Proposed | 2026-10-26 |
+| [0008](0008-notification-service.md) | Notification Service and Push Routing | Published (accepted 2026-10-26) | 2026-10-26 |
 
 Infrastructure decisions (placement, ingress, secrets, network controls) are
 recorded in the private deployment repository.
