@@ -6,10 +6,10 @@ cannot forget authentication. Failed attempts are throttled per client address
 and every authentication failure returns the same 401.
 
 ``POST /api/v1/ingest/ha-snapshot`` (the school snapshot, ADR 0007) is the
-first business route. Later milestones (M2 and M4) add the others to this
-router: GET /api/v1/status, POST /api/v1/assessments,
-GET /api/v1/assessments/{run_id}, GET /api/v1/route-requests and
-POST /api/v1/route-results. They inherit the dependency and must not be
+first business route. Later milestones add the others to this router: M3 adds
+the route relay, GET /api/v1/route-requests and POST /api/v1/route-results
+(ADR 0006); M4 adds GET /api/v1/status, POST /api/v1/assessments and
+GET /api/v1/assessments/{run_id}. They inherit the dependency and must not be
 registered on any other router.
 """
 
