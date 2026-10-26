@@ -104,10 +104,11 @@ def immediate_transaction(
     Yields:
         Connection: A connection holding the database's write lock.
 
-    Note:
-        If the lock is not granted in time or ``BEGIN`` fails, the driver's
-        ``OperationalError`` is raised unchanged, unless ``on_begin_error``
-        returns a replacement, which is raised instead.
+    Raises:
+        OperationalError: If the lock is not granted in time or ``BEGIN``
+            fails and ``on_begin_error`` is absent or returns ``None``.
+        translated: The exception ``on_begin_error`` returned, in place of the
+            driver error (pydoclint reads the raised variable's name).
     """
     # #CRITICAL: Concurrency: every read-then-write sequence that must not
     # interleave with another writer (a claim, a replace, a migration) runs in
