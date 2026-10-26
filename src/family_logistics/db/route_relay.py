@@ -544,10 +544,10 @@ def _write_locked(engine: Engine, lock_timeout_ms: int) -> Generator[Connection]
         Connection: A connection holding the database's write lock. Any
         exception rolls the whole transaction back.
 
-    Raises:
-        RouteRelayBusyError: The write lock was not granted in time.
-        OperationalError: Any other operational error, unchanged, so callers
-            report a store error rather than a retryable busy state.
+    Note:
+        A write lock that is not granted in time raises ``RouteRelayBusyError``.
+        Any other operational error propagates unchanged, so callers report a
+        store error rather than a retryable busy state.
     """
     with immediate_transaction(
         engine, lock_timeout_ms=lock_timeout_ms, on_begin_error=_relay_busy

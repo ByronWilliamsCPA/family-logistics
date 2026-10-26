@@ -264,12 +264,11 @@ def _write_locked(engine: Engine, lock_timeout_ms: int) -> Generator[Connection]
         Connection: A connection holding the database's write lock. Any
         exception rolls the whole transaction back.
 
-    Raises:
-        SchoolSnapshotBusyError: The write lock was not granted in time
-            (SQLITE_BUSY or SQLITE_LOCKED).
-        OperationalError: Any other database fault while taking the lock
-            (read-only database, disk I/O error); it is not retryable, so it
-            is never reported as busy.
+    Note:
+        A write lock that is not granted in time (SQLITE_BUSY or SQLITE_LOCKED)
+        raises ``SchoolSnapshotBusyError``. Any other database fault while
+        taking the lock (read-only database, disk I/O error) is not retryable
+        and propagates as the driver's ``OperationalError``, never as busy.
     """
     # #CRITICAL: Concurrency: a writer that holds the lock past the timeout
     # (a migration, a long scheduler run) must not turn into a 500; the

@@ -220,8 +220,8 @@ def _locked_transaction(engine: Engine) -> Generator[Connection]:
     Yields:
         Connection: A connection holding the database's write lock.
 
-    Raises:
-        MigrationLockError: If the write lock is not granted in time.
+    Note:
+        A write lock that is not granted in time raises ``MigrationLockError``.
     """
     with immediate_transaction(
         engine,

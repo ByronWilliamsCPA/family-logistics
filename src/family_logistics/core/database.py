@@ -102,11 +102,12 @@ def immediate_transaction(
             unchanged.
 
     Yields:
-        A connection holding the database's write lock.
+        Connection: A connection holding the database's write lock.
 
-    Raises:
-        OperationalError: If the lock is not granted in time or ``BEGIN``
-            fails, and ``on_begin_error`` is absent or returns ``None``.
+    Note:
+        If the lock is not granted in time or ``BEGIN`` fails, the driver's
+        ``OperationalError`` is raised unchanged, unless ``on_begin_error``
+        returns a replacement, which is raised instead.
     """
     # #CRITICAL: Concurrency: every read-then-write sequence that must not
     # interleave with another writer (a claim, a replace, a migration) runs in

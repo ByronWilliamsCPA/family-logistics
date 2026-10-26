@@ -360,7 +360,9 @@ class NotificationStateRepository:
         Raises:
             NotificationStateBusyError: The database stayed busy through every
                 retry; nothing was written.
-            ValidationError: ``now`` or ``evaluated_at`` is naive.
+
+        Note:
+            A naive ``now`` or ``evaluated_at`` raises ``ValidationError``.
         """
         _require_aware("now", now)
         _require_aware("evaluated_at", evaluated_at)
@@ -599,9 +601,10 @@ class NotificationStateRepository:
             quiet: Whether the push was sent inside quiet hours (it then spent
                 the episode's bypass).
 
-        Raises:
-            NotificationStateBusyError: The write lock stayed held.
-            ValidationError: ``now`` is naive.
+        Note:
+            A write lock that stays held raises ``NotificationStateBusyError``
+            and a naive ``now`` raises ``ValidationError``; nothing is written
+            in either case.
         """
         _require_aware("now", now)
         with self._transaction() as connection:
@@ -657,8 +660,9 @@ class NotificationStateRepository:
             mode: ``shadow`` or ``production``.
             token: This dispatch's claim token.
 
-        Raises:
-            NotificationStateBusyError: The write lock stayed held.
+        Note:
+            A write lock that stays held raises ``NotificationStateBusyError``
+            and nothing is released.
         """
         with self._transaction() as connection:
             for push in pushes:
