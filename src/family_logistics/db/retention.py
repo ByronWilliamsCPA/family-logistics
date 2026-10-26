@@ -15,6 +15,10 @@ the last snapshot would stay forever, so days that ended more than
 location id) and ``route_request`` the queue behind them. Entries older than
 ``ROUTE_CACHE_RETENTION_DAYS`` and requests past their expiry are deleted
 (privacy spec, section 7).
+
+``notification_state`` holds what the notification service last delivered per
+subject (hashed keys, no personal data). Closed rows older than
+``NOTIFICATION_STATE_RETENTION_DAYS`` are deleted; open rows are never purged.
 """
 
 from __future__ import annotations
@@ -44,6 +48,13 @@ _NAIVE_NOW_MESSAGE = "now must be a timezone-aware datetime"
 # #VERIFY: owner approves the period; the scheduler (M3) must call
 # ``purge_expired_school_days`` with ``purge_raw_source_text``.
 SCHOOL_DAY_RETENTION_DAYS = 30
+
+# #ASSUME: Data integrity: proposed retention for closed notification state rows
+# (ADR 0008, N9; owner-pending). A closed row only feeds the 4 hour notice
+# cooldown, so 90 days is far beyond any use; it bounds table growth.
+# #VERIFY: owner approves the period; the scheduler (M3 PR 6) must call
+# ``purge_expired_notification_state`` with the other purges.
+NOTIFICATION_STATE_RETENTION_DAYS = 90
 
 ROUTE_CACHE_RETENTION_DAYS = CACHE_VALIDITY.days
 """Route cache entries are kept for the 28 days they can still be served."""
@@ -204,6 +215,43 @@ def purge_expired_route_requests(connection: Connection, *, now: datetime) -> in
         literal(now, UtcDateTime())
     )
     return connection.execute(delete(table).where(expired)).rowcount
+
+
+def purge_expired_notification_state(connection: Connection, *, now: datetime) -> int:
+    """Delete closed notification state rows not updated for 90 days.
+
+    A row goes only when ``is_open`` is false and ``updated_at`` is strictly more
+    than ``NOTIFICATION_STATE_RETENTION_DAYS`` days before ``now``; a row exactly
+    that old is kept. Open rows are never purged, however old, because deleting
+    one would make the next scan notify its still-open finding again. Nothing
+    else is touched: not the watermark, not the audit log. The caller owns the
+    transaction; a second call with the same ``now`` deletes nothing.
+
+    Args:
+        connection: An open connection, normally inside ``engine.begin()``.
+        now: The reference instant. It must be timezone-aware.
+
+    Returns:
+        The number of rows deleted.
+
+    Note:
+        A naive ``now`` raises ``ValidationError``; the message does not contain
+        the value.
+    """
+    # #CRITICAL: Data integrity: this is a data-deletion path. The predicate is
+    # narrow (closed AND strictly older than the cutoff), the cutoff is a bound
+    # parameter, and only ``notification_state`` is named. Widening it would
+    # drop open rows and re-notify children's pickups.
+    # #VERIFY: tests/unit/test_notification_state_retention.py pins the exact
+    # 90-day boundary, that open rows survive, and that no other table changes.
+    _require_aware(now)
+    cutoff = now - timedelta(days=NOTIFICATION_STATE_RETENTION_DAYS)
+    table = schema.notification_state
+    expired = func.julianday(table.c.updated_at) < func.julianday(
+        literal(cutoff, UtcDateTime())
+    )
+    statement = delete(table).where(table.c.is_open.is_(False), expired)
+    return connection.execute(statement).rowcount
 
 
 def _require_aware(now: datetime) -> None:
