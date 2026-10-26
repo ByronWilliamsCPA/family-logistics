@@ -134,16 +134,22 @@ Placeholders only: replace `fl.example.invalid`, the config entry id and the
 secret. Find the `google_travel_time` config entry id in Home Assistant (the
 integration page, or Developer tools).
 
+Use HTTPS only. The reverse proxy terminates TLS and forwards to Family
+Logistics on its listen port (8080 by default, `FL_PORT`), so the URLs below
+carry no port. Over plain HTTP the bearer token and any address in a request
+travel in cleartext. The proxy rule is the one described in
+[ADR 0007](../ADRs/0007-ha-initiated-data-exchange.md).
+
 ```yaml
 # configuration.yaml
 rest_command:
   fl_get_route_requests:
-    url: "http://fl.example.invalid:8000/api/v1/route-requests"
+    url: "https://fl.example.invalid/api/v1/route-requests"
     method: GET
     headers:
       Authorization: !secret fl_bearer
   fl_post_route_result:
-    url: "http://fl.example.invalid:8000/api/v1/route-results"
+    url: "https://fl.example.invalid/api/v1/route-results"
     method: POST
     headers:
       Authorization: !secret fl_bearer

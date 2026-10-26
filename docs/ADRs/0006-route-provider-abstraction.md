@@ -293,7 +293,7 @@ Assistant's time zone equals `FL_TIMEZONE`; (4) and (5) the `departure_time` obs
 Shadow mode (`FL_NOTIFICATION_MODE=shadow`) stays until the time zone, first-cycle and other-families items are done,
 not because of the `departure_time` behaviour.
 
-Because Home Assistant resolves a bare time to its next occurrence `GET /api/v1/route-requests` returns
+Because Home Assistant resolves a bare time to its next occurrence, `GET /api/v1/route-requests` returns
 only **due** requests. A request is due when its weekday equals the weekday of
 the next local occurrence of its bucket's start time at poll time and that
 occurrence is at least 30 minutes away (`SERVE_LEAD_TIME`), so Home Assistant's
