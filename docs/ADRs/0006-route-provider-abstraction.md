@@ -81,11 +81,14 @@ Unofficial Waze scraping and undocumented APIs are prohibited.
 1. **Endpoints: other families' homes need a zone.** Each leg endpoint the
    relay sends to Home Assistant is the location's `ha_zone_entity_id` when it
    has one. A location with no zone is sent as its decrypted address unless it
-   is another family's home: the home of a contact (Driver S), even when a
-   household member shares it, or the default pickup or drop-off of an external
-   passenger (Passenger E, Passenger R). Another family's home without a zone
-   never leaves the app: the endpoint is withheld, the leg is unknown
-   (ROUTE-010) and any ride that needs it is `incomplete`, never clear. The
+   is another family's home: the `home_location_id` of a contact (Driver S),
+   even when a household member shares it or the contact is inactive. An
+   external passenger's default pickup or drop-off is treated as a venue, so
+   Passenger E's or Passenger R's home is protected only when a contact from
+   that household is registered with it as home. Another family's home
+   without a zone never leaves the app: the endpoint is withheld, the leg is
+   unknown (ROUTE-010) and any ride that needs it is `incomplete`, never
+   clear. The
    household's own home and venues (a school, a music studio) may be sent as
    addresses. Only the two endpoints of a leg are sent, never names or ride
    purpose. The rule is the pure functions `is_other_family_home` and
@@ -101,7 +104,10 @@ Unofficial Waze scraping and undocumented APIs are prohibited.
    own address is the operator's to share, and a venue's address is not
    private to any family, so requiring zones for them would only add setup
    work. Ambiguous cases fail closed: a home shared with a contact is treated
-   as another family's. Withholding costs only an `incomplete` ride until the
+   as another family's. A passenger's defaults are not used, because a default
+   is as often a school or club as a home, and treating every default as a home
+   would withhold zone-less venues; registering the household's contact is the
+   explicit signal that a location is someone's home. Withholding costs only an `incomplete` ride until the
    operator adds a zone, and an incomplete run is never reported as clear.
 2. **Cache validity.** `ha_relay` results are cached by origin, destination,
    weekday and 15-minute time-of-day bucket (origin and destination are
@@ -120,10 +126,11 @@ Unofficial Waze scraping and undocumented APIs are prohibited.
    weekday bucket (privacy spec, section 7).
 
 ```text
-#CRITICAL: Security: another family's home address must never reach Home
-Assistant as plaintext; the family home and venue addresses may, and once there, Home Assistant may keep them in traces, the logbook,
-recorder history and backups, and its Waze action sends every endpoint (a zone
-as its coordinates) on to Waze.
+#CRITICAL: Security: another family's home address (a contact's home) must
+never reach Home Assistant as plaintext; the family home, venue and passenger
+default addresses may, and once there, Home Assistant may keep them in
+traces, the logbook, recorder history and backups, and its Waze action sends
+every endpoint (a zone as its coordinates) on to Waze.
 #VERIFY: The ha_relay provider calls `ha_relay_endpoint` for every endpoint.
 PR 2 adds a test that a zone-less other-family home never appears in a
 route-request payload and yields ROUTE-010, and that no address appears in

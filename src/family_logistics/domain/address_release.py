@@ -9,13 +9,10 @@ the leg's travel time is unknown, and the engine reports ROUTE-010 so the run
 is ``incomplete``, never clear. The household's own home and venues (a school,
 a music studio) may be sent as addresses.
 
-Other-family homes reuse the registry's existing ownership notions:
-
-- the home of any ``CONTACT`` person (an adult from another family, such as
-  Driver S), even when a household member lists the same home;
-- the default pickup and default drop-off location of any external passenger
-  (Passenger E, Passenger R), which is how the registry records where that
-  child's household is.
+Another family's home reuses the registry's existing ownership notion: the
+``home_location_id`` of any ``CONTACT`` person (an adult from another family,
+such as Driver S), even when a household member lists the same home. An
+external passenger's default pickup or drop-off is treated as a venue.
 """
 
 from __future__ import annotations
@@ -28,7 +25,7 @@ from family_logistics.domain.models import PersonRole
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    from family_logistics.domain.models import ExternalPassenger, Person
+    from family_logistics.domain.models import Person
 
 
 class HaRelayEndpoint(StrEnum):
@@ -42,40 +39,29 @@ class HaRelayEndpoint(StrEnum):
     """Send nothing; the leg is unknown and raises ROUTE-010."""
 
 
-def is_other_family_home(
-    location_id: str,
-    *,
-    people: Iterable[Person],
-    external_passengers: Iterable[ExternalPassenger],
-) -> bool:
+def is_other_family_home(location_id: str, people: Iterable[Person]) -> bool:
     """Return whether a location is another family's home.
 
-    Fails closed: a home shared with a contact, or any default pickup or
-    drop-off of an external passenger, counts as another family's home even
-    when a household member also uses it. Active flags are ignored, because an
-    inactive contact's or passenger's home is still another family's address.
+    Fails closed: a home shared with a contact counts as another family's home
+    even when a household member also lists it. Active flags are ignored,
+    because an inactive contact's home is still another family's address.
 
     Args:
         location_id: Registry location ID.
         people: Registered people (household members and contacts).
-        external_passengers: Registered children of other families.
 
     Returns:
-        True when a ``CONTACT`` person lists the location as home, or an
-        external passenger uses it as default pickup or drop-off.
+        True when any ``CONTACT`` person lists the location as home.
     """
-    # #EDGE: Security: an external passenger's default pickup or drop-off is
-    # usually that child's home, but can be a venue; treating it as a home
-    # withholds a zone-less venue (incomplete, not a leak).
-    # #VERIFY: if a real default is a venue, give that location a zone.
-    if any(
+    # #ASSUME: Security: an external passenger's home is protected only when
+    # someone from that household is registered as a CONTACT person with
+    # home_location_id set; a passenger's default pickup or drop-off alone is
+    # treated as a venue and may be sent to Home Assistant as an address.
+    # #VERIFY: when registering Passenger E or R, register a contact from that
+    # household with its home, or give the home a Home Assistant zone.
+    return any(
         p.role is PersonRole.CONTACT and p.home_location_id == location_id
         for p in people
-    ):
-        return True
-    return any(
-        location_id in (e.default_pickup_location_id, e.default_dropoff_location_id)
-        for e in external_passengers
     )
 
 

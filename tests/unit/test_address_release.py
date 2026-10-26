@@ -17,23 +17,12 @@ ALEX = Person("alex", "Alex", PersonRole.CHILD, home_location_id="loc-home")
 DRIVER_S = Person("driver-s", "Driver S", PersonRole.CONTACT, home_location_id="loc-s")
 PEOPLE = (MORGAN, ALEX, DRIVER_S)
 PASSENGER_E = ExternalPassenger(
-    "ext-e",
-    "E",
-    "household-e",
-    default_pickup_location_id="loc-e",
-    default_dropoff_location_id="loc-e",
-    alternate_destination_ids=("loc-school",),
+    "ext-e", "E", "household-e", default_pickup_location_id="loc-e"
 )
-PASSENGER_R = ExternalPassenger(
-    "ext-r", "R", "household-r", default_dropoff_location_id="loc-r"
-)
-EXTERNALS = (PASSENGER_E, PASSENGER_R)
 
 
 def endpoint_for(location_id: str, *, has_ha_zone: bool) -> HaRelayEndpoint:
-    other = is_other_family_home(
-        location_id, people=PEOPLE, external_passengers=EXTERNALS
-    )
+    other = is_other_family_home(location_id, PEOPLE)
     return ha_relay_endpoint(has_ha_zone=has_ha_zone, other_family_home=other)
 
 
@@ -44,12 +33,9 @@ def endpoint_for(location_id: str, *, has_ha_zone: bool) -> HaRelayEndpoint:
         ("loc-home", False, HaRelayEndpoint.ADDRESS),
         ("loc-school", False, HaRelayEndpoint.ADDRESS),
         ("loc-s", True, HaRelayEndpoint.ZONE),
-        ("loc-e", True, HaRelayEndpoint.ZONE),
         # Another family's zone-less home never leaves: fail closed (ROUTE-010).
         ("loc-s", False, HaRelayEndpoint.WITHHELD),
-        ("loc-e", False, HaRelayEndpoint.WITHHELD),
-        ("loc-r", False, HaRelayEndpoint.WITHHELD),
-        # Nobody's home and not a passenger default: a venue, so it may be sent.
+        # Nobody's home: a venue, so it may be sent.
         ("loc-unlisted", False, HaRelayEndpoint.ADDRESS),
     ],
     ids=[
@@ -57,10 +43,7 @@ def endpoint_for(location_id: str, *, has_ha_zone: bool) -> HaRelayEndpoint:
         "own-home+no-zone",
         "venue+no-zone",
         "contact-home+zone",
-        "passenger-home+zone",
         "contact-home+no-zone",
-        "passenger-home+no-zone",
-        "passenger-dropoff-only+no-zone",
         "unlisted+no-zone",
     ],
 )
@@ -70,13 +53,19 @@ def test_endpoint_policy(
     assert endpoint_for(location_id, has_ha_zone=has_ha_zone) is expected
 
 
+def test_passenger_default_without_zone_is_sent_as_address() -> None:
+    # Owner decision: a passenger's default pickup is a venue unless a contact
+    # from that household lists it as home.
+    pickup = PASSENGER_E.default_pickup_location_id
+    assert pickup is not None
+    assert endpoint_for(pickup, has_ha_zone=False) is HaRelayEndpoint.ADDRESS
+
+
 def test_home_shared_with_a_contact_is_withheld() -> None:
     shared = Person(
         "driver-s", "Driver S", PersonRole.CONTACT, home_location_id="loc-home"
     )
-    assert is_other_family_home(
-        "loc-home", people=(MORGAN, shared), external_passengers=()
-    )
+    assert is_other_family_home("loc-home", (MORGAN, shared))
     assert not may_send_address_to_home_assistant(
         has_ha_zone=False, other_family_home=True
     )
@@ -90,7 +79,7 @@ def test_inactive_contact_home_is_still_another_familys() -> None:
         active=False,
         home_location_id="loc-s",
     )
-    assert is_other_family_home("loc-s", people=(former,), external_passengers=())
+    assert is_other_family_home("loc-s", (former,))
 
 
 @pytest.mark.parametrize(

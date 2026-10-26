@@ -65,7 +65,7 @@ Legend: **Y** allowed, **M** allowed masked, **P** pseudonym only, **N** never.
 |------|-----------|----------|------|-------|---------|-----|-----|
 | Family child first name | Y | Y (ID preferred) | Y | Y | Y | Y | N (fictional examples only) |
 | External child first name | Y | N (ID only) | M (initial) | Y | M (initial) | P | P |
-| External household address | Y (protected, section 5; only where routing needs it) | N | N | N (named location only) | N (only the location's `ha_zone_entity_id`; with no zone the address is withheld and the leg is incomplete, ROUTE-010; section 5) | N | N |
+| External household address | Y (protected, section 5; only where routing needs it) | N | N | N (named location only) | N for a contact's home (only its `ha_zone_entity_id`; with no zone the address is withheld and the leg is incomplete, ROUTE-010); a home recorded only as a passenger's default pickup or drop-off is treated as a venue and may be sent (section 5) | N | N |
 | Family home address | Y | N | N | N (shown as "Home") | N ("Home"), except the `ha_relay` route-request fallback for a location with no `ha_zone_entity_id` (section 5) | N ("Home") | N |
 | Activity venue name | Y | Y | Y | Y | Y | Y | Y (public venues only) |
 | Ride times and driver | Y | Y | Y | Y | Y | Y | Fixtures only, synthetic |
@@ -116,13 +116,18 @@ carry children's schedules. Signal and SMS are future options only.
     an address;
   - another family's home with no zone is withheld: its address never leaves
     the app, the leg's travel time is unknown and any ride that needs it is
-    `incomplete` (ROUTE-010), never clear. Another family's home is the home of
-    any contact (Driver S), even one shared with a household member, or the
-    default pickup or drop-off of an external passenger (Passenger E,
-    Passenger R). Give the location a Home Assistant zone to have it estimated;
+    `incomplete` (ROUTE-010), never clear. Another family's home is the
+    `home_location_id` of any contact (Driver S), even one shared with a
+    household member or belonging to an inactive contact. Give the location a
+    Home Assistant zone to have it estimated;
   - any other location with no zone (the household's own home, a venue such as
-    a school or a music studio) is sent as its decrypted address. **This means
-    plaintext family-home and venue addresses can reach Home Assistant.**
+    a school or a music studio, or an external passenger's default pickup or
+    drop-off) is sent as its decrypted address. **This means plaintext
+    family-home and venue addresses can reach Home Assistant, and so can an
+    external passenger's home when it is recorded only as that child's
+    default.** To protect Passenger E's or Passenger R's home, register a
+    contact from that household with the home as its `home_location_id`, or
+    give the home a Home Assistant zone, before enabling `ha_relay`.
 - Once an endpoint reaches Home Assistant it is outside this app's encryption
   and retention: Home Assistant may keep it in automation traces, the logbook,
   recorder history and its backups, and Waze receives it to compute the route.
@@ -195,9 +200,11 @@ that it is deleted 180 days after the carpool ends or sooner on request. No
 data about them is shared outside the household's systems, with one exception:
 to estimate travel time, a routing service (Waze, through the household's Home
 Assistant, or Google Routes) receives the location of a pickup or drop-off
-place, never a name or the ride's purpose. Their home address is never sent to
-Home Assistant as text: it is sent only as a Home Assistant zone, and without a
-zone their rides are reported as incomplete rather than estimated.
+place, never a name or the ride's purpose. Before `ha_relay` is enabled, their
+home is registered as the home of a contact from their household or given a
+Home Assistant zone; it is then sent to Home Assistant only as a zone, and
+without a zone their rides are reported as incomplete rather than estimated.
+Other pickup and drop-off places (a school, a club) may be sent as addresses.
 
 If an external family asks what is held, or asks for removal:
 
