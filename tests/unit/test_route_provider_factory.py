@@ -58,35 +58,26 @@ class TestNullProvider:
     def test_name_is_recorded(self):
         assert NullRouteProvider().name == "null"
 
-    def test_satisfies_the_protocol(self):
+    def test_usable_through_the_protocol(self):
         provider: RouteProvider = NullRouteProvider()
-        assert provider.name
+        constraints = RouteConstraints(departure_time=NOW)
+        assert provider.estimate("P", "A", NOW, "driving") is None
+        result = provider.optimize("P", [Stop("a", "A")], None, constraints)
+        assert result.status is OrderStatus.INCOMPLETE
 
-    def test_a_manual_order_is_still_incomplete_without_travel_times(self):
+    def test_a_manual_order_is_incomplete_without_travel_times(self):
         # Even a manual order cannot be checked against deadlines without
-        # estimates, so it is INCOMPLETE rather than assumed to be fine.
+        # estimates, so it is INCOMPLETE rather than assumed to be fine. A
+        # populated static provider accepts the same order; the Null provider
+        # behaves exactly like a static provider that has no data.
         constraints = RouteConstraints(departure_time=NOW, fixed_order=("b", "a"))
         stops = [Stop("a", "A"), Stop("b", "B")]
         result = NullRouteProvider().optimize("P", stops, None, constraints)
         assert result.status is OrderStatus.INCOMPLETE
         assert result.order == ()
-
-    def test_unlike_a_populated_static_provider_it_never_returns_an_order(self):
-        constraints = RouteConstraints(departure_time=NOW, fixed_order=("b", "a"))
-        stops = [Stop("a", "A"), Stop("b", "B")]
+        assert result == StaticRouteProvider({}).optimize("P", stops, None, constraints)
         populated = StaticRouteProvider(MATRIX).optimize("P", stops, None, constraints)
         assert populated.order == ("b", "a")
-        assert (
-            NullRouteProvider().optimize("P", stops, None, constraints).status
-            is OrderStatus.INCOMPLETE
-        )
-
-    def test_manual_order_matches_a_static_provider_with_no_data(self):
-        constraints = RouteConstraints(departure_time=NOW, fixed_order=("b", "a"))
-        stops = [Stop("a", "A"), Stop("b", "B")]
-        assert NullRouteProvider().optimize(
-            "P", stops, None, constraints
-        ) == StaticRouteProvider({}).optimize("P", stops, None, constraints)
 
     def test_free_order_with_unknown_times_is_incomplete_never_guessed(self):
         constraints = RouteConstraints(departure_time=NOW)
@@ -150,14 +141,21 @@ class TestFactory:
         assert isinstance(provider, StaticRouteProvider)
         assert provider.estimate("P", "A", NOW, "driving") is None
 
-    @pytest.mark.parametrize("name", ["ha_relay", "google_routes"])
-    def test_a_table_is_ignored_for_other_providers(self, name):
-        # A static table must never turn a real provider into the static one.
-        try:
-            provider = build_route_provider(settings(name), static_matrix=MATRIX)
-        except RouteProviderNotImplementedError:
-            return
+    def test_a_table_does_not_turn_ha_relay_into_the_static_provider(self):
+        provider = build_route_provider(settings("ha_relay"), static_matrix=MATRIX)
+        assert isinstance(provider, NullRouteProvider)
         assert not isinstance(provider, StaticRouteProvider)
+        assert provider.estimate("P", "A", NOW, "driving") is None
+
+    def test_a_table_does_not_rescue_google_routes(self):
+        with pytest.raises(RouteProviderNotImplementedError):
+            build_route_provider(settings("google_routes"), static_matrix=MATRIX)
+
+    def test_an_unknown_provider_name_fails_closed(self):
+        unvalidated = Settings.model_construct(route_provider="bogus")
+        with pytest.raises(RouteProviderNotImplementedError) as caught:
+            build_route_provider(unvalidated)
+        assert caught.value.details["provider"] == "bogus"
 
     def test_factory_is_exported_from_the_package(self):
         assert set(routing.__all__) >= {
@@ -166,44 +164,44 @@ class TestFactory:
             "build_route_provider",
         }
 
-    def test_the_test_helper_still_builds_a_static_provider(self):
-        assert isinstance(routes(), StaticRouteProvider)
-
 
 def confirmed(t):
     return dataclasses.replace(t, confirm_code=confirmation_code(t))
 
 
+def ride(uid, start, end, *, pickup, destinations):
+    return confirmed(
+        trip(
+            notes(
+                pickup=pickup,
+                family="Sam",
+                destinations=destinations,
+                driver="Riley",
+                status="confirmed",
+            ),
+            uid=uid,
+            start=start,
+            end=end,
+        )
+    )
+
+
 class TestEngineFailsClosed:
     def test_a_run_on_the_null_provider_is_incomplete_with_route_010(self):
         lesson = activity("lesson", ("sam",), "studio", at(16), at(17))
-        to_lesson = confirmed(
-            trip(
-                notes(
-                    pickup="Home",
-                    family="Sam",
-                    destinations=(("Sam", "Music Studio"),),
-                    driver="Riley",
-                    status="confirmed",
-                ),
-                uid="to",
-                start=at(15, 30),
-                end=at(16),
-            )
+        to_lesson = ride(
+            "to",
+            at(15, 30),
+            at(16),
+            pickup="Home",
+            destinations=(("Sam", "Music Studio"),),
         )
-        from_lesson = confirmed(
-            trip(
-                notes(
-                    pickup="Music Studio",
-                    family="Sam",
-                    destinations=(("Sam", "HOME"),),
-                    driver="Riley",
-                    status="confirmed",
-                ),
-                uid="from",
-                start=at(17),
-                end=at(17, 30),
-            )
+        from_lesson = ride(
+            "from",
+            at(17),
+            at(17, 30),
+            pickup="Music Studio",
+            destinations=(("Sam", "HOME"),),
         )
         inp = assessment(activities=(lesson,), trips=(to_lesson, from_lesson))
 
@@ -214,4 +212,38 @@ class TestEngineFailsClosed:
         rule_ids = [t.finding.rule_id for t in result.findings]
         assert "ROUTE-010" in rule_ids
         assert result.run_status is RunStatus.INCOMPLETE
-        assert result.run_status is not RunStatus.CLEAR
+
+    def test_the_driver_path_with_the_null_provider_is_incomplete(self):
+        # Riley drops Sam at home at 16:30, then must reach the studio pickup
+        # at 16:50 with a 10 minute buffer. With a 5 minute drive that is
+        # judged normally; with no travel time at all the check cannot pass,
+        # so it is ROUTE-010 and never a pass.
+        dropoff = ride(
+            "drop",
+            at(16),
+            at(16, 30),
+            pickup="Music Studio",
+            destinations=(("Sam", "HOME"),),
+        )
+        pickup = ride(
+            "pick",
+            at(16, 50),
+            at(17, 20),
+            pickup="Music Studio",
+            destinations=(("Sam", "HOME"),),
+        )
+        inp = assessment(trips=(dropoff, pickup))
+
+        judged = assess(inp, routes(5), now=NOW)
+        assert not [t for t in judged.findings if t.finding.rule_id == "ROUTE-010"]
+        assert judged.run_status is RunStatus.CLEAR
+
+        slow = assess(inp, routes(30), now=NOW)
+        assert [t.finding.rule_id for t in slow.findings] == ["DRIVER-006"]
+
+        result = assess(inp, NullRouteProvider(), now=NOW)
+        route_gaps = [
+            t.finding for t in result.findings if t.finding.rule_id == "ROUTE-010"
+        ]
+        assert any("pickup" in f.message for f in route_gaps)
+        assert result.run_status is RunStatus.INCOMPLETE

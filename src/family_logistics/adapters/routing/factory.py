@@ -26,6 +26,9 @@ logger = get_logger(__name__)
 _ha_relay_warned = threading.Event()
 """Set once the ha_relay placeholder warning is logged in this process."""
 
+_warn_lock = threading.Lock()
+"""Guards the check-and-set of ``_ha_relay_warned``."""
+
 
 def build_route_provider(
     settings: Settings,
@@ -57,9 +60,14 @@ def build_route_provider(
             )
             raise RouteProviderNotImplementedError(msg, provider=name)
         return StaticRouteProvider(static_matrix)
-    # google_routes: refuse rather than fall back to another provider.
-    msg = f"FL_ROUTE_PROVIDER={name} is not implemented yet"
-    raise RouteProviderNotImplementedError(msg, provider=name)
+    if name == "google_routes":
+        # Refuse rather than fall back to another provider.
+        msg = f"FL_ROUTE_PROVIDER={name} is not implemented yet"
+        raise RouteProviderNotImplementedError(msg, provider=name)
+    # A name outside the Literal (a settings object built without validation)
+    # fails closed: no provider is guessed.
+    msg = f"FL_ROUTE_PROVIDER={name!r} is not a known route provider"
+    raise RouteProviderNotImplementedError(msg, provider=str(name))
 
 
 def _build_ha_relay() -> RouteProvider:
@@ -70,8 +78,10 @@ def _build_ha_relay() -> RouteProvider:
     # relay; until then the Null fallback must fail closed (ROUTE-010 and an
     # INCOMPLETE run, never a guessed duration), pinned by
     # tests/unit/test_route_provider_factory.py::TestEngineFailsClosed.
-    if not _ha_relay_warned.is_set():
+    with _warn_lock:
+        first = not _ha_relay_warned.is_set()
         _ha_relay_warned.set()
+    if first:
         logger.warning(
             "routing.ha_relay_not_implemented",
             provider="ha_relay",
