@@ -233,8 +233,9 @@ are empty is accepted.
 
 ## How days are classified
 
-Each event summary is case-folded, every character other than a letter or
-digit becomes a space, and the result is matched against whole phrases:
+Each event summary is normalized (Unicode NFKC), case-folded, and split into
+words at every character that is not a letter, digit or underscore. The words
+are matched against whole phrases:
 
 | Kind | Phrases |
 |------|---------|
@@ -252,6 +253,9 @@ So every ambiguous summary is unknown:
   school: a normal phrase that overlaps a closure phrase is ignored).
 - A summary naming two kinds is unknown, including a normal phrase beside a
   separate closure or short-day phrase ("Regular Day (no school Friday)").
+- Two matched phrases that share a word without one containing the other are
+  unknown: "No School Closed" reads "no school" and "school closed", and each
+  hides the other's context word.
 - A summary containing a context word outside the matched phrases is unknown,
   whatever it names. Context words mark negation, a period boundary or a
   subset of students:
@@ -266,16 +270,71 @@ So every ambiguous summary is unknown:
   "early" in "Early Release", "for" in "No School for Students". So "Winter
   Break Ends", "Early release cancelled", "No school for seniors" and "Snow
   Day Make-Up Day" are unknown.
+- A summary with **any** other word outside the matched phrases is unknown,
+  unless that word is neutral (next section). This is the default, not an
+  exception: a list of words that disqualify a title can never be complete
+  ("Tentative", "Grades 6-8", "Drill", "Field Trip"), so the app instead lists
+  the few words that may sit beside a phrase without changing its meaning.
 - Anything else is unknown. Plain "holiday" is not a closure ("Holiday
   Concert" is unknown), and a plain "bell schedule" (as in "Modified Bell
   Schedule") is not a normal day. An unrecognized event is never read as a
   normal day.
+
+### Neutral words
+
+Only these words may remain beside a matched phrase (`NEUTRAL_WORDS` in
+`adapters/home_assistant/school_days.py`), together with plain numbers,
+ordinals (`1st`, `22nd`) and clock times (`9am`, `1230pm`):
+
+| Group | Words |
+|-------|-------|
+| Filler | a, an, the, of, and, or, all, day, days, school, schools, student, students, district |
+| Weekdays | monday to sunday; mon, tue, tues, wed, weds, thu, thur, thurs, fri, sat, sun |
+| Months | january to december; jan, feb, mar, apr, may, jun, jul, aug, sep, sept, oct, nov, dec |
+| Clock-time fragments | am, pm, p, m, noon ("12:30 p.m." reads "12 30 p m") |
+| Holiday and break names | labor, columbus, indigenous, peoples, veterans, thanksgiving, christmas, new, year, years, eve, martin, luther, king, jr, dr, mlk, presidents, president, memorial, independence, juneteenth, easter, good, spring, winter, fall, summer, midwinter, mid |
+| Possessive fragment | s ("New Year's" reads "new year s") |
+
+So "No School - Labor Day", "Early Release 12:30 PM", "Winter Break Dec 22 -
+Jan 2" and "Late Start Monday" keep their kind, while "No School (Tentative)",
+"No School Tomorrow", "Emergency Closure Drill" and "Regular Day Weather
+Permitting" are unknown. "break" and "holiday" are deliberately not neutral:
+the phrase table already covers them where they name a closure, and outside a
+phrase they would let "Regular Day Holiday" read as a regular day. A letter
+outside ASCII stays inside its word, so a non-English or accented title is
+unknown rather than losing a letter and matching by accident.
+
+### The tradeoff, and tuning before the shadow period
+
+The neutral-word rule trades false closures for unknown days. Some titles a
+person would call plain are now unknown, for example:
+
+- "No School - Veterans Day (Observed)", "No School - Labor Day Holiday",
+  "No School - Christmas Break", "Holiday - No School";
+- "Winter Break Dec 22 through Jan 2", "Winter Break Begins", "Spring Break
+  Week";
+- "No School - Conferences", "No School - Teacher In-Service", "No School K-12",
+  "No School - Lunar New Year", "No School - Inclement Weather";
+- "Early Release - Conferences", "Early Release at 12:30", "Minimum Day
+  Schedule", "2 Hour Delay - Weather", "Regular Day Schedule".
+
+Each one only raises SCHOOL-009 for that day; none can hide a school day.
+Before the shadow period the owner runs the deployment's real calendars
+through `classify_summary` and reviews **both** word tables, `CONTEXT_WORDS`
+and `NEUTRAL_WORDS`, together with the phrase table: add the district's exact
+phrase to the phrase table, or a word to `NEUTRAL_WORDS` only when it cannot
+change which kind of day a title names. Never remove a context word to make a
+title classify. Both tables are pinned by equality tests, so every change is a
+reviewed diff.
 
 Then each school's events are clipped to the window and grouped by local day
 (`FL_TIMEZONE`). All-day events cover each date up to their exclusive end;
 timed events cover every local day they overlap, end exclusive, across
 daylight-saving changes. An event that reaches outside the window only
 contributes the days inside it, so a long break costs no more than the window.
+A closure sent as timed UTC midnight to UTC midnight covers two partial local
+days outside UTC, so both are unknown; only an all-day event, or a timed one
+from local midnight to local midnight, closes a whole day.
 
 | Events on the day | Kind | Times |
 |-------------------|------|-------|
