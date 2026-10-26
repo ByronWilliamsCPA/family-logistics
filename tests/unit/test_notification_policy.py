@@ -41,6 +41,7 @@ from family_logistics.domain.notification_policy import (
     plan,
     plan_unavailable,
     production_tag,
+    severity_rose,
     starts_new_episode,
 )
 from family_logistics.domain.notification_subjects import RideIndex, is_imminent
@@ -1211,3 +1212,31 @@ class TestIsEscalation:
     )
     def test_the_rule_grid(self, push_overrides, row_overrides, expected):
         assert is_escalation(push(**push_overrides), state(**row_overrides)) is expected
+
+
+class TestSeverityRose:
+    """The severity dimension alone, so a kind-only rise can be worded apart."""
+
+    @pytest.mark.parametrize(
+        ("push_overrides", "row_overrides", "expected"),
+        [
+            ({"severity": Severity.CRITICAL}, {}, True),
+            ({"severity": Severity.INCOMPLETE}, {}, True),
+            ({"severity": Severity.CRITICAL}, {"severity": Severity.CRITICAL}, False),
+            ({"kind": PushKind.URGENT}, {}, False),
+            ({"severity": Severity.CRITICAL}, {"delivered": False}, False),
+            ({"severity": None}, {"severity": Severity.WARNING}, False),
+            ({"severity": Severity.CRITICAL}, {"severity": None}, False),
+        ],
+        ids=[
+            "to-critical",
+            "to-incomplete",
+            "same",
+            "kind-only",
+            "undelivered-row",
+            "push-without-severity",
+            "row-without-severity",
+        ],
+    )
+    def test_the_severity_grid(self, push_overrides, row_overrides, expected):
+        assert severity_rose(push(**push_overrides), state(**row_overrides)) is expected

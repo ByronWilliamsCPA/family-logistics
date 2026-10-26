@@ -234,6 +234,7 @@ _ESCALATED_WORDS: Final = {
     Severity.INCOMPLETE: "now could not verify",
 }
 _ESCALATED_DEFAULT: Final = "escalated"
+_ESCALATED_KIND_ONLY: Final = "now imminent"
 _UNKNOWN_TAG: Final = "an unknown tag"
 _OPS_OTHER: Final = (
     "Ops: service needs attention",
@@ -418,6 +419,8 @@ def _safe_issue_id(issue_id: str | None) -> str | None:
 
 def _lifecycle_word(pushed: PlannedPush, severity: Severity | None) -> str | None:
     """Return the lifecycle word; an escalation replaces new, back again, still open."""
+    if pushed.escalated and pushed.kind_only_escalation:
+        return _ESCALATED_KIND_ONLY
     if pushed.escalated:
         return (
             _ESCALATED_WORDS.get(severity, _ESCALATED_DEFAULT)

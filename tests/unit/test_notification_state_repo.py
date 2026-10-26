@@ -30,6 +30,7 @@ from fl_notification_state import (
     push,
     put_row,
 )
+from fl_service import seed_registry
 from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
 
@@ -1136,6 +1137,19 @@ class TestEscalatedFlag:
         result = claim(repo, urgent)
         assert [d.push.escalated for d in result.decisions] == [True]
 
+    def test_a_severity_rise_is_not_kind_only(self, repo, engine):
+        put_row(engine, **delivered_row(severity="warning"))
+        urgent = push(kind=PushKind.URGENT, severity=Severity.CRITICAL)
+        result = claim(repo, urgent)
+        assert [d.push.kind_only_escalation for d in result.decisions] == [False]
+
+    def test_a_kind_only_rise_is_marked_kind_only(self, repo, engine):
+        put_row(engine, **delivered_row(severity="critical"))
+        urgent = push(kind=PushKind.URGENT, severity=Severity.CRITICAL)
+        result = claim(repo, urgent)
+        assert [d.push.escalated for d in result.decisions] == [True]
+        assert [d.push.kind_only_escalation for d in result.decisions] == [True]
+
     def test_a_first_notice_is_not_marked(self, repo):
         result = claim(repo, push())
         assert [d.push.escalated for d in result.decisions] == [False]
@@ -1169,8 +1183,6 @@ class TestWatermarkRunId:
 
 class TestLoadNameRows:
     def test_reads_only_the_name_columns(self, engine):
-        from fl_service import seed_registry
-
         seed_registry(engine)
         people, passengers = load_name_rows(engine)
         assert ("sam", "Sam", "child") in people

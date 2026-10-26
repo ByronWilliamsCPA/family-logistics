@@ -84,6 +84,7 @@ from family_logistics.domain.notification_policy import (
     StateView,
     decide,
     is_escalation,
+    severity_rose,
     starts_new_episode,
 )
 from family_logistics.utils.logging import get_logger
@@ -540,7 +541,11 @@ class NotificationStateRepository:
             if not new_episode and view is not None and is_escalation(effective, view):
                 # The stored row, not the plan, knows what was last delivered,
                 # so the claim is where "now critical" is learned (D4).
-                effective = replace(effective, escalated=True)
+                effective = replace(
+                    effective,
+                    escalated=True,
+                    kind_only_escalation=not severity_rose(effective, view),
+                )
             self._write_claim(connection, effective, row, ctx)
         elif (
             decision is Decision.QUIET_HOURS
