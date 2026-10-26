@@ -192,9 +192,12 @@ def _protected(engine, location_id):
 
 def test_a_new_address_for_a_location_without_one_counts_as_an_edit(engine, seeded):
     repo = seeded
-    assert current(engine, "home").address is not None
-    edit(engine, "studio", address=SensitiveStr("5 Moved Row, Exampleton"))
-    assert not served(repo, STUDIO_TO_XC)
+    # middle-school has neither a zone nor an address (NULL to a value).
+    middle_to_xc = Leg("middle-school", "xc", FRIDAY, 40)
+    answer(repo, middle_to_xc, 900)
+    assert current(engine, "middle-school").address is None
+    edit(engine, "middle-school", address=SensitiveStr("5 Moved Row, Exampleton"))
+    assert not served(repo, middle_to_xc)
     assert served(repo, HOME_TO_XC)
 
 

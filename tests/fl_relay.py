@@ -41,8 +41,10 @@ LOCATIONS = (
     Location("studio", "Music Studio", verified=True),
     Location("xc", "XC Practice", verified=True, ha_zone_entity_id="zone.field_a"),
 )
-"""``home`` and ``high-school`` have zones; ``studio`` and ``middle-school`` have
-neither a zone nor an address until a test adds one."""
+"""``home``, ``high-school`` and ``xc`` have zones; ``studio`` and ``middle-school``
+have none. ``make_engine`` then stores an address for ``home`` (alongside its
+zone) and for ``studio`` (its only endpoint), so ``middle-school`` is the one
+location with neither a zone nor an address."""
 
 
 def local(
