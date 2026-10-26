@@ -15,8 +15,9 @@ purpose: "Decouple feasibility checks from any single routing service and define
 ---
 
 > **Status**: `proposed`; the `ha_relay` provider is implemented (PR 2 of 3) but
-> stays in shadow mode until the unverified assumption below is checked on the
-> deployed Home Assistant. The $10/month app-enforced Google Routes cap with an
+> stays in shadow mode until the remaining deployment checklist items below are
+> done (the `departure_time` behaviour was observed on 2026-10-26 and is
+> re-checked after each Home Assistant upgrade). The $10/month app-enforced Google Routes cap with an
 > $8 warning was accepted by the planning team on 2026-10-21. The `ha_relay`
 > endpoint (other families' homes need a zone), validity and invalidation
 > decisions below were made by the owner on 2026-10-25.
@@ -236,45 +237,63 @@ days) or clear them. There is no admin command to clear them yet: change the
 location's zone id or verification state (which fires the trigger) or delete the
 location's rows from `route_cache` directly.
 
-### Unverified assumption and deployment checklist
+### Observed behaviour and deployment checklist
 
 ```text
 #ASSUME: External resources: Home Assistant resolves a bare time-of-day
 `departure_time` (for example `08:00:00`, no date) to the NEXT occurrence of
-that time, not to "now", and prices it with traffic for that time. Neither part
-is verified.
-#VERIFY: Before enabling notifications, the owner runs two checks, in order.
-Step 1 (is there a time signal at all): run the same request with
-`departure_time` `03:00:00` and again with `08:00:00` and compare `duration`
-with each other and with the static (traffic-unaware) duration. If the duration
-equals the static duration at every time, the integration returns no
-time-dependent signal and the whole weekday-and-bucket model carries none: do not
-use the results. Step 2 (next occurrence or now), only if step 1 shows a
-difference: run the same request in the evening and again before 08:00 the next
-morning. Matching durations mean next-occurrence. Different durations mean "now"
-is being priced and the cached weekday bucket would be mislabelled; do not leave
-shadow mode, and rework the request shape.
+that time, not to "now", and prices it with traffic for that time. Observed on
+HA Core 2026.10.x on 2026-10-26 and consistent with the integration source
+(`convert_time`, read from the dev branch, not the deployed tag); NOT guaranteed
+by Home Assistant's documentation, so re-check after every Home Assistant
+upgrade.
+#VERIFY: After each HA upgrade, run the same request with `departure_time`
+`08:00:00` and `15:00:00` back to back and confirm the two durations differ,
+then run `08:00:00` again after 08:00 has passed and confirm it still prices
+the 08:00 slot (not "now").
 
 #ASSUME: External resources: Home Assistant's configured time zone equals
 `FL_TIMEZONE`. The bucket start is sent as a bare local `HH:MM:SS` that Home
 Assistant reads in its own zone; if they differ, results are silently filed
-under the wrong bucket or weekday and the app cannot detect it.
+under the wrong bucket or weekday and the app cannot detect it. The integration
+source anchors the time to Home Assistant's own local time zone, which supports
+this requirement.
 #VERIFY: Home Assistant Settings, General, time zone equals `FL_TIMEZONE`.
 ```
 
-Matching evening and morning durations alone would also be produced by a
-traffic-unaware price, which is why step 1 comes first. None of this has been
-verified yet.
+**Dated note, 2026-10-26.** The two checks that this section originally listed
+as open (whether the duration depends on `departure_time` at all, and whether a
+bare time resolves to its next occurrence or to "now") were run by the owner on
+HA Core 2026.10.x:
 
-Deployment checklist items: **(1) confirm the duration changes with
-`departure_time` (03:00:00 against 08:00:00 against the static duration); (2)
-compare the same `google_travel_time` request in the evening and again before
-08:00, where matching durations mean next-occurrence; (3) confirm Home
-Assistant's time zone equals `FL_TIMEZONE`.** Until they are done, the relay's
-results are not treated as verified and `FL_NOTIFICATION_MODE` stays `shadow`.
-The same items are in the [route relay guide](../guides/ha-route-relay.md).
+- Three requests run back to back with `departure_time` `08:00:00`, none and
+  `15:00:00` returned three different durations, ordered `15:00:00` shortest
+  and `08:00:00` longest, the `15:00:00` one close to the static duration. The
+  field is honoured.
+- The same `08:00:00` request run three more times back to back, and again
+  hours later in the day, returned the same duration to within a few seconds,
+  and a request run after 08:00 priced the 08:00 slot, not "now". A past time
+  did not error.
+- The integration's source on its `dev` branch
+  (`homeassistant/components/google_travel_time/helpers.py`, `convert_time`)
+  parses the string with `dt_util.parse_time`, anchors it to the start of today
+  in Home Assistant's local time zone and adds one day when that moment is
+  earlier than now. A time exactly equal to now is not shifted, and a full
+  datetime is rejected ("Invalid time specified" on 2026.10.2). This was read
+  from `dev`, not from the deployed release tag.
 
-Because of the next-occurrence assumption `GET /api/v1/route-requests` returns
+The assumption is therefore supported by measurement and by source. It is still
+an observation about an external system, not a documented guarantee, so it is
+re-checked after each Home Assistant upgrade.
+
+Deployment checklist, as numbered in the [route relay guide](../guides/ha-route-relay.md): **(3) confirm Home
+Assistant's time zone equals `FL_TIMEZONE`; (4) and (5) the `departure_time` observations above, done for 2026.10.x;
+(6) standing: after each Home Assistant upgrade, run the 08:00 and 15:00 pair back to back and 08:00 again after
+08:00 has passed; (2) and (8) registering contacts or zones for other families' homes, and the first full cycle.**
+Shadow mode (`FL_NOTIFICATION_MODE=shadow`) stays until the time zone, first-cycle and other-families items are done,
+not because of the `departure_time` behaviour.
+
+Because Home Assistant resolves a bare time to its next occurrence `GET /api/v1/route-requests` returns
 only **due** requests. A request is due when its weekday equals the weekday of
 the next local occurrence of its bucket's start time at poll time and that
 occurrence is at least 30 minutes away (`SERVE_LEAD_TIME`), so Home Assistant's
@@ -411,8 +430,11 @@ Routing ships as three stacked PRs:
 - A cached result is a traffic observation for one weekday bucket, so legs not
   observed in the last 28 days stay unknown rather than borrowing another
   bucket's time.
-- Until the next-occurrence assumption is verified on the deployed Home
-  Assistant, the relay's estimates must not drive notifications.
+- The next-occurrence behaviour of a bare `departure_time` was observed on HA
+  Core 2026.10.x (2026-10-26) but is not documented by Home Assistant, so it is
+  re-checked after each Home Assistant upgrade; the relay's estimates stay out
+  of live notifications until the shadow period and the remaining checklist
+  items are done.
 - Address resolution must happen before routing; unverified locations raise
   DEST-004 or ROUTE-010.
 - Under `ha_relay`, every leg to or from another family's home with no Home

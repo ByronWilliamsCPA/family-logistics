@@ -31,18 +31,24 @@ nothing is stored, so a changed Home Assistant response shape fails visibly.
 #VERIFY: tests/unit/test_route_relay_api.py::TestPostRouteResults.
 
 #ASSUME: External resources: Home Assistant resolves a bare time-of-day
-``departure_time`` to its next occurrence. NOT verified, so GET serves only the
-requests whose weekday matches the next local occurrence and whose occurrence is
-at least ``SERVE_LEAD_TIME`` away (``due_requests``), and POST rejects a result
-whose request is no longer due (``not_due``).
-#VERIFY: docs/guides/ha-route-relay.md, deployment checklist (first that the
-integration returns a time-dependent duration at all, then the evening against
-pre-08:00 comparison).
+``departure_time`` to its next occurrence. Observed on HA Core 2026.10.x on
+2026-10-26 and consistent with the integration source (``convert_time``, read
+from the dev branch, not the deployed tag); NOT guaranteed by Home Assistant's
+documentation, so re-check after every Home Assistant upgrade. GET serves only
+the requests whose weekday matches the next local occurrence and whose
+occurrence is at least ``SERVE_LEAD_TIME`` away (``due_requests``), and POST
+rejects a result whose request is no longer due (``not_due``).
+#VERIFY: after each HA upgrade, run the same request with ``departure_time``
+08:00 and 15:00 back to back and confirm the two durations differ, then run
+08:00 again after 08:00 has passed and confirm it still prices the 08:00 slot
+(not "now"); docs/guides/ha-route-relay.md, deployment checklist.
 
 #ASSUME: External resources: Home Assistant's configured time zone equals
 ``FL_TIMEZONE``. ``departure_time`` is a bare local ``HH:MM:SS`` that Home
-Assistant reads in its own zone; if the zones differ, the result is silently
-filed under the wrong bucket or weekday and nothing here can detect it.
+Assistant reads in its own zone (the integration source, ``convert_time`` on the
+dev branch, anchors it to Home Assistant's local time zone); if the zones
+differ, the result is silently filed under the wrong bucket or weekday and
+nothing here can detect it.
 #VERIFY: docs/guides/ha-route-relay.md, deployment checklist (Settings, General,
 time zone equals ``FL_TIMEZONE``).
 """

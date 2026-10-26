@@ -24,16 +24,24 @@ incomplete); the app never guesses a duration. See
     so no request is queued and `GET /api/v1/route-requests` returns an empty
     list until the M3 wiring lands.
 
-!!! warning "Unverified assumptions"
+!!! warning "Observed behaviour, not a guarantee"
     `#ASSUME`: Home Assistant resolves a bare time-of-day `departure_time`
     (for example `08:00:00`) to the **next** occurrence of that time, not to
-    "now", and the price it returns depends on that time at all. Neither has
-    been verified.
+    "now", and the price it returns depends on that time. This was observed on
+    HA Core 2026.10.x on 2026-10-26 and is consistent with the integration
+    source (`convert_time`, read from the `dev` branch, not the deployed tag).
+    Home Assistant's documentation does not guarantee it, so it can change in
+    an upgrade.
     `#ASSUME`: Home Assistant's configured time zone equals `FL_TIMEZONE`,
     because `departure_time` is a bare local time that Home Assistant reads in
-    its own zone. If they differ, results are silently filed under the wrong
-    bucket or weekday.
-    `#VERIFY`: run the deployment checklist below before trusting any result.
+    its own zone. The integration source anchors the time to Home Assistant's
+    own local time zone, which supports this requirement. If the zones differ,
+    results are silently filed under the wrong bucket or weekday.
+    `#VERIFY`: after each Home Assistant upgrade, run the same request with
+    `departure_time` `08:00:00` and `15:00:00` back to back and confirm the two
+    durations differ, then run `08:00:00` again after 08:00 has passed and
+    confirm it still prices the 08:00 slot (not "now"). The deployment checklist
+    below lists the remaining one-time items.
 
 ## Endpoints
 
@@ -194,8 +202,8 @@ Notes:
 
 ## Deployment checklist
 
-None of the checks below has been done yet; until they pass, nothing here is
-verified.
+Items 1 to 3 are one-time setup. Items 4 and 5 record what was observed on HA Core 2026.10.x on 2026-10-26. That
+behaviour is not guaranteed by Home Assistant's documentation, so item 6 repeats the check after every upgrade.
 
 1. Set `FL_HA_TOKEN`, `FL_AUDIT_KEY` and, if any location has no zone,
    `FL_DATA_KEY`. Confirm both routes return 401 without the token.
@@ -207,23 +215,32 @@ verified.
    `ha_relay`.
 3. Confirm Home Assistant's time zone equals `FL_TIMEZONE` (Home Assistant
    Settings, General, time zone). `departure_time` is a bare local time that Home
-   Assistant reads in its own zone, so a mismatch silently files results under
-   the wrong bucket or weekday.
-4. **Check that the price depends on `departure_time` at all.** Run the same
-   `google_travel_time` request (a leg that is slow in the morning) with
-   `departure_time` `03:00:00` and again with `08:00:00`, and compare `duration`
-   with each other and with the static (traffic-unaware) duration. If the
-   duration equals the static duration at every time, the integration returns no
-   time-dependent signal and the whole weekday-and-bucket model carries none: do
-   not use the results, and record that in the deployment repository.
-5. **Only if step 4 shows a difference, compare the same request in the evening
-   and again before 08:00. Matching durations mean Home Assistant resolves a
-   bare time-of-day to the next occurrence.** Matching durations alone, without
-   step 4, would also come from a traffic-unaware price. Different durations mean
-   it prices "now": do not use the results, and rework the request shape. Record
-   the outcome in the deployment repository.
-6. Keep notifications in shadow mode until steps 3 to 5 have passed.
-7. Check one full cycle: a run that needs a leg is incomplete (ROUTE-010), the
+   Assistant reads in its own zone (the integration source anchors it to Home
+   Assistant's local time zone), so a mismatch silently files results under the
+   wrong bucket or weekday.
+4. Done for HA Core 2026.10.x on 2026-10-26: the price depends on `departure_time`.
+   Three requests run back to back with `departure_time` `08:00:00`, none and
+   `15:00:00` returned three different durations (shortest for `15:00:00`, longest for
+   `08:00:00`, the `15:00:00` one close to the static duration), so the field is honoured.
+5. Done for HA Core 2026.10.x on 2026-10-26: a bare time resolves to its next
+   occurrence. The `08:00:00` request repeated back to back, and again hours
+   later in the day, returned the same duration to within a few seconds, so an
+   `08:00:00` request run after 08:00 priced the 08:00 slot, not "now". A past
+   time did not error. The source agrees: `convert_time` (read from the `dev`
+   branch, not the deployed tag) parses the string, anchors it to the start of
+   today in Home Assistant's local time zone and adds one day when that moment
+   is earlier than now; a time exactly equal to now is not shifted, and a full
+   datetime is rejected.
+6. **Standing step: re-check after each Home Assistant upgrade.** Run the same
+   request with `departure_time` `08:00:00` and `15:00:00` back to back and
+   confirm the two durations differ, then run `08:00:00` again after 08:00 has
+   passed and confirm it still prices the 08:00 slot (not "now"). If either
+   fails, stop using the results and rework the request shape. Record the outcome
+   in the deployment repository.
+7. Keep notifications in shadow mode until the remaining items are done: time zone equality (item 3), the first
+   full cycle (item 8) and the contacts or zones for other families' homes (item 2). This is not because of the
+   `departure_time` behaviour.
+8. Check one full cycle: a run that needs a leg is incomplete (ROUTE-010), the
    next poll lists it, the post is accepted, and the following run is clear.
-8. Confirm the first-route choice still suits you after the shadow period; the
+9. Confirm the first-route choice still suits you after the shadow period; the
    alternative is to post the slowest returned route.

@@ -24,11 +24,14 @@ tests/unit/test_route_relay_api.py::TestAddressRelease.
 
 #ASSUME: External resources: Home Assistant resolves a bare time-of-day
 ``departure_time`` to the next occurrence of that time, so a result files
-under the weekday and bucket the request names. This is NOT verified.
-#VERIFY: docs/guides/ha-route-relay.md, deployment checklist; first confirm the
-integration returns a time-dependent duration at all, then compare the same
-request in the evening and again before 08:00, and keep shadow mode until the
-durations match.
+under the weekday and bucket the request names. Observed on HA Core 2026.10.x
+on 2026-10-26 and consistent with the integration source (``convert_time``,
+read from the dev branch, not the deployed tag); NOT guaranteed by Home
+Assistant's documentation, so re-check after every Home Assistant upgrade.
+#VERIFY: after each HA upgrade, run the same request with ``departure_time``
+08:00 and 15:00 back to back and confirm the two durations differ, then run
+08:00 again after 08:00 has passed and confirm it still prices the 08:00 slot
+(not "now"); docs/guides/ha-route-relay.md, deployment checklist.
 """
 
 from __future__ import annotations
