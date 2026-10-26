@@ -153,10 +153,10 @@ class TestRejected:
             build(schools)
 
     def test_errors_never_echo_the_value(self, monkeypatch):
-        secret_looking = "calendar.Private_Value_Not_Echoed"
+        unechoed_calendar = "calendar.Private_Value_Not_Echoed"
         monkeypatch.setenv(
             "FL_HA_SCHOOLS",
-            json.dumps([MIDDLE | {"bell_calendars": [secret_looking]}]),
+            json.dumps([MIDDLE | {"bell_calendars": [unechoed_calendar]}]),
         )
         with pytest.raises(ConfigurationError) as caught:
             load_settings()
