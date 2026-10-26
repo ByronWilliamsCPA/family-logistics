@@ -519,13 +519,11 @@ def _run_level_pushes(
     """Plan the status or report and the ops push; flag a stale status."""
     pushes: list[PlannedPush] = []
     stale = False
-    status_kind = (
-        PushKind.STATUS
-        if trigger in _STATUS_TRIGGERS
-        else PushKind.REPORT
-        if trigger in _REPORT_TRIGGERS
-        else None
-    )
+    status_kind: PushKind | None = None
+    if trigger in _STATUS_TRIGGERS:
+        status_kind = PushKind.STATUS
+    elif trigger in _REPORT_TRIGGERS:
+        status_kind = PushKind.REPORT
     if status_kind is not None:
         if ctx.now - result.evaluated_at > ctx.policy.status_max_age:
             stale = True

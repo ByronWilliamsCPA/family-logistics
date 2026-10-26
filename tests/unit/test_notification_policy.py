@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from fl_factories import notes, trip
 from fl_service import make_settings
-from hypothesis import HealthCheck, given, settings
+from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
 from family_logistics.domain.engine import AssessmentResult, failed_result
@@ -224,16 +224,20 @@ class TestQuietHours:
         assert hours == 9
 
     def test_a_naive_now_is_refused(self):
+        naive = datetime(2026, 10, 23, 23, 0)  # noqa: DTZ001
         with pytest.raises(ValueError, match="aware"):
-            in_quiet_hours(datetime(2026, 10, 23, 23, 0), time(22), time(6), LA)  # noqa: DTZ001
+            in_quiet_hours(naive, time(22), time(6), LA)
 
     def test_an_aware_boundary_is_refused(self):
+        night = local(2026, 10, 23, 23)
+        aware_start = time(22, tzinfo=UTC)
         with pytest.raises(ValueError, match="naive"):
-            in_quiet_hours(local(2026, 10, 23, 23), time(22, tzinfo=UTC), time(6), LA)
+            in_quiet_hours(night, aware_start, time(6), LA)
 
     def test_an_empty_window_is_refused(self):
+        night = local(2026, 10, 23, 23)
         with pytest.raises(ValueError, match="differ"):
-            in_quiet_hours(local(2026, 10, 23, 23), time(6), time(6), LA)
+            in_quiet_hours(night, time(6), time(6), LA)
 
 
 CAP = "CAP-014"
@@ -901,15 +905,11 @@ class TestDecide:
         assert decide_it(ops, None, quiet=True) is Decision.QUIET_HOURS
 
     def test_a_naive_clock_is_refused(self):
+        planned = push()
+        resolved = policy()
+        naive = datetime(2026, 10, 23, 12)  # noqa: DTZ001
         with pytest.raises(ValueError, match="aware"):
-            decide(
-                push(),
-                None,
-                run_id="r",
-                now=datetime(2026, 10, 23, 12),  # noqa: DTZ001
-                quiet=False,
-                policy=policy(),
-            )
+            decide(planned, None, run_id="r", now=naive, quiet=False, policy=resolved)
 
 
 # ---------------------------------------------------------------------------
@@ -1123,8 +1123,7 @@ class TestQuietHoursProperties:
     def test_quiet_hours_never_raise_and_the_two_windows_partition_the_day(
         self, instant, start, end, zone
     ):
-        if start == end:
-            return
+        assume(start != end)
         zone_info = ZoneInfo(zone)
         inside = in_quiet_hours(instant, start, end, zone_info)
         outside = in_quiet_hours(instant, end, start, zone_info)
