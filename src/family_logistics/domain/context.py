@@ -256,13 +256,13 @@ class AssessmentContext:
         )
 
     def is_imminent(self, start: datetime) -> bool:
-        """Report whether a ride starts within the imminent window.
+        """Report whether a ride starts within the imminent window or has started.
 
         Args:
             start: Ride start (UTC).
 
         Returns:
-            True when the ride starts between now and the window's end.
+            True when the ride starts within the window or has already started.
         """
         return start - self.now <= self.settings.imminent_window
 
