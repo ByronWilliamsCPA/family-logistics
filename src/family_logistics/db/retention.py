@@ -35,6 +35,8 @@ if TYPE_CHECKING:
 
 RAW_TEXT_RETENTION_DAYS = 30
 
+_NAIVE_NOW_MESSAGE = "now must be a timezone-aware datetime"
+
 # #ASSUME: Security: proposed retention for parsed school days (defaults
 # register, pending owner approval); the privacy spec lists no period for the
 # HA snapshot yet. Past school days serve no assessment (the window starts
@@ -71,7 +73,7 @@ def purge_raw_source_text(connection: Connection, *, now: datetime) -> int:
             contain the value.
     """
     if now.tzinfo is None or now.utcoffset() is None:
-        msg = "now must be a timezone-aware datetime"
+        msg = _NAIVE_NOW_MESSAGE
         raise ValidationError(msg, field="now")
     # #CRITICAL: security: raw calendar notes may hold addresses and children's
     # data and must not outlive the retention period.
@@ -124,7 +126,7 @@ def purge_expired_school_days(connection: Connection, *, now: datetime) -> int:
             contain the value.
     """
     if now.tzinfo is None or now.utcoffset() is None:
-        msg = "now must be a timezone-aware datetime"
+        msg = _NAIVE_NOW_MESSAGE
         raise ValidationError(msg, field="now")
     cutoff = now - timedelta(days=SCHOOL_DAY_RETENTION_DAYS)
     table = schema.school_day
@@ -214,5 +216,5 @@ def _require_aware(now: datetime) -> None:
         ValidationError: If ``now`` is naive.
     """
     if now.tzinfo is None or now.utcoffset() is None:
-        msg = "now must be a timezone-aware datetime"
+        msg = _NAIVE_NOW_MESSAGE
         raise ValidationError(msg, field="now")

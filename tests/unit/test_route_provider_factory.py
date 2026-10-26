@@ -137,8 +137,9 @@ class TestFactory:
         assert provider.name == "ha_relay"
 
     def test_ha_relay_without_an_engine_is_refused_not_replaced(self):
+        relay_settings = settings("ha_relay")
         with pytest.raises(RouteProviderUnavailableError) as caught:
-            build_route_provider(settings("ha_relay"))
+            build_route_provider(relay_settings)
         assert "ha_relay" in str(caught.value)
         assert caught.value.provider == "ha_relay"
         assert caught.value.details["provider"] == "ha_relay"
@@ -207,8 +208,9 @@ class TestFactory:
     def test_a_table_with_a_non_static_provider_is_rejected(self, name, engine):
         # Rejected before any provider is chosen, even with an engine supplied:
         # the table would otherwise be ignored without a hint.
+        cfg = settings(name)
         with pytest.raises(ValueError, match="static_matrix"):
-            build_route_provider(settings(name), engine=engine, static_matrix=MATRIX)
+            build_route_provider(cfg, engine=engine, static_matrix=MATRIX)
 
     def test_an_unknown_provider_name_fails_closed(self):
         unvalidated = Settings.model_construct(route_provider="bogus")

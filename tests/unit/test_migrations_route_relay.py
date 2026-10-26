@@ -123,8 +123,9 @@ def test_no_address_or_free_text_columns_exist(engine):
 )
 def test_cache_checks_reject_bad_rows(engine, row):
     add_locations(engine, "home", "school-a")
-    with pytest.raises(IntegrityError), engine.begin() as connection:
-        connection.execute(insert(schema.route_cache).values(row))
+    statement = insert(schema.route_cache).values(row)
+    with engine.begin() as connection, pytest.raises(IntegrityError):
+        connection.execute(statement)
 
 
 @pytest.mark.parametrize(
@@ -160,16 +161,19 @@ def test_cache_checks_reject_bad_rows(engine, row):
 )
 def test_request_checks_reject_bad_rows(engine, row):
     add_locations(engine, "home", "school-a")
-    with pytest.raises(IntegrityError), engine.begin() as connection:
-        connection.execute(insert(schema.route_request).values(row))
+    statement = insert(schema.route_request).values(row)
+    with engine.begin() as connection, pytest.raises(IntegrityError):
+        connection.execute(statement)
 
 
 def test_an_unknown_location_is_refused_by_the_foreign_keys(engine):
     add_locations(engine, "home")
-    with pytest.raises(IntegrityError), engine.begin() as connection:
-        connection.execute(insert(schema.route_cache).values(cache_row()))
-    with pytest.raises(IntegrityError), engine.begin() as connection:
-        connection.execute(insert(schema.route_request).values(request_row()))
+    cache_statement = insert(schema.route_cache).values(cache_row())
+    request_statement = insert(schema.route_request).values(request_row())
+    with engine.begin() as connection, pytest.raises(IntegrityError):
+        connection.execute(cache_statement)
+    with engine.begin() as connection, pytest.raises(IntegrityError):
+        connection.execute(request_statement)
 
 
 def test_one_pending_request_per_key_but_answered_rows_may_repeat(engine):
@@ -191,10 +195,9 @@ def test_one_pending_request_per_key_but_answered_rows_may_repeat(engine):
                 request_row(request_id="b" * 32, **answered)
             )
         )
-    with pytest.raises(IntegrityError), engine.begin() as connection:
-        connection.execute(
-            insert(schema.route_request).values(request_row(request_id="c" * 32))
-        )
+    duplicate = insert(schema.route_request).values(request_row(request_id="c" * 32))
+    with engine.begin() as connection, pytest.raises(IntegrityError):
+        connection.execute(duplicate)
 
 
 def seed_entries(engine):
@@ -288,13 +291,12 @@ def test_a_name_change_or_a_no_op_write_keeps_the_entries(engine):
 def test_the_invalidation_is_rolled_back_with_a_failed_update(engine):
     seed_entries(engine)
     # The CHECK on the ciphertext column rejects the write after the trigger ran.
-    with pytest.raises(IntegrityError), engine.begin() as connection:
-        connection.execute(
-            text(
-                "UPDATE location SET ha_zone_entity_id = 'zone.elsewhere',"
-                " address_ciphertext = X'00' WHERE location_id = 'school-a'"
-            )
-        )
+    failing_update = text(
+        "UPDATE location SET ha_zone_entity_id = 'zone.elsewhere',"
+        " address_ciphertext = X'00' WHERE location_id = 'school-a'"
+    )
+    with engine.begin() as connection, pytest.raises(IntegrityError):
+        connection.execute(failing_update)
     assert counts(engine) == (3, 3)
 
 

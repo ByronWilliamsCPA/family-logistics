@@ -463,7 +463,7 @@ def register_route_relay_routes(
     """
     zone = ZoneInfo(settings.timezone)
 
-    @router.get("/route-requests", response_model=RouteRequestsResponse)
+    @router.get("/route-requests")
     def get_route_requests() -> RouteRequestsResponse:
         """List the legs Home Assistant should price now."""
         try:
@@ -531,7 +531,6 @@ def register_route_relay_routes(
 
     @router.post(
         "/route-results",
-        response_model=RouteResultsResponse,
         responses={
             status.HTTP_413_CONTENT_TOO_LARGE: {"description": "Body over the cap"},
             status.HTTP_422_UNPROCESSABLE_CONTENT: {"description": "Invalid body"},

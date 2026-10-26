@@ -204,8 +204,9 @@ class TestEnqueue:
         )
 
     def test_an_unknown_location_is_refused_and_nothing_is_written(self, repo):
+        unknown = Leg("nowhere", "high-school", FRIDAY, 32)
         with pytest.raises(IntegrityError):
-            repo.enqueue(Leg("nowhere", "high-school", FRIDAY, 32), now=NOW)
+            repo.enqueue(unknown, now=NOW)
         assert repo.pending(now=NOW) == []
 
 
@@ -588,12 +589,9 @@ class TestRecordResults:
         self, repo, seconds
     ):
         request = self.request_for(repo)
+        answers = [RouteAnswer(request.request_id, 900), RouteAnswer("x", seconds)]
         with pytest.raises(ValidationError):
-            repo.record_results(
-                [RouteAnswer(request.request_id, 900), RouteAnswer("x", seconds)],
-                now=NOW,
-                zone=ZONE,
-            )
+            repo.record_results(answers, now=NOW, zone=ZONE)
         assert repo.lookup(FRIDAY_0800, now=NOW) is None
         assert len(repo.pending(now=NOW)) == 1
 
@@ -613,13 +611,9 @@ class TestRecordResults:
             msg = "audit failed"
             raise RuntimeError(msg)
 
+        answers = [RouteAnswer(request.request_id, 900)]
         with pytest.raises(RuntimeError, match="audit failed"):
-            repo.record_results(
-                [RouteAnswer(request.request_id, 900)],
-                now=NOW,
-                before_commit=fail,
-                zone=ZONE,
-            )
+            repo.record_results(answers, now=NOW, before_commit=fail, zone=ZONE)
         assert repo.lookup(FRIDAY_0800, now=NOW) is None
         assert [r.request_id for r in repo.pending(now=NOW)] == [request.request_id]
 
@@ -643,6 +637,7 @@ class TestWriteLock:
     def test_a_held_write_lock_raises_busy_and_writes_nothing(self, engine, tmp_path):
         repo = RouteRelayRepository(engine, lock_timeout_ms=50)
         holder = create_sqlite_engine(tmp_path / "fl.db")
+        answers = [RouteAnswer("a" * 32, 900)]
         try:
             with holder.connect() as connection:
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
@@ -650,9 +645,7 @@ class TestWriteLock:
                     repo.enqueue(FRIDAY_0800, now=NOW)
                 assert caught.value.retry_after == route_relay.LOCK_RETRY_AFTER_SECONDS
                 with pytest.raises(RouteRelayBusyError):
-                    repo.record_results(
-                        [RouteAnswer("a" * 32, 900)], now=NOW, zone=ZONE
-                    )
+                    repo.record_results(answers, now=NOW, zone=ZONE)
                 connection.rollback()
         finally:
             holder.dispose()
@@ -663,11 +656,12 @@ class TestWriteLock:
     def test_an_error_that_is_not_lock_contention_is_not_reported_as_busy(self, engine):
         make_writes_fail(engine)
         repo = RouteRelayRepository(engine)
+        answers = [RouteAnswer("a" * 32, 900)]
         with pytest.raises(OperationalError) as caught:
             repo.enqueue(FRIDAY_0800, now=NOW)
         assert not isinstance(caught.value, RouteRelayBusyError)
         with pytest.raises(OperationalError):
-            repo.record_results([RouteAnswer("a" * 32, 900)], now=NOW, zone=ZONE)
+            repo.record_results(answers, now=NOW, zone=ZONE)
 
     @pytest.mark.parametrize(
         ("code", "busy"),
