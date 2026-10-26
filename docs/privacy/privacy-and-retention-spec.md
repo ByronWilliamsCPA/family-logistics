@@ -65,7 +65,7 @@ Legend: **Y** allowed, **M** allowed masked, **P** pseudonym only, **N** never.
 |------|-----------|----------|------|-------|---------|-----|-----|
 | Family child first name | Y | Y (ID preferred) | Y | Y | Y | Y | N (fictional examples only) |
 | External child first name | Y | N (ID only) | M (initial) | Y | M (initial) | P | P |
-| External household address | Y (protected, section 5; only where routing needs it) | N | N | N (named location only) | N, except the `ha_relay` route-request fallback for a location with no `ha_zone_entity_id` (section 5) | N | N |
+| External household address | Y (protected, section 5; only where routing needs it) | N | N | N (named location only) | N (only the location's `ha_zone_entity_id`; with no zone the address is withheld and the leg is incomplete, ROUTE-010; section 5) | N | N |
 | Family home address | Y | N | N | N (shown as "Home") | N ("Home"), except the `ha_relay` route-request fallback for a location with no `ha_zone_entity_id` (section 5) | N ("Home") | N |
 | Activity venue name | Y | Y | Y | Y | Y | Y | Y (public venues only) |
 | Ride times and driver | Y | Y | Y | Y | Y | Y | Fixtures only, synthetic |
@@ -99,19 +99,38 @@ carry children's schedules. Signal and SMS are future options only.
   plaintext write; they do not prove a value is encrypted, because only the key
   can show that.
 - Routing uses location IDs internally; plaintext addresses are decrypted only
-  in the routing adapter (including the `ha_relay` fallback below) and the
+  to build an outgoing route request (a Google Routes call, or a zone-less
+  fallback endpoint in the `ha_relay` route-request payload below) and in the
   registry UI.
-- The routing provider is the only external party that receives an address:
-  Google Routes directly, or Home Assistant's Waze action through the
-  `ha_relay` route-request endpoint (the token-authenticated HA-only route that
-  lists the legs HA must estimate). Only the two endpoints of a leg are sent,
-  never names or ride purpose.
-- `ha_relay` leg endpoints are zone identifiers by default: a location with an
-  `ha_zone_entity_id` is sent as that entity id. A location with no zone is
-  sent as its decrypted address, the documented fallback. **This means
-  plaintext addresses can reach Home Assistant for zone-less locations.** The
-  owner chose this trade-off (ADR 0006, decision of 2026-10-25); the way to
-  keep an address off the relay is to give the location a Home Assistant zone.
+- Outside the app, only the routing path receives a place: Google Routes
+  directly, or, through the `ha_relay` route-request endpoint (the
+  token-authenticated HA-only route that lists the legs HA must estimate), Home
+  Assistant, whose Waze action passes each endpoint on to Waze (a zone is
+  resolved by Home Assistant to its coordinates). Only the two endpoints of a
+  leg are sent, never names or ride purpose.
+- `ha_relay` leg endpoints follow the owner decision of 2026-10-25 (ADR 0006),
+  **other families' homes need a zone**, enforced by
+  `family_logistics.domain.address_release.ha_relay_endpoint` and
+  `is_other_family_home`:
+  - a location with an `ha_zone_entity_id` is sent as that entity id, never as
+    an address;
+  - another family's home with no zone is withheld: its address never leaves
+    the app, the leg's travel time is unknown and any ride that needs it is
+    `incomplete` (ROUTE-010), never clear. Another family's home is the home of
+    any contact (Driver S), even one shared with a household member, or the
+    default pickup or drop-off of an external passenger (Passenger E,
+    Passenger R). Give the location a Home Assistant zone to have it estimated;
+  - any other location with no zone (the household's own home, a venue such as
+    a school or a music studio) is sent as its decrypted address. **This means
+    plaintext family-home and venue addresses can reach Home Assistant.**
+- Once an endpoint reaches Home Assistant it is outside this app's encryption
+  and retention: Home Assistant may keep it in automation traces, the logbook,
+  recorder history and its backups, and Waze receives it to compute the route.
+  The deployment excludes the relay automation from the recorder or shortens
+  its trace retention (runbook in the private deployment repository).
+  `#VERIFY` Home Assistant's trace, logbook and recorder behaviour for the
+  relay automation against the deployed Home Assistant version before enabling
+  `ha_relay`.
 - The `ha_relay` route cache is keyed by location id and time bucket (weekday
   and 15-minute time of day), never by address, so the cache holds no address
   text.
@@ -154,7 +173,8 @@ Before any call to the local inference server:
 | Confirmed passenger legs after event deletion | 90 days after the trip date | supports change-impact comparison |
 | Resolved findings | 90 days after resolution | |
 | Inactive external passenger and household | removed or anonymised 180 days after the carpool ends (measured from the last trip, or a recorded carpool end date), or on request; audit hashes keep their own retention | registry review prompt at 165 days; the removal job arrives with the scheduler (M3), and until then rows are kept |
-| Route cache entries | 28 days after the last observation for that weekday and 15-minute bucket; also dropped at once when the location's address, coordinates or zone change (ADR 0006) | the purge and invalidation mechanism arrives with the `ha_relay` cache in PR 2 of the routing series (migration `0005`), and until then there is no cache |
+| Route cache entries | 28 days after the last observation for that weekday and 15-minute bucket, a fixed value rather than an `FL_` setting because it is also a correctness rule (changing it amends ADR 0006); also dropped at once when the location's address, coordinates or zone change, or the location is merged into another or re-verified (ADR 0006) | the purge and invalidation mechanism arrives with the `ha_relay` cache in PR 2 of the routing series, as migration `0005`; that number assumes migration `0004` from the school snapshot storage PR (#27) merges first, and until then there is no cache |
+| Route endpoints held by Home Assistant | outside this app's control (automation traces, logbook, recorder history, HA backups) | Home Assistant configuration in the deployment: the relay automation is excluded from the recorder or has short trace retention (section 5) |
 | Backups | 14 days rolling (proposed) | backup sidecar |
 
 The inactive-passenger period is 180 days, not 90, because a carpool pauses
@@ -172,7 +192,12 @@ passenger, person or location removes its alias rows.
 in the registry that the household uses a private scheduling system holding the
 child's first name, the agreed pickup and drop-off places, and ride times, and
 that it is deleted 180 days after the carpool ends or sooner on request. No
-data about them is shared outside the household's systems.
+data about them is shared outside the household's systems, with one exception:
+to estimate travel time, a routing service (Waze, through the household's Home
+Assistant, or Google Routes) receives the location of a pickup or drop-off
+place, never a name or the ride's purpose. Their home address is never sent to
+Home Assistant as text: it is sent only as a Home Assistant zone, and without a
+zone their rides are reported as incomplete rather than estimated.
 
 If an external family asks what is held, or asks for removal:
 
