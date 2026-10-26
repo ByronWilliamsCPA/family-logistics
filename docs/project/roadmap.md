@@ -133,8 +133,9 @@ Open items that block the M0, M1 and M2 exit gates:
   an intact DESCRIPTION, the RECURRENCE-ID and TZID formats, and how
   cancellations arrive.
 - **M1 carry-over, `FL_DATA_KEY` re-key command:** the [runbook](../runbook.md)
-  (`FL_DATA_KEY` rotation, step 3) records it as not yet delivered. The registry
-  is merged and stores Fernet-encrypted addresses; the command is not.
+  (`FL_DATA_KEY` rotation) records it as not yet delivered, so the key must not
+  be rotated yet. The registry is merged and stores Fernet-encrypted addresses
+  and coordinates; the command, which must re-encrypt and verify both, is not.
 - **M2 gate (acceptance matrix passes):** the matrix runs except two skipped
   tests in `tests/scenarios/test_acceptance_matrix.py`: `test_llm_unavailable`
   (reason M5) and `test_on_demand_idempotent` (reason M4).

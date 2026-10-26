@@ -50,9 +50,9 @@ This directory contains the essential planning documents for Family Logistics.
 
 ```text
 Load context from:
-- project-vision.md sections 2-3
-- adr/adr-001-*.md
-- tech-spec.md section [relevant section]
+- docs/project/roadmap.md (the current milestone)
+- docs/ADRs/0001-deterministic-authority-and-llm-boundary.md
+- docs/development/architecture.md section [relevant section]
 
 Then implement [feature].
 ```
@@ -61,8 +61,8 @@ Then implement [feature].
 
 ```text
 Review this code against:
-- tech-spec.md section 6 (security)
-- adr/adr-002-*.md (relevant decision)
+- SECURITY.md and docs/privacy/privacy-and-retention-spec.md (security and privacy)
+- docs/ADRs/0004-passenger-level-commitments.md (relevant decision)
 
 Flag any violations.
 ```
