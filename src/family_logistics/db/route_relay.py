@@ -29,11 +29,15 @@ the timeout raises ``RouteRelayBusyError`` and nothing is written.
 #ASSUME: External resources: Home Assistant resolves a bare ``departure_time``
 (a time of day with no date) to the NEXT occurrence of that time, not to "now".
 This is not verified. Only requests whose weekday matches the weekday of the
-next local occurrence are served (``due_requests``), so under that assumption
-the stored weekday and bucket label is true.
-#VERIFY: the owner runs the same request in the evening and again before 08:00;
-matching durations mean next-occurrence (docs/guides/ha-route-relay.md,
-deployment checklist). Findings stay in shadow mode until then.
+next local occurrence, and whose occurrence is at least ``SERVE_LEAD_TIME``
+away, are served (``due_requests``), and a result is accepted only while its
+request is still due (``record_results``), so under that assumption the stored
+weekday and bucket label is true.
+#VERIFY: the owner first confirms the integration returns a time-dependent
+duration at all (03:00:00 against 08:00:00 against the static duration), then
+runs the same request in the evening and again before 08:00; matching durations
+mean next-occurrence (docs/guides/ha-route-relay.md, deployment checklist).
+Findings stay in shadow mode until then.
 """
 
 from __future__ import annotations
@@ -303,6 +307,13 @@ def bucket_start(bucket: int) -> time:
     Returns:
         The bucket's first second as a time of day.
     """
+    # #ASSUME: External resources: Home Assistant's configured time zone equals
+    # FL_TIMEZONE. The start time is sent as a bare local HH:MM:SS that Home
+    # Assistant reads in ITS zone; if the zones differ, the time it prices is
+    # not this bucket's and the result is silently filed under the wrong
+    # bucket or weekday. The app cannot detect a mismatch.
+    # #VERIFY: deployment checklist (Home Assistant Settings, General, time zone
+    # equals FL_TIMEZONE), docs/guides/ha-route-relay.md.
     minutes = bucket * BUCKET_MINUTES
     return time(minutes // 60, minutes % 60)
 

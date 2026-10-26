@@ -23,8 +23,19 @@ nothing is stored, so a changed Home Assistant response shape fails visibly.
 
 #ASSUME: External resources: Home Assistant resolves a bare time-of-day
 ``departure_time`` to its next occurrence. NOT verified, so GET serves only the
-requests whose weekday matches the next local occurrence (``due_requests``).
-#VERIFY: docs/guides/ha-route-relay.md, deployment checklist.
+requests whose weekday matches the next local occurrence and whose occurrence is
+at least ``SERVE_LEAD_TIME`` away (``due_requests``), and POST rejects a result
+whose request is no longer due (``not_due``).
+#VERIFY: docs/guides/ha-route-relay.md, deployment checklist (first that the
+integration returns a time-dependent duration at all, then the evening against
+pre-08:00 comparison).
+
+#ASSUME: External resources: Home Assistant's configured time zone equals
+``FL_TIMEZONE``. ``departure_time`` is a bare local ``HH:MM:SS`` that Home
+Assistant reads in its own zone; if the zones differ, the result is silently
+filed under the wrong bucket or weekday and nothing here can detect it.
+#VERIFY: docs/guides/ha-route-relay.md, deployment checklist (Settings, General,
+time zone equals ``FL_TIMEZONE``).
 """
 
 from __future__ import annotations
@@ -72,8 +83,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 MAX_RESULTS_PER_POST = 100
-"""Most results one POST may carry. It bounds the body without a size helper and
-is twice the number of requests one poll returns."""
+"""Most results one POST may carry (422 above it); twice the number of requests
+one poll returns. The byte cap on the body is ``MAX_BODY_BYTES``."""
 
 MAX_BODY_BYTES = 64 * 1024
 """Largest ``POST /route-results`` body read, in bytes (413 above it). A full batch

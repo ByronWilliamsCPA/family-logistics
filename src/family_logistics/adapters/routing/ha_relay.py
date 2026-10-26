@@ -16,8 +16,9 @@ weekday or bucket, and ``estimate`` never raises into the engine.
 #ASSUME: External resources: Home Assistant resolves a bare time-of-day
 ``departure_time`` to the next occurrence of that time, so a result files
 under the weekday and bucket the request names. This is NOT verified.
-#VERIFY: docs/guides/ha-route-relay.md, deployment checklist; compare the same
-request in the evening and again before 08:00 and keep shadow mode until the
+#VERIFY: docs/guides/ha-route-relay.md, deployment checklist; first confirm the
+integration returns a time-dependent duration at all, then compare the same
+request in the evening and again before 08:00, and keep shadow mode until the
 durations match.
 """
 
