@@ -97,7 +97,7 @@ used.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `FL_ROUTE_PROVIDER` | `ha_relay` | `ha_relay`, `google_routes` or `static`. `ha_relay` reads travel times Home Assistant posted to `POST /api/v1/route-results` and queues the legs it is missing at `GET /api/v1/route-requests` (ADR 0006; see the [route relay guide](ha-route-relay.md)); a miss is unknown (ROUTE-010, run incomplete), never a guessed duration. Leg endpoints are zone entity ids; a zone-less location falls back to its decrypted address, except another family's home, which is withheld and needs a zone (privacy spec section 5), so `FL_DATA_KEY` is needed for those fallbacks. **Not wired in yet:** the provider factory exists, but no service calls it, so this setting has no runtime effect on assessments until the M3 wiring (ADR 0006 Delivery); the CLI `config` command only echoes it. `google_routes` is refused as not implemented, and `static` is for tests and needs an explicit travel-time table. The relay uses `FL_HA_TOKEN`, `FL_TIMEZONE` and `FL_AUDIT_KEY` and adds no setting of its own |
+| `FL_ROUTE_PROVIDER` | `ha_relay` | `ha_relay`, `google_routes` or `static`. `ha_relay` reads travel times Home Assistant posted to `POST /api/v1/route-results` and queues the legs it is missing at `GET /api/v1/route-requests` (ADR 0006; see the [route relay guide](ha-route-relay.md)); a miss is unknown (ROUTE-010, run incomplete), never a guessed duration. Leg endpoints are zone entity ids; a zone-less location falls back to its decrypted address, except another family's home, which is withheld and needs a zone (privacy spec section 5), so `FL_DATA_KEY` is needed for those fallbacks. The scheduler builds the provider from this setting through the factory, so it takes effect only when `FL_SCHEDULER_ENABLED=true` (the first production assessment run); no other path calls the factory yet. `google_routes` is refused as not implemented, and `static` is for tests and needs an explicit travel-time table. The relay uses `FL_HA_TOKEN`, `FL_TIMEZONE` and `FL_AUDIT_KEY` and adds no setting of its own |
 | `FL_GOOGLE_ROUTES_API_KEY` | unset | **Secret.** Optional paid routing key |
 | `FL_ROUTES_MONTHLY_BUDGET_USD` | `10` | Hard monthly cap enforced by the application |
 | `FL_ROUTES_BUDGET_WARN_USD` | `8` | Spend that triggers an operator warning |
@@ -108,7 +108,8 @@ used.
 |----------|---------|---------|
 | `FL_WEEKLY_CRON` | `0 15 * * SUN` | Weekly review (local time) |
 | `FL_DAILY_CRON` | `0 19 * * *` | Daily review (local time) |
-| `FL_CHANGE_SCAN_MINUTES` | `60` | Incremental change scan interval (minimum 5) |
+| `FL_CHANGE_SCAN_MINUTES` | `60` | Incremental change scan interval (minimum 5). With the scheduler enabled it must exceed 15 minutes, the notification claim lifetime, or startup is refused |
+| `FL_SCHEDULER_ENABLED` | `false` | Run the in-process scheduler inside `serve`: on the scan interval collect, assess and notify; the daily and weekly jobs at their crons; a nightly retention purge (03:30 local). Off by default. It needs `FL_CALDAV_USERNAME` and `FL_CALDAV_APP_PASSWORD`, and notifications stay in shadow mode unless `FL_NOTIFICATION_MODE=production`. A daily or weekly cron inside quiet hours is warned about at startup because its push would be dropped. See the [runbook](../runbook.md#scheduler) |
 
 ## Narrative LLM (M5)
 

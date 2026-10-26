@@ -145,8 +145,9 @@ Open items that block the M0, M1 and M2 exit gates:
 
 ### M3 progress
 
-Merged M3 work. None of it is read by a run yet, because nothing calls
-`AssessmentService.run` until the scheduler lands.
+Merged M3 work, and the scheduler PR in review. Until a deployment sets
+`FL_SCHEDULER_ENABLED=true`, none of it is read by a run, because nothing else
+calls `AssessmentService.run`.
 
 | PR | State | What it completed |
 |----|-------|-------------------|
@@ -155,6 +156,7 @@ Merged M3 work. None of it is read by a run yet, because nothing calls
 | #29 `feat(api)` | Merged | Ingest 3 of 3: `POST /api/v1/ingest/ha-snapshot` on the token-protected Home Assistant router, wired in `create_app` (`services/school_snapshot.py`). The snapshot is stored, but no run reads it yet, so runs stay INCOMPLETE (DATA-011). Operator guide: [Home Assistant school snapshot](../guides/ha-school-snapshot.md). |
 | #30 `feat(routing)` | Merged | Routing 1 of 3 ([ADR 0006](../ADRs/0006-route-provider-abstraction.md)): `NullRouteProvider` and the `build_route_provider` factory. Until #32, the default `ha_relay` setting mapped to the Null provider, so every estimate was unknown and any ride that needed one was incomplete (ROUTE-010). |
 | #32 `feat(routing)` | Merged | Routing 2 of 3: the `ha_relay` provider; the `route_cache` and `route_request` tables (migration `0005`); `GET /api/v1/route-requests` and `POST /api/v1/route-results` (defined in `api/route_relay.py`, registered on the token-protected Home Assistant router), which send zone ids and withhold another family's zone-less home through the address-release gate (privacy spec section 5); the `purge_expired_route_cache` and `purge_expired_route_requests` retention functions (no caller until the scheduler); operator guide: [Home Assistant route relay](../guides/ha-route-relay.md). The default `ha_relay` setting yields the real provider when the factory is given the database engine, but no service calls the factory yet, so routing has no effect on assessments. Its next-occurrence assumption about Home Assistant's `departure_time` was observed on HA Core 2026.10.x on 2026-10-26 but is not a documented guarantee, so it is re-checked after each Home Assistant upgrade (the 08:00 and 15:00 pair; ADR 0006), and shadow mode stays until the time zone, first-cycle and other-families checklist items are done. |
+| Scheduler `feat(services)` | In review | The scheduler (`services/scheduler.py`) behind `FL_SCHEDULER_ENABLED` (off by default): scan, daily and weekly pipelines (collect, `AssessmentService.run` with the latest school snapshot, `NotificationService.dispatch`, or `dispatch_unavailable` when a run raises), the nightly retention purges (raw source text, school days, route cache, route requests, notification state), the one extra urgent dispatch after `urgent_failed`, one pipeline at a time per process, the scan-interval and quiet-hours cron checks, and the route provider built through the factory. Runbook: [Scheduler](../runbook.md#scheduler). Not built here: `google_routes`, ops alerts for collection failures, a degraded database and the routing budget, the audit and external-household purges, on-demand coalescing (M4), and the shadow soak itself. |
 
 ### M3 blockers
 
@@ -175,9 +177,9 @@ Each must close before the scheduler becomes a production caller of
 
 | Milestone | PR | Replaces | Completes |
 |-----------|----|----------|-----------|
-| M3 | Routing provider and budget (part 3 of 3, and wiring; parts 1 and 2 merged in #30 and #32, [ADR 0006](../ADRs/0006-route-provider-abstraction.md)) | `adapters/routing` base, `NullRouteProvider` and the `build_route_provider` factory (#30); the `ha_relay` provider, route cache and relay routes (#32) | Part 3: optional `google_routes` with the monthly budget counter and warning. Wiring: no service calls `build_route_provider` yet, so routing has no effect on assessments; the service that builds `AssessmentService` (the scheduler, then the M4 on-demand API) must build the provider with the database engine, so the default `ha_relay` setting yields the real provider. Unknown travel time stays incomplete (ROUTE-010) throughout. |
-| M3 | Notification service (six PRs, [ADR 0008](../ADRs/0008-notification-service.md)) | `services/notifications.py` stub | Policy, rendering, state storage and the `NotificationService` (`dispatch` and `dispatch_unavailable`) with shadow routing of every push to `fl-shadow`, de-duplication per subject, quiet hours with one urgent push per episode, imminent-ride windows, and dedicated `fl-*` tags only, including the weekly report on `fl-report` (`FL_APPRISE_TAG_REPORT` in [configuration](../guides/configuration.md)). The service is built but not wired: the scheduler calls it. |
-| M3 | Scheduler and ops alerts | `services/scheduler.py` stub | Weekly, daily and incremental jobs, on-demand coalescing, `NotificationService.dispatch` after each run and `dispatch_unavailable` when a run raises (incomplete runs alert once per episode, ADR 0008 D3), `ops_alert()` for collection failures, a degraded database and the routing budget. Becomes the first production caller of `AssessmentService.run`, so the [M3 blockers](#m3-blockers) must close first, and it must pass the latest school snapshot into every run (see below). Includes the retention jobs below. **Gate: 7 consecutive days in shadow mode with zero false-clear runs, every FAILED or INCOMPLETE run explained in the runbook.** |
+| M3 | Routing provider and budget (part 3 of 3, and wiring; parts 1 and 2 merged in #30 and #32, [ADR 0006](../ADRs/0006-route-provider-abstraction.md)) | `adapters/routing` base, `NullRouteProvider` and the `build_route_provider` factory (#30); the `ha_relay` provider, route cache and relay routes (#32) | Part 3: optional `google_routes` with the monthly budget counter and warning. Wiring: the scheduler builds the provider with `build_route_provider(settings, engine=engine)`, so the default `ha_relay` setting yields the real provider once the scheduler is enabled; the M4 on-demand API must do the same. Unknown travel time stays incomplete (ROUTE-010) throughout. |
+| M3 | Notification service (six PRs, [ADR 0008](../ADRs/0008-notification-service.md)) | `services/notifications.py` stub | Policy, rendering, state storage and the `NotificationService` (`dispatch` and `dispatch_unavailable`) with shadow routing of every push to `fl-shadow`, de-duplication per subject, quiet hours with one urgent push per episode, imminent-ride windows, and dedicated `fl-*` tags only, including the weekly report on `fl-report` (`FL_APPRISE_TAG_REPORT` in [configuration](../guides/configuration.md)). The scheduler (built, opt-in) calls it. |
+| M3 | Scheduler and ops alerts | `services/scheduler.py` stub | **Built (in review, opt-in via `FL_SCHEDULER_ENABLED`):** weekly, daily and incremental jobs, `NotificationService.dispatch` after each run and `dispatch_unavailable` when a run raises (incomplete runs alert once per episode, ADR 0008 D3), the route provider built through the factory, and the retention purges that exist. **Not built:** on-demand coalescing (the M4 API takes the scheduler's `pipeline_lock`), `ops_alert()` for collection failures, a degraded database and the routing budget. Becomes the first production caller of `AssessmentService.run`, so the [M3 blockers](#m3-blockers) must close first, and it must pass the latest school snapshot into every run (see below). Includes the retention jobs below. **Gate: 7 consecutive days in shadow mode with zero false-clear runs, every FAILED or INCOMPLETE run explained in the runbook.** |
 | M4 | Status and assessment API | `api/ha.py` (token-protected router carrying the snapshot ingest and, from `api/route_relay.py`, the two route relay routes) | `GET /api/v1/status`, `POST /api/v1/assessments`, `GET /api/v1/assessments/{run_id}`. Un-skips `test_on_demand_idempotent`. |
 | M4 | Family validation card and registry UI | none | The card and registry editing, including the export and hard-delete actions and the single sign-on access control listed below. **Gate: 2 consecutive weeks in which neither parent creates, changes or cancels a ride commitment anywhere but the shared calendar (registry edits of people, places and vehicles do not count).** |
 | M4 | "Confirm Ride" iOS Shortcut | none | The Shortcut that writes the `CONFIRM:` code ([ADR 0002](../ADRs/0002-event-contract-and-confirmation-code.md), Implementation Target M4). |
@@ -200,11 +202,13 @@ Further M3 scope, each an explicit item:
   route purges that #32 added (`purge_expired_route_cache`, 28 days after the
   last observation, spec line 187; `purge_expired_route_requests`, 8 days after
   queueing, spec line 188) are deferred the same way and need the same daily
-  job.
+  job. The scheduler's nightly purge runs the five that exist (raw source
+  text, school days, route cache, route requests, notification state); the audit
+  and inactive external passenger and household purges have no function yet.
 - **Log redaction:** enforce the privacy spec section 4 "App logs" column
   (external children by ID only, no addresses) in the logging pipeline, not
   only by convention at each call site.
-- **Ops alerting:** `ops_alert()` wired as listed in the scheduler row. Until
+- **Ops alerting:** `ops_alert()` wired as listed in the scheduler row (not yet). Until
   then the [runbook](../runbook.md) ("Ops alerting") relies on the external
   monitor of `/healthz`, and a healthy process does not mean the last
   assessment succeeded.

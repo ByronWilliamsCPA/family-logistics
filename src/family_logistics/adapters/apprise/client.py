@@ -187,10 +187,9 @@ def ops_alert(client: AppriseClient, settings: Settings, title: str, body: str) 
     That the ops tag reaches the operator only is a property of the Apprise
     configuration, not of this client.
 
-    Not yet called by the scheduler: wiring it to failed or incomplete runs,
-    source collection failures, a degraded database and the routing budget
-    warning is part of roadmap milestone M3 (``docs/project/roadmap.md``,
-    "ops alerts"). Until then no code path raises these alerts.
+    Not called by the scheduler yet: source collection failures, a degraded
+    database and the routing budget warning have no alert path (roadmap, "ops
+    alerts"); failed and incomplete runs alert through ``NotificationService``.
 
     Args:
         client: A configured Apprise client.

@@ -22,7 +22,9 @@ The container runs one process with one SQLite writer.
   before serving. Outside a container, run `family-logistics migrate` and then
   `family-logistics serve`. The process refuses to start (exit 2) when
   `FL_HA_TOKEN` is missing or shorter than 32 characters, when `FL_DATA_KEY`,
-  `FL_AUDIT_KEY` or `FL_APPRISE_URL` is missing in production mode, when the schema is behind
+  `FL_AUDIT_KEY` or `FL_APPRISE_URL` is missing in production mode, when
+  `FL_SCHEDULER_ENABLED=true` without CalDAV credentials or with
+  `FL_CHANGE_SCAN_MINUTES` of 15 or less, when the schema is behind
   head (without `--upgrade-db`), when the schema is newer than the image (see
   [Upgrading the image](#upgrading-the-image)), or when a setting fails
   validation; read the startup error and fix it. A refused start lists every
@@ -79,6 +81,62 @@ either state is never shown as clear.
 Switching to `production` requires the joint approval of both parents after a
 shadow period, recorded in the private deployment repository. To switch back,
 set `shadow` and restart; this is always safe.
+
+## Scheduler
+
+`FL_SCHEDULER_ENABLED=true` starts the scheduler inside `serve` (one process,
+one writer; it is off by default). On each tick it collects the calendars,
+runs one assessment with the latest school snapshot and dispatches the pushes
+the run owes ([ADR 0008](ADRs/0008-notification-service.md)). Jobs, in
+`FL_TIMEZONE`:
+
+| Job | When | What |
+|-----|------|------|
+| `scan` | every `FL_CHANGE_SCAN_MINUTES`, first after 60 seconds | incremental run; findings and ops pushes |
+| `daily` | `FL_DAILY_CRON` | run that also makes the status push |
+| `weekly` | `FL_WEEKLY_CRON` | run that also makes the weekly report |
+| `purge` | 03:30 daily | retention purges, one transaction each, notification state included |
+| `urgent-retry` | 5 minutes after a dispatch reported `urgent_failed` | one extra pipeline; it never chains |
+
+One pipeline runs at a time: a scan that finds another pipeline running is
+skipped (the running one is as fresh), and the other jobs wait up to 30
+minutes. A run that raises sends the "could not verify" push, and a failed or
+incomplete run is dispatched like any other; nothing is reported as clear on a
+failure. A crash in one tick is logged by exception class only and counted; the
+scheduler keeps running. Stopping the container waits for the running
+pipeline; a hard kill mid-send is covered by the 15-minute claim lifetime, so
+the next tick sends again (at-least-once).
+
+### Reading a tick's health
+
+Each tick logs `scheduler.tick_finished` with `job`, `outcome`, `run_id`,
+`run_status`, `collection`, `duration_ms` and the dispatch counts (`sent`,
+`failed`, `urgent_failed`, `held`, `dropped`, `stale`, `unconfigured`).
+
+| `outcome` | Meaning | Action |
+|-----------|---------|--------|
+| `ok` | run stored and dispatched (whatever its status) | none; read `run_status` and `collection` |
+| `unavailable` | the run raised; the "could not verify" push went out | read `scheduler.run_failed` (exception class) and the assessment logs |
+| `dispatch_failed` | the dispatch raised (Apprise state or tag error) | read `scheduler.dispatch_failed`; the pushes stay owed |
+| `crashed` | unexpected error in the tick | read `scheduler.job_crashed` |
+| `skipped_busy`, `stopped` | another pipeline held the lock, or shutdown began | none unless every scan is skipped (a stuck pipeline) |
+| `purge_failed` | a purge raised | read `scheduler.purge_failed` (table name); the other purges ran |
+
+`collection` is `complete`, `incomplete` or `crashed`; the run still judges
+freshness, so a source that stays stale makes runs `incomplete` and raises the
+once-per-episode ops push. `scheduler.job_skipped` (missed time or overlapping
+instance) repeating every interval means the pipeline outlasts the interval.
+`scheduler.cron_in_quiet_hours` at start names a cron whose push would be
+dropped; move it outside quiet hours.
+
+### Shadow soak
+
+Run in shadow mode (the default) for the soak the roadmap requires before
+production: the scheduler runs for real and every push goes to the operator
+only with a `[shadow]` title. Check each day that ticks are `ok`, that the
+daily status and weekly report arrive, that no `dispatch_failed` or `crashed`
+outcome repeats, and that no push would have disturbed quiet hours. Switch to
+`production` only with both parents' approval ([Notification modes](#notification-modes)).
 
 ## Rotating secrets
 
@@ -193,10 +251,10 @@ other tag before making a request; `ops_alert()` sends operator alerts to the
 Failed and incomplete runs alert through `NotificationService` (one `fl-ops`
 push per failed episode and one per incomplete episode, not one per run; held
 during quiet hours), and `dispatch_unavailable` raises the same alert when a
-run itself raises. The service is built but nothing calls it until the
-scheduler lands in M3, and collection failures, the routing budget threshold
-and an unreachable database still arrive with the scheduler. Until then, rely
-on the external monitor of `/healthz`.
+run itself raises, once the [scheduler](#scheduler) is enabled. Collection
+failures, the routing budget threshold and an unreachable database do not
+raise ops alerts yet (the tick logs are the signal), so keep the external
+monitor of `/healthz`.
 
 ## Escalation
 
