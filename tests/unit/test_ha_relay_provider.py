@@ -219,6 +219,41 @@ class TestFailClosed:
         assert repo.pending(now=NOW) == []
         assert "route_relay.estimate_unavailable" in caplog.text
 
+    def test_a_leg_with_an_endpoint_that_can_never_resolve_is_not_queued(
+        self, provider, repo, caplog
+    ):
+        # middle-school has neither a zone nor an address, so Home Assistant
+        # could never be given an endpoint for it.
+        with caplog.at_level(logging.WARNING):
+            for origin, destination in (
+                ("home", "middle-school"),
+                ("middle-school", "home"),
+            ):
+                assert (
+                    provider.estimate(origin, destination, DEPARTURE, "driving") is None
+                )
+        assert repo.pending(now=NOW) == []
+        assert caplog.text.count("route_relay.leg_unroutable") == 2
+        assert "middle-school" in caplog.text  # location ids are loggable
+        assert HOME_ADDRESS not in caplog.text
+        assert STUDIO_ADDRESS not in caplog.text
+
+    def test_an_unroutable_leg_does_not_use_up_the_queue_cap(
+        self, provider, repo, monkeypatch
+    ):
+        monkeypatch.setattr(route_relay, "MAX_PENDING_REQUESTS", 1)
+        assert provider.estimate("home", "middle-school", DEPARTURE, "driving") is None
+        assert provider.estimate("home", "high-school", DEPARTURE, "driving") is None
+        (request,) = repo.pending(now=NOW)
+        assert request.leg == LEG
+
+    def test_a_leg_with_an_address_but_no_zone_is_still_queued(self, provider, repo):
+        # studio has a stored address and no zone: routable by address.
+        assert provider.estimate("home", "studio", DEPARTURE, "driving") is None
+        assert [r.leg for r in repo.pending(now=NOW)] == [
+            Leg("home", "studio", FRIDAY, 32)
+        ]
+
     def test_a_full_queue_is_unknown_and_logged(
         self, provider, repo, monkeypatch, caplog
     ):

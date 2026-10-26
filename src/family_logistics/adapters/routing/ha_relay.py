@@ -119,7 +119,8 @@ class HaRelayRouteProvider:
             leg = Leg.at(origin, destination, departure, self._zone)
             now = self._clock()
             cached = self._repository.lookup(leg, now=now)
-            if cached is None and (
+            queueable = cached is None and not self._unroutable(leg)
+            if queueable and (
                 self._repository.enqueue(leg, now=now) is EnqueueStatus.FULL
             ):
                 logger.warning(
@@ -133,6 +134,39 @@ class HaRelayRouteProvider:
             )
             return None
         return cached
+
+    def _unroutable(self, leg: Leg) -> bool:
+        """Report whether an endpoint of the leg can never be given to Home Assistant.
+
+        A location with neither a zone entity id nor a stored address has no
+        endpoint to send, so queueing the leg would only occupy the queue until
+        it expires. A location with no row is left to ``enqueue``, which
+        refuses it. Nothing is decrypted: an address that is stored but later
+        proves unreadable is handled when the poll is built.
+
+        Args:
+            leg: The leg about to be queued.
+
+        Returns:
+            True when an endpoint has neither a zone nor an address.
+        """
+        sources = self._repository.location_sources({leg.origin, leg.destination})
+        # Only location ids are logged, never address text.
+        unresolvable = [
+            location_id
+            for location_id in (leg.origin, leg.destination)
+            if (source := sources.get(location_id)) is not None
+            and not source.zone_entity_id
+            and source.address_token is None
+        ]
+        if unresolvable:
+            logger.warning(
+                "route_relay.leg_unroutable",
+                origin=leg.origin,
+                destination=leg.destination,
+                unresolvable=unresolvable,
+            )
+        return bool(unresolvable)
 
     def _duration(
         self, origin: str, destination: str, departure: datetime

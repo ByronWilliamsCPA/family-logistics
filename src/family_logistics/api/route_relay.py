@@ -45,6 +45,7 @@ from family_logistics.core.crypto import (
 from family_logistics.core.exceptions import ConfigurationError
 from family_logistics.db.audit import record_on
 from family_logistics.db.route_relay import (
+    MAX_REQUESTS_PER_POLL,
     MAX_ROUTE_DURATION_SECONDS,
     WEEKDAY_NAMES,
     BatchOutcome,
@@ -263,17 +264,22 @@ def _items(
 ) -> list[RouteRequestItem]:
     """Build the response items, leaving out requests that cannot be routed.
 
+    The poll limit applies to the routable requests, so unroutable ones queued
+    ahead of them cannot starve them.
+
     Args:
-        due: The due requests.
+        due: The due requests, oldest first.
         settings: Application settings.
         sources: Zone ids and protected addresses by location id.
 
     Returns:
-        One item per routable request.
+        One item per routable request, at most ``MAX_REQUESTS_PER_POLL``.
     """
     endpoints = _Endpoints(settings, sources)
     items: list[RouteRequestItem] = []
     for request in due:
+        if len(items) >= MAX_REQUESTS_PER_POLL:
+            break
         origin = endpoints.resolve(request.leg.origin)
         destination = endpoints.resolve(request.leg.destination)
         if origin is None or destination is None:
@@ -316,7 +322,9 @@ def register_route_relay_routes(
     def get_route_requests() -> RouteRequestsResponse:
         """List the legs Home Assistant should price now."""
         try:
-            due = repository.due_requests(now=clock(), zone=zone)
+            # No limit here: unroutable requests are dropped in ``_items``
+            # before the poll limit applies.
+            due = repository.due_requests(now=clock(), zone=zone, limit=None)
             sources = repository.location_sources(
                 {end for r in due for end in (r.leg.origin, r.leg.destination)}
             )

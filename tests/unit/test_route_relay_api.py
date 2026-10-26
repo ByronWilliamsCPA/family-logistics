@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 
 import pytest
 from fastapi import FastAPI
@@ -21,6 +22,7 @@ from fl_relay import (
 from pydantic import SecretStr
 from sqlalchemy import text
 
+from family_logistics.api import route_relay as route_relay_api
 from family_logistics.api.app import create_app
 from family_logistics.api.ha import build_ha_router
 from family_logistics.api.route_relay import (
@@ -30,6 +32,7 @@ from family_logistics.api.route_relay import (
 from family_logistics.core.config import Settings
 from family_logistics.core.database import create_sqlite_engine
 from family_logistics.db.route_relay import (
+    MAX_REQUESTS_PER_POLL,
     MAX_ROUTE_DURATION_SECONDS,
     Leg,
     RouteAnswer,
@@ -205,6 +208,39 @@ class TestGetRouteRequests:
         client = build_client(no_key, engine, clock)
         queue(repo, HOME_TO_STUDIO)
         assert client.get(GET, headers=GOOD).json() == {"requests": []}
+
+    @pytest.mark.parametrize("cause", ["no-endpoint", "wrong-key", "no-key"])
+    def test_unroutable_requests_do_not_starve_a_routable_one(
+        self, tmp_path, engine, clock, repo, cause
+    ):
+        # 50 unroutable requests are queued before the routable one. They are
+        # dropped first and the poll limit applies to what is left.
+        if cause == "no-endpoint":
+            client, destination = (
+                build_client(make_settings(tmp_path), engine, clock),
+                ("middle-school"),
+            )
+        else:
+            key = {"wrong-key": SecretStr("A" * 43 + "="), "no-key": None}[cause]
+            client = build_client(make_settings(tmp_path, data_key=key), engine, clock)
+            destination = "studio"
+        for bucket in range(40, 40 + MAX_REQUESTS_PER_POLL):
+            repo.enqueue(Leg("home", destination, FRIDAY, bucket), now=NOW)
+        ids = queue(repo, HOME_TO_SCHOOL, now=NOW + timedelta(seconds=1))
+        items = client.get(GET, headers=GOOD).json()["requests"]
+        assert [item["request_id"] for item in items] == [ids[HOME_TO_SCHOOL]]
+
+    def test_the_poll_limit_applies_after_unroutable_requests_are_dropped(
+        self, client, repo, monkeypatch
+    ):
+        monkeypatch.setattr(route_relay_api, "MAX_REQUESTS_PER_POLL", 2)
+        for bucket in (40, 41, 42):
+            repo.enqueue(Leg("home", "middle-school", FRIDAY, bucket), now=NOW)
+        routable = [Leg("home", "high-school", FRIDAY, b) for b in (50, 51, 52)]
+        for index, leg in enumerate(routable, start=1):
+            repo.enqueue(leg, now=NOW + timedelta(seconds=index))
+        items = client.get(GET, headers=GOOD).json()["requests"]
+        assert [item["departure_time"] for item in items] == ["12:30:00", "12:45:00"]
 
     def test_a_zone_pair_needs_no_data_key(self, tmp_path, engine, clock, repo):
         no_key = make_settings(tmp_path, data_key=None)
