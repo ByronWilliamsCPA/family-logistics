@@ -616,3 +616,92 @@ route_request = Table(
 answer means: the cache key comes from this row, never from the sender. At most
 one pending row exists per leg, weekday and bucket; answered rows stay until
 they expire so an identical re-post is a no-op."""
+
+# ---------------------------------------------------------------------------
+# Notification state (revision 0006_notification_state)
+# ---------------------------------------------------------------------------
+# De-duplication, claims and the dispatch watermark of the notification service
+# (ADR 0008, D9). Neither table holds personal data: subject keys are hashes,
+# run ids and fixed names. ``run_id`` and ``episode_run_id`` have no foreign
+# key because runs are purged on their own schedule. The CHECK text repeats the
+# migration's, colons escaped for SQLAlchemy's bind-parameter syntax.
+
+_NOTIFICATION_SUBJECT_CHECK = (
+    "(length(subject_key) = 22 AND subject_key GLOB 'issue\\:[0-9a-f]*'"
+    " AND substr(subject_key, 7) NOT GLOB '*[^0-9a-f]*'"
+    " AND kind IN ('notice', 'urgent'))"
+    " OR (subject_key = 'run-failed' AND kind IN ('notice', 'urgent'))"
+    " OR (subject_key GLOB 'run\\:?*' AND length(subject_key) <= 40"
+    " AND kind IN ('status', 'report'))"
+    " OR (subject_key IN ('ops\\:run_failed', 'ops\\:run_incomplete')"
+    " AND kind = 'ops')"
+)
+
+notification_state = Table(
+    "notification_state",
+    metadata,
+    Column("subject_key", String(48), primary_key=True),
+    Column("mode", String(16), primary_key=True),
+    Column("kind", String(16), nullable=False),
+    Column("tag", String(64), nullable=False),
+    Column("rule_id", String(16), nullable=True),
+    Column("severity", String(16), nullable=True),
+    Column("is_open", Boolean, nullable=False),
+    Column("delivered", Boolean, nullable=False, server_default=text("0")),
+    Column("bypass_used", Boolean, nullable=False, server_default=text("0")),
+    Column("episode_run_id", String(36), nullable=False),
+    Column("send_count", Integer, nullable=False, server_default=text("0")),
+    Column("failed_attempts", Integer, nullable=False, server_default=text("0")),
+    Column("first_sent_at", UtcDateTime(), nullable=True),
+    Column("last_sent_at", UtcDateTime(), nullable=True),
+    Column("last_attempt_at", UtcDateTime(), nullable=True),
+    Column("claim_token", String(36), nullable=True),
+    Column("claimed_at", UtcDateTime(), nullable=True),
+    Column("run_id", String(36), nullable=False),
+    Column("evaluated_at", UtcDateTime(), nullable=False),
+    Column("created_at", UtcDateTime(), nullable=False),
+    Column("updated_at", UtcDateTime(), nullable=False),
+    CheckConstraint(
+        "kind IN ('notice', 'urgent', 'status', 'report', 'ops')",
+        name="ck_notification_state_kind",
+    ),
+    CheckConstraint(
+        "mode IN ('shadow', 'production')", name="ck_notification_state_mode"
+    ),
+    CheckConstraint("tag GLOB 'fl-[a-z0-9]*'", name="ck_notification_state_tag"),
+    CheckConstraint(
+        "severity IS NULL OR severity IN ('critical', 'warning', 'incomplete')",
+        name="ck_notification_state_severity",
+    ),
+    CheckConstraint(
+        "send_count >= 0 AND failed_attempts >= 0",
+        name="ck_notification_state_counts",
+    ),
+    CheckConstraint(
+        "(claim_token IS NULL) = (claimed_at IS NULL)",
+        name="ck_notification_state_claim",
+    ),
+    CheckConstraint(
+        "delivered = 0 OR (first_sent_at IS NOT NULL AND last_sent_at IS NOT NULL)",
+        name="ck_notification_state_delivered",
+    ),
+    CheckConstraint(_NOTIFICATION_SUBJECT_CHECK, name="ck_notification_state_subject"),
+    Index("ix_notification_state_open", "is_open"),
+    Index("ix_notification_state_updated_at", "updated_at"),
+)
+"""One row per ``(subject_key, mode)``: what was last delivered for the subject's
+episode, whether it is open, and the claim of a push in flight. ``kind`` is the
+kind last delivered, or the planned kind while undelivered; ``severity`` is the
+severity last delivered (NULL until delivered)."""
+
+notification_watermark = Table(
+    "notification_watermark",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=False),
+    Column("evaluated_at", UtcDateTime(), nullable=False),
+    Column("run_id", String(36), nullable=False),
+    Column("updated_at", UtcDateTime(), nullable=False),
+    CheckConstraint("id = 1", name="ck_notification_watermark_singleton"),
+)
+"""The single row holding the newest outcome ``evaluated_at`` dispatched so far,
+so an older outcome is refused as stale."""

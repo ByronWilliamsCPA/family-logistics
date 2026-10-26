@@ -40,6 +40,7 @@ from family_logistics.domain.notification_policy import (
     plan,
     plan_unavailable,
     production_tag,
+    starts_new_episode,
 )
 from family_logistics.domain.notification_subjects import RideIndex, is_imminent
 from family_logistics.domain.rules import make_finding
@@ -1131,3 +1132,45 @@ class TestQuietHoursProperties:
         outside = in_quiet_hours(instant, end, start, zone_info)
         assert isinstance(inside, bool)
         assert inside is not outside
+
+
+class TestStartsNewEpisode:
+    """The one rule that ``decide`` and the state repository both use."""
+
+    @pytest.mark.parametrize(
+        ("push_overrides", "row", "expected"),
+        [
+            ({"retry_only": True}, None, False),
+            ({"retry_only": True}, "closed", False),
+            ({}, None, True),
+            ({}, "closed", True),
+            ({"kind": PushKind.STATUS}, "open", True),
+            ({"kind": PushKind.REPORT}, "open", True),
+            ({"episode_start": True}, "open-other-run", True),
+            ({"episode_start": True}, "open", False),
+            ({"episode_start": False}, "open-other-run", False),
+            ({"kind": PushKind.OPS, "episode_start": False}, "open-other-run", False),
+        ],
+        ids=[
+            "retry-no-row",
+            "retry-closed",
+            "no-row",
+            "closed",
+            "status",
+            "report",
+            "regression-other-run",
+            "same-run",
+            "ongoing-other-run",
+            "ops-other-run",
+        ],
+    )
+    def test_the_rule_grid(self, push_overrides, row, expected):
+        rows = {
+            None: None,
+            "closed": state(is_open=False),
+            "open": state(),
+            "open-other-run": state(episode_run_id="run-0"),
+        }
+        assert (
+            starts_new_episode(push(**push_overrides), rows[row], "run-1") is expected
+        )

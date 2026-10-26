@@ -293,8 +293,15 @@ finding as `ongoing`. Owing per episode keeps the intent and makes the held push
 - Only `urgent` bypasses, and at most once per episode (D4). `notice`, `status`, `report` and `ops` are held.
   `#ASSUME` (owner-pending): ops alerts are held because the operator can act on them only in the morning unless a
   ride is imminent, and that case already produces an `urgent` push.
-- **Held means not claimed and not recorded.** A held issue, `run-failed` or `ops` push has no delivered row, so the
-  first dispatch after the window sends it if it is still owed. Holding writes nothing.
+- **Held means not claimed.** A held issue, `run-failed` or `ops` push has no delivered row, so the first dispatch
+  after the window sends it if it is still owed. Holding writes nothing, with one exception. A held `notice` that
+  starts a new episode on an **open** row of another run (a `new` or `regressed` finding after a missed, failed or
+  stale resolve dispatch, F4) records the reopen: the row becomes undelivered with the new `episode_run_id`,
+  `send_count = 0`, `bypass_used = 0`, no severity and no claim. Without it the next scan sees the finding as
+  `ongoing` and the old row as delivered, so the push would read as a `DUPLICATE` and be lost. A **closed** row (held
+  by the cooldown) and a **missing** row write nothing: the policy re-derives both from the persisted row, and
+  reopening a closed row would bypass the cooldown. The same run re-dispatched inside the window writes nothing more.
+  `ops`, `run-failed` and `urgent` pushes never reach this case.
 - A held `status` or `report` is dropped, not deferred: a later run supersedes it. It is logged as
   `notification.suppressed` with `reason=quiet_hours_dropped`. A `FL_DAILY_CRON` or `FL_WEEKLY_CRON` inside quiet
   hours therefore loses that push; the scheduler PR adds a startup warning for it.
@@ -431,9 +438,12 @@ urgent "could not verify", at most once per local day (D4).
   after `URGENT_RETRY_DELAY` (5 seconds). If it still fails, the claim is released, `failed_attempts` is incremented and
   nothing is marked sent, so the next dispatch retries; `DispatchReport.urgent_failed` lets the scheduler run an extra
   dispatch about 5 minutes later. Other kinds are not retried within a dispatch.
-- The claim transaction retries up to `CLAIM_LOCK_RETRIES` (3) times with a short backoff when
-  `core.database.is_lock_contention` reports a busy database (for example while `complete_run` holds the write lock).
-  After the last retry the dispatch raises `DatabaseError` to the scheduler; nothing was sent.
+- The claim, `complete` and `release` transactions each retry up to `CLAIM_LOCK_RETRIES` (3) times with a short
+  backoff when `core.database.is_lock_contention` reports a busy database (for example while `complete_run` holds the
+  write lock). A busy error only comes from `BEGIN IMMEDIATE`, before anything is written, so repeating is safe, and
+  a delivered send is not re-sent after a lock held by another writer. After the last retry the claim raises
+  `DatabaseError` to the scheduler with nothing sent; a `complete` that still fails leaves the claim to expire
+  (at-least-once, D11).
 - `dispatch` never raises for a delivery failure. It raises only `NotificationTagError` (a programming error) and
   `DatabaseError` (state not writable after retries). The run is already stored, so its status is unaffected.
 - `FL_APPRISE_URL` unset (allowed in shadow mode): `dispatch` plans, logs `notification.not_configured`, writes nothing
@@ -532,8 +542,10 @@ Row rules:
   `is_open = 0`, `delivered = 0`, `severity = NULL`, `bypass_used = 0`, `run_id` and `evaluated_at` of this run (N2);
   `last_sent_at` is kept for the notice cooldown.
 - **Retention (N9)**: `purge_expired_notification_state(connection, *, now) -> int` in `db/retention.py` deletes
-  closed rows and `ops:*` rows whose `updated_at` is more than `NOTIFICATION_STATE_RETENTION_DAYS` (90) days before
-  `now`. Open issue rows are kept (purging one would re-notify it). It is idempotent and refuses a naive `now`.
+  rows with `is_open = 0` whose `updated_at` is strictly more than `NOTIFICATION_STATE_RETENTION_DAYS` (90) days
+  before `now`. Open rows are never purged, including open `ops:*` rows (purging one would re-notify it; an
+  `ops:run_incomplete` row stays open while the run stays incomplete). Nothing else is touched, not the watermark and
+  not the audit log. It is idempotent and refuses a naive `now`.
   `#ASSUME` (owner-pending). The scheduler's daily job calls it with the other purges.
 
 ### D10. Audit and chunking
@@ -817,7 +829,7 @@ derived subjects, kinds, the state table, the watermark, idempotency) are not in
 | Mode switch | open issues pushed once more to both parents | D5 |
 | Push content | family first names, external initials, local times, driver first names; no places | D2 |
 | Chunk size | 8 items per `notice` push | D10 |
-| State retention | 90 days after the last change, closed and ops rows only | D9 |
+| State retention | 90 days after the last change, closed rows only (open rows never) | D9 |
 | Digest | not built | out of scope |
 
 ## Consequences

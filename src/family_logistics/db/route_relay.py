@@ -54,9 +54,8 @@ from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import delete, func, insert, literal, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.exc import OperationalError
 
-from family_logistics.core.database import BUSY_TIMEOUT_MS
+from family_logistics.core.database import BUSY_TIMEOUT_MS, immediate_transaction
 from family_logistics.core.exceptions import DatabaseError, ValidationError
 from family_logistics.db.column_types import UtcDateTime
 from family_logistics.db.registry import RegistryStore
@@ -76,6 +75,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Generator, Iterable, Sequence
 
     from sqlalchemy.engine import Connection, Engine, RowMapping
+    from sqlalchemy.exc import OperationalError
     from sqlalchemy.sql.elements import ColumnElement
 
     from family_logistics.domain.models import Person
@@ -513,6 +513,25 @@ def is_lock_contention(error: OperationalError) -> bool:
     )
 
 
+def _relay_busy(exc: OperationalError) -> None:
+    """Translate lock contention into the busy error; ignore other faults.
+
+    Args:
+        exc: The driver error from ``BEGIN IMMEDIATE``.
+
+    Raises:
+        RouteRelayBusyError: For lock contention, chained to ``exc``. Any other
+            operational error returns normally, so the caller re-raises it
+            unchanged (a store error, not a retryable busy state).
+    """
+    if not is_lock_contention(exc):
+        return
+    msg = "the database is locked by another writer; nothing stored"
+    raise RouteRelayBusyError(
+        msg, operation="route_relay", error_code="ROUTE_RELAY_BUSY"
+    ) from exc
+
+
 @contextmanager
 def _write_locked(engine: Engine, lock_timeout_ms: int) -> Generator[Connection]:
     """Yield a connection inside ``BEGIN IMMEDIATE``; commit on success.
@@ -525,34 +544,15 @@ def _write_locked(engine: Engine, lock_timeout_ms: int) -> Generator[Connection]
         Connection: A connection holding the database's write lock. Any
         exception rolls the whole transaction back.
 
-    Raises:
-        RouteRelayBusyError: The write lock was not granted in time.
-        OperationalError: Any other operational error, unchanged, so callers
-            report a store error rather than a retryable busy state.
+    Note:
+        A write lock that is not granted in time raises ``RouteRelayBusyError``.
+        Any other operational error propagates unchanged, so callers report a
+        store error rather than a retryable busy state.
     """
-    with engine.connect() as connection:
-        connection.exec_driver_sql(f"PRAGMA busy_timeout={int(lock_timeout_ms)}")
-        try:
-            try:
-                connection.exec_driver_sql("BEGIN IMMEDIATE")
-            except OperationalError as exc:
-                if not is_lock_contention(exc):
-                    raise
-                msg = "the database is locked by another writer; nothing stored"
-                raise RouteRelayBusyError(
-                    msg, operation="route_relay", error_code="ROUTE_RELAY_BUSY"
-                ) from exc
-            committed = False
-            try:
-                yield connection
-                connection.commit()
-                committed = True
-            finally:
-                if not committed:
-                    connection.rollback()
-        finally:
-            connection.exec_driver_sql(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
-            connection.commit()
+    with immediate_transaction(
+        engine, lock_timeout_ms=lock_timeout_ms, on_begin_error=_relay_busy
+    ) as connection:
+        yield connection
 
 
 def _before(column: ColumnElement[datetime], instant: datetime) -> ColumnElement[bool]:

@@ -32,7 +32,7 @@ from __future__ import annotations
 import enum
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 from alembic import command
 from alembic.config import Config
@@ -41,7 +41,7 @@ from alembic.script import ScriptDirectory
 from alembic.util import CommandError
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
-from family_logistics.core.database import BUSY_TIMEOUT_MS
+from family_logistics.core.database import immediate_transaction
 from family_logistics.core.exceptions import DatabaseError
 
 if TYPE_CHECKING:
@@ -192,6 +192,22 @@ def ahead_message(current: str | None) -> str:
     )
 
 
+def _lock_refused(exc: OperationalError) -> NoReturn:
+    """Describe a refused migration lock for the operator.
+
+    Args:
+        exc: The driver error from ``BEGIN IMMEDIATE``.
+
+    Raises:
+        MigrationLockError: Always, chained to ``exc``.
+    """
+    msg = (
+        "database is locked by another process (another instance "
+        "may be migrating); schema unchanged"
+    )
+    raise MigrationLockError(msg, operation="migrate") from exc
+
+
 @contextmanager
 def _locked_transaction(engine: Engine) -> Generator[Connection]:
     """Yield a connection inside ``BEGIN IMMEDIATE``; commit on success.
@@ -204,31 +220,15 @@ def _locked_transaction(engine: Engine) -> Generator[Connection]:
     Yields:
         Connection: A connection holding the database's write lock.
 
-    Raises:
-        MigrationLockError: If the write lock is not granted in time.
+    Note:
+        A write lock that is not granted in time raises ``MigrationLockError``.
     """
-    with engine.connect() as connection:
-        connection.exec_driver_sql(f"PRAGMA busy_timeout={MIGRATION_LOCK_TIMEOUT_MS}")
-        try:
-            try:
-                connection.exec_driver_sql("BEGIN IMMEDIATE")
-            except OperationalError as exc:
-                msg = (
-                    "database is locked by another process (another instance "
-                    "may be migrating); schema unchanged"
-                )
-                raise MigrationLockError(msg, operation="migrate") from exc
-            committed = False
-            try:
-                yield connection
-                connection.commit()
-                committed = True
-            finally:
-                if not committed:
-                    connection.rollback()
-        finally:
-            connection.exec_driver_sql(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
-            connection.commit()
+    with immediate_transaction(
+        engine,
+        lock_timeout_ms=MIGRATION_LOCK_TIMEOUT_MS,
+        on_begin_error=_lock_refused,
+    ) as connection:
+        yield connection
 
 
 def _migrate(engine: Engine, revision: str, *, downgrade: bool) -> None:

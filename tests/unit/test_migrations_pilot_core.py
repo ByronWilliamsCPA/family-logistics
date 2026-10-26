@@ -51,8 +51,10 @@ LATER_TABLES = {
     "school_snapshot",
     "route_cache",
     "route_request",
+    "notification_state",
+    "notification_watermark",
 }
-"""Tables added by revisions after 0002 (0003 and 0004)."""
+"""Tables added by revisions after 0002 (0003 to 0006)."""
 AUDIT_TRIGGERS = {
     "audit_log_no_update",
     "audit_log_no_replace",
