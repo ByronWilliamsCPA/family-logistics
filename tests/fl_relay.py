@@ -17,8 +17,14 @@ from sqlalchemy import event
 from family_logistics.core.crypto import AddressCipher, generate_key
 from family_logistics.core.database import create_sqlite_engine
 from family_logistics.db import migrations_api
-from family_logistics.db.registry import RegistryStore
-from family_logistics.domain.models import Location, SensitiveStr
+from family_logistics.db.registry import Household, RegistryStore
+from family_logistics.domain.models import (
+    ExternalPassenger,
+    Location,
+    Person,
+    PersonRole,
+    SensitiveStr,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -31,6 +37,8 @@ CIPHER = AddressCipher(DATA_KEY)
 
 HOME_ADDRESS = "1 Placeholder Row, Exampleton"
 STUDIO_ADDRESS = "2 Placeholder Row, Exampleton"
+DRIVER_S_ADDRESS = "3 Placeholder Row, Exampleton"
+PASSENGER_E_ADDRESS = "4 Placeholder Row, Exampleton"
 
 LOCATIONS = (
     Location("home", "Family Home", verified=True, ha_zone_entity_id="zone.home_base"),
@@ -45,6 +53,13 @@ LOCATIONS = (
 have none. ``make_engine`` then stores an address for ``home`` (alongside its
 zone) and for ``studio`` (its only endpoint), so ``middle-school`` is the one
 location with neither a zone nor an address."""
+
+OTHER_FAMILY_HOMES = (
+    ("driver-s-home", "Driver S Home", DRIVER_S_ADDRESS),
+    ("passenger-e-home", "Passenger E Home", PASSENGER_E_ADDRESS),
+)
+"""Zone-less homes with an address. Nobody is registered at them until a test
+calls ``register_person``, so the policy sees them as venues at first."""
 
 
 def local(
@@ -83,7 +98,57 @@ def make_engine(tmp_path: Path) -> Engine:
                 address=SensitiveStr(HOME_ADDRESS),
             )
         )
+        for location_id, name, address in OTHER_FAMILY_HOMES:
+            store.upsert_location(
+                Location(
+                    location_id, name, verified=True, address=SensitiveStr(address)
+                )
+            )
     return engine
+
+
+def register_person(
+    engine: Engine, person_id: str, role: PersonRole, home_location_id: str | None
+) -> None:
+    """Register a person (a household member or a contact) with a home."""
+    with engine.begin() as connection:
+        RegistryStore(connection, CIPHER).upsert_person(
+            Person(
+                person_id,
+                person_id.replace("-", " ").title(),
+                role,
+                home_location_id=home_location_id,
+            )
+        )
+
+
+def register_passenger_default(
+    engine: Engine, passenger_id: str, pickup_location_id: str
+) -> None:
+    """Register an external passenger whose default pickup is a location.
+
+    No contact is linked, so the policy treats the pickup as a venue.
+    """
+    with engine.begin() as connection:
+        store = RegistryStore(connection, CIPHER)
+        store.upsert_household(Household(f"household-{passenger_id}", "Household"))
+        store.upsert_external_passenger(
+            ExternalPassenger(
+                passenger_id,
+                "E",
+                f"household-{passenger_id}",
+                default_pickup_location_id=pickup_location_id,
+            )
+        )
+
+
+def clear_zone(engine: Engine, location_id: str) -> None:
+    """Remove a location's Home Assistant zone (the address stays)."""
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE location SET ha_zone_entity_id = NULL WHERE location_id = ?",
+            (location_id,),
+        )
 
 
 def make_writes_fail(engine: Engine) -> None:

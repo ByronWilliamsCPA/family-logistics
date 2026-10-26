@@ -13,6 +13,15 @@ INCOMPLETE run. A duration is never guessed, defaulted or borrowed from another
 weekday or bucket, and ``estimate`` never raises into the engine.
 #VERIFY: tests/unit/test_ha_relay_provider.py::TestFailClosed and ::TestEngine.
 
+#CRITICAL: Security: another family's home with no Home Assistant zone must never
+be sent to Home Assistant (owner decision of 2026-10-25, ADR 0006). Every leg
+endpoint is judged by ``domain.address_release.ha_relay_endpoint`` (applied in
+``RouteRelayRepository.location_sources``); a leg with a WITHHELD endpoint is
+not queued, so it stays unknown (ROUTE-010, INCOMPLETE). The GET handler judges
+the endpoints again when it serves a request, against the registry as it is then.
+#VERIFY: tests/unit/test_ha_relay_provider.py::TestAddressRelease and
+tests/unit/test_route_relay_api.py::TestAddressRelease.
+
 #ASSUME: External resources: Home Assistant resolves a bare time-of-day
 ``departure_time`` to the next occurrence of that time, so a result files
 under the weekday and bucket the request names. This is NOT verified.
@@ -37,6 +46,7 @@ from family_logistics.db.route_relay import (
     Leg,
     RouteRelayRepository,
 )
+from family_logistics.domain.address_release import HaRelayEndpoint
 from family_logistics.domain.stop_order import OrderResult, Stop, choose_stop_order
 from family_logistics.utils.logging import get_logger
 
@@ -137,27 +147,44 @@ class HaRelayRouteProvider:
         return cached
 
     def _unroutable(self, leg: Leg) -> bool:
-        """Report whether an endpoint of the leg can never be given to Home Assistant.
+        """Report whether an endpoint of the leg must not or cannot be sent.
 
-        A location with neither a zone entity id nor a stored address has no
-        endpoint to send, so queueing the leg would only occupy the queue until
-        it expires. A location with no row is left to ``enqueue``, which
-        refuses it. Nothing is decrypted: an address that is stored but later
-        proves unreadable is handled when the poll is built.
+        An endpoint is withheld when the address-release policy forbids sending
+        it (another family's home with no zone): the leg is not queued, so no
+        request ever names it. A location with neither a zone entity id nor a
+        stored address has no endpoint to send, so queueing the leg would only
+        occupy the queue until it expires. A location with no row is left to
+        ``enqueue``, which refuses it. Nothing is decrypted: an address that is
+        stored but later proves unreadable is handled when the poll is built.
 
         Args:
             leg: The leg about to be queued.
 
         Returns:
-            True when an endpoint has neither a zone nor an address.
+            True when an endpoint is withheld, or has neither a zone nor an
+            address.
         """
         sources = self._repository.location_sources({leg.origin, leg.destination})
+        ends = (leg.origin, leg.destination)
         # Only location ids are logged, never address text.
+        withheld = [
+            location_id
+            for location_id in ends
+            if (source := sources.get(location_id)) is not None
+            and source.endpoint is HaRelayEndpoint.WITHHELD
+        ]
+        if withheld:
+            logger.warning(
+                "route_relay.leg_withheld",
+                withheld=withheld,
+                effect="travel time stays unknown (ROUTE-010)",
+            )
+            return True
         unresolvable = [
             location_id
-            for location_id in (leg.origin, leg.destination)
+            for location_id in ends
             if (source := sources.get(location_id)) is not None
-            and not source.zone_entity_id
+            and source.endpoint is HaRelayEndpoint.ADDRESS
             and source.address_token is None
         ]
         if unresolvable:

@@ -14,6 +14,15 @@ decrypted is left out of the response, not sent half-resolved.
 #VERIFY: tests/unit/test_route_relay_api.py::TestGetRouteRequests (the zone and
 address tests assert on the response body and on the captured log text).
 
+#CRITICAL: Security: another family's home with no zone is WITHHELD by the
+address-release policy (``domain.address_release``, owner decision of
+2026-10-25). The registry can change after a request was queued (a contact is
+registered for a home), so the poll re-evaluates every endpoint against the
+registry as it is now, and omits a request with a WITHHELD endpoint before any
+address is decrypted. The omitted request counts as unroutable: it is dropped
+before the poll limit, stays pending and is cleared by expiry.
+#VERIFY: tests/unit/test_route_relay_api.py::TestAddressRelease.
+
 #CRITICAL: Data integrity: the sender never decides what a result means. A
 result names only a ``request_id`` and a ``duration_seconds``; the leg, weekday
 and bucket come from the app's own request row. A duration outside
@@ -68,6 +77,7 @@ from family_logistics.db.route_relay import (
     RouteRelayBusyError,
     bucket_start,
 )
+from family_logistics.domain.address_release import HaRelayEndpoint
 from family_logistics.middleware.correlation import get_correlation_id
 from family_logistics.utils.logging import get_logger
 
@@ -240,7 +250,8 @@ class _Endpoints:
     """Resolves location ids to zone ids or decrypted addresses.
 
     The cipher is built on first use, so a poll whose legs are all zoned needs
-    no data key.
+    no data key. A location whose endpoint the address-release policy withholds
+    never resolves: ``resolve`` returns None for it and holds no ciphertext.
 
     Args:
         settings: Application settings carrying ``data_key``.
@@ -260,10 +271,11 @@ class _Endpoints:
 
         Returns:
             The zone endpoint, else the decrypted address, else None when the
-            location has neither or the address cannot be decrypted.
+            location is withheld, has neither, or the address cannot be
+            decrypted.
         """
         source = self._sources.get(location_id)
-        if source is None:
+        if source is None or source.endpoint is HaRelayEndpoint.WITHHELD:
             return None
         if source.zone_entity_id:
             return RouteEndpoint(kind="zone", value=source.zone_entity_id)
@@ -276,6 +288,36 @@ class _Endpoints:
         except (ConfigurationError, ProtectedDataError):
             return None
         return RouteEndpoint(kind="address", value=address)
+
+
+def _is_withheld(request: PendingRequest, sources: dict[str, LocationSource]) -> bool:
+    """Report whether the policy withholds an endpoint of a due request.
+
+    Checked before either endpoint is resolved, so no address of a withheld
+    leg is decrypted, not even the one that may be sent.
+
+    Args:
+        request: A due request.
+        sources: Zone ids, protected addresses and release decisions by
+            location id, read with the current registry.
+
+    Returns:
+        True when the request must be left out of the response.
+    """
+    withheld = [
+        location_id
+        for location_id in (request.leg.origin, request.leg.destination)
+        if (source := sources.get(location_id)) is not None
+        and source.endpoint is HaRelayEndpoint.WITHHELD
+    ]
+    if withheld:
+        # Only the request id and location ids are logged: no address text.
+        logger.warning(
+            "route_relay.request_withheld",
+            request_id=request.request_id,
+            withheld=withheld,
+        )
+    return bool(withheld)
 
 
 def _items(
@@ -299,6 +341,8 @@ def _items(
     for request in due:
         if len(items) >= MAX_REQUESTS_PER_POLL:
             break
+        if _is_withheld(request, sources):
+            continue
         origin = endpoints.resolve(request.leg.origin)
         destination = endpoints.resolve(request.leg.destination)
         if origin is None or destination is None:

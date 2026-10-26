@@ -10,7 +10,18 @@ import pytest
 from fl_engine import NOW as ENGINE_NOW
 from fl_engine import activity, assessment, at, routes
 from fl_factories import notes, trip
-from fl_relay import HOME_ADDRESS, NOW, STUDIO_ADDRESS, ZONE, local, make_engine
+from fl_relay import (
+    DRIVER_S_ADDRESS,
+    HOME_ADDRESS,
+    NOW,
+    STUDIO_ADDRESS,
+    ZONE,
+    clear_zone,
+    local,
+    make_engine,
+    register_passenger_default,
+    register_person,
+)
 from sqlalchemy import text
 
 from family_logistics.adapters.routing import HaRelayRouteProvider
@@ -26,7 +37,7 @@ from family_logistics.db.route_relay import (
 )
 from family_logistics.domain.confirmation import confirmation_code
 from family_logistics.domain.engine import assess
-from family_logistics.domain.models import RunStatus
+from family_logistics.domain.models import PersonRole, RunStatus
 from family_logistics.domain.stop_order import OrderStatus, Stop
 
 pytestmark = pytest.mark.unit
@@ -266,6 +277,96 @@ class TestFailClosed:
         assert "route_relay.queue_full" in caplog.text
 
 
+class TestAddressRelease:
+    """The owner's address-release gate at enqueue time (domain/address_release)."""
+
+    def estimate(self, provider, origin, destination):
+        return provider.estimate(origin, destination, DEPARTURE, "driving")
+
+    def queued(self, repo):
+        return [(r.leg.origin, r.leg.destination) for r in repo.pending(now=NOW)]
+
+    def test_a_zone_less_other_family_home_is_not_queued_and_logs_only_its_id(
+        self, provider, repo, engine, caplog
+    ):
+        register_person(engine, "driver-s", PersonRole.CONTACT, "driver-s-home")
+        with caplog.at_level(logging.WARNING):
+            for origin, destination in (
+                ("home", "driver-s-home"),
+                ("driver-s-home", "home"),
+            ):
+                assert self.estimate(provider, origin, destination) is None
+        assert self.queued(repo) == []
+        assert caplog.text.count("route_relay.leg_withheld") == 2
+        assert "driver-s-home" in caplog.text  # a location id is loggable
+        for secret in (HOME_ADDRESS, STUDIO_ADDRESS, DRIVER_S_ADDRESS):
+            assert secret not in caplog.text
+
+    def test_a_withheld_leg_is_not_decrypted_at_all(
+        self, provider, engine, monkeypatch
+    ):
+        calls = []
+        monkeypatch.setattr(
+            "family_logistics.core.crypto.AddressCipher.decrypt",
+            lambda *args: calls.append(args),
+        )
+        register_person(engine, "driver-s", PersonRole.CONTACT, "driver-s-home")
+        assert self.estimate(provider, "studio", "driver-s-home") is None
+        assert calls == []
+
+    def test_a_stop_with_a_zone_is_queued_even_when_it_is_a_contacts_home(
+        self, provider, repo, engine
+    ):
+        # The zone id is what is sent, never the address, so there is nothing
+        # to withhold.
+        register_person(engine, "driver-s", PersonRole.CONTACT, "high-school")
+        assert self.estimate(provider, "home", "high-school") is None
+        assert self.queued(repo) == [("home", "high-school")]
+
+    def test_the_households_own_zone_less_home_and_a_venue_are_still_queued(
+        self, provider, repo, engine
+    ):
+        clear_zone(engine, "home")
+        register_person(engine, "morgan", PersonRole.PARENT, "home")
+        register_person(engine, "alex", PersonRole.CHILD, "home")
+        assert self.estimate(provider, "home", "studio") is None
+        assert self.queued(repo) == [("home", "studio")]
+
+    def test_a_passengers_default_pickup_alone_is_a_venue_and_is_queued(
+        self, provider, repo, engine
+    ):
+        register_passenger_default(engine, "passenger-e", "passenger-e-home")
+        assert self.estimate(provider, "home", "passenger-e-home") is None
+        assert self.queued(repo) == [("home", "passenger-e-home")]
+
+    def test_a_contact_from_the_passengers_household_withholds_that_home(
+        self, provider, repo, engine
+    ):
+        register_passenger_default(engine, "passenger-e", "passenger-e-home")
+        register_person(engine, "driver-s", PersonRole.CONTACT, "passenger-e-home")
+        assert self.estimate(provider, "home", "passenger-e-home") is None
+        assert self.queued(repo) == []
+
+    def test_a_home_shared_by_a_household_member_and_a_contact_is_withheld(
+        self, provider, repo, engine
+    ):
+        register_person(engine, "alex", PersonRole.CHILD, "driver-s-home")
+        register_person(engine, "driver-s", PersonRole.CONTACT, "driver-s-home")
+        assert self.estimate(provider, "driver-s-home", "home") is None
+        assert self.queued(repo) == []
+
+    def test_a_contact_registered_after_a_leg_was_queued_stops_new_requests(
+        self, provider, repo, engine
+    ):
+        assert self.estimate(provider, "home", "driver-s-home") is None
+        assert self.queued(repo) == [("home", "driver-s-home")]
+        register_person(engine, "driver-s", PersonRole.CONTACT, "driver-s-home")
+        # A different bucket would have queued a new request; it must not.
+        later = DEPARTURE + timedelta(hours=1)
+        assert provider.estimate("home", "driver-s-home", later, "driving") is None
+        assert self.queued(repo) == [("home", "driver-s-home")]
+
+
 class TestOptimize:
     STOPS = (Stop("a", "high-school"), Stop("b", "xc"))
 
@@ -361,6 +462,30 @@ class TestEngine:
         assert hit.run_status is RunStatus.CLEAR
         assert "ROUTE-010" not in [t.finding.rule_id for t in hit.findings]
         assert repo.pending(now=ENGINE_NOW) == []
+
+    def test_a_zone_less_other_family_home_is_withheld_and_the_run_incomplete(
+        self, repo, engine, caplog
+    ):
+        # Another family's contact lists the studio as home and it has no zone:
+        # no request is queued for it, so the leg is unknown, never guessed.
+        register_person(engine, "driver-s", PersonRole.CONTACT, "studio")
+        provider = HaRelayRouteProvider(repo, ZONE, clock=lambda: ENGINE_NOW)
+        with caplog.at_level(logging.WARNING):
+            result = assess(self.inputs(), provider, now=ENGINE_NOW)
+        assert "ROUTE-010" in [t.finding.rule_id for t in result.findings]
+        assert result.run_status is RunStatus.INCOMPLETE
+        assert all("studio" not in pair for pair in self.legs(repo))
+        assert "route_relay.leg_withheld" in caplog.text
+        assert STUDIO_ADDRESS not in caplog.text
+
+    def legs(self, repo):
+        return [(r.leg.origin, r.leg.destination) for r in repo.pending(now=ENGINE_NOW)]
+
+    def test_the_same_run_with_the_home_unregistered_queues_the_studio_legs(self, repo):
+        # Control for the test above: without the contact the studio legs queue.
+        provider = HaRelayRouteProvider(repo, ZONE, clock=lambda: ENGINE_NOW)
+        assess(self.inputs(), provider, now=ENGINE_NOW)
+        assert any("studio" in pair for pair in self.legs(repo))
 
     def test_a_cache_entry_that_aged_out_makes_the_run_incomplete_again(self, repo):
         inp = self.inputs()

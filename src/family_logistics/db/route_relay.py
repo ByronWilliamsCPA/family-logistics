@@ -57,18 +57,26 @@ from sqlalchemy.exc import OperationalError
 from family_logistics.core.database import BUSY_TIMEOUT_MS
 from family_logistics.core.exceptions import DatabaseError, ValidationError
 from family_logistics.db.column_types import UtcDateTime
+from family_logistics.db.registry import RegistryStore
 from family_logistics.db.schema import (
     MAX_ROUTE_DURATION_SECONDS,
     location,
     route_cache,
     route_request,
 )
+from family_logistics.domain.address_release import (
+    HaRelayEndpoint,
+    ha_relay_endpoint,
+    is_other_family_home,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Generator, Sequence
+    from collections.abc import Callable, Collection, Generator, Iterable, Sequence
 
-    from sqlalchemy.engine import Connection, Engine
+    from sqlalchemy.engine import Connection, Engine, RowMapping
     from sqlalchemy.sql.elements import ColumnElement
+
+    from family_logistics.domain.models import Person
 
 CACHE_VALIDITY = timedelta(days=28)
 """How long an observation answers its weekday bucket (owner decision, ADR 0006).
@@ -236,16 +244,22 @@ class PendingRequest:
 
 @dataclass(frozen=True, slots=True)
 class LocationSource:
-    """What a location offers as a routing endpoint, still protected.
+    """What a location may offer as a routing endpoint, still protected.
+
+    The address-release policy (``domain.address_release``) has already been
+    applied: ``address_token`` is set only when ``endpoint`` is ``ADDRESS``, so
+    a withheld home has no ciphertext here to decrypt by mistake.
 
     Attributes:
         zone_entity_id: The Home Assistant zone entity id, or None.
-        address_token: Fernet token of the address, or None. Decrypt it only
-            while building a response.
+        address_token: Fernet token of the address, or None. Set only for an
+            ``ADDRESS`` endpoint; decrypt it only while building a response.
+        endpoint: What the policy allows to be sent for this location.
     """
 
     zone_entity_id: str | None
     address_token: str | None
+    endpoint: HaRelayEndpoint
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,6 +310,29 @@ class BatchOutcome:
             How many items have it.
         """
         return sum(1 for item in self.items if item.status is status)
+
+
+def _source(row: RowMapping, people: Iterable[Person]) -> LocationSource:
+    """Apply the address-release policy to one location row.
+
+    Args:
+        row: The location id, zone entity id and address ciphertext.
+        people: Registered people, for the other-family-home test.
+
+    Returns:
+        The location's endpoint; the ciphertext is kept for ``ADDRESS`` only.
+    """
+    zone_entity_id = cast("str | None", row["ha_zone_entity_id"])
+    endpoint = ha_relay_endpoint(
+        has_ha_zone=bool(zone_entity_id),
+        other_family_home=is_other_family_home(cast("str", row["location_id"]), people),
+    )
+    token = (
+        cast("str | None", row["address_ciphertext"])
+        if endpoint is HaRelayEndpoint.ADDRESS
+        else None
+    )
+    return LocationSource(zone_entity_id, token, endpoint)
 
 
 def bucket_start(bucket: int) -> time:
@@ -717,17 +754,29 @@ class RouteRelayRepository:
     def location_sources(
         self, location_ids: Collection[str]
     ) -> dict[str, LocationSource]:
-        """Return the routing endpoints the given locations offer.
+        """Return the routing endpoints the given locations may offer.
 
-        Nothing is decrypted here.
+        Nothing is decrypted here. Each location is judged by
+        ``ha_relay_endpoint`` against the registry as it is now, read in the
+        same transaction as the location rows (a registry change after a
+        request was queued therefore takes effect on the next call). The
+        protected address of a location whose endpoint is not ``ADDRESS`` is
+        not returned.
 
         Args:
             location_ids: Location ids to look up.
 
         Returns:
-            Location id to its zone id and protected address; ids with no row
-            are absent.
+            Location id to its zone id, protected address and release
+            decision; ids with no row are absent.
         """
+        # #CRITICAL: Security: this is where the owner's address-release gate
+        # (domain/address_release.py) is applied to every endpoint, for both the
+        # provider (enqueue time) and the GET handler (serve time). Another
+        # family's zone-less home must leave here as WITHHELD with no ciphertext.
+        # #VERIFY: tests/unit/test_route_relay_repo.py::TestLocationSources and
+        # the gate tests in tests/unit/test_route_relay_api.py and
+        # tests/unit/test_ha_relay_provider.py.
         if not location_ids:
             return {}
         with self._engine.connect() as connection:
@@ -742,13 +791,15 @@ class RouteRelayRepository:
                 .mappings()
                 .all()
             )
-        return {
-            cast("str", row["location_id"]): LocationSource(
-                cast("str | None", row["ha_zone_entity_id"]),
-                cast("str | None", row["address_ciphertext"]),
+            # Only zone-less locations can be withheld, so a poll whose
+            # endpoints are all zoned reads no registry people. The read is one
+            # query over the household's people, in this transaction.
+            people = (
+                RegistryStore(connection).people()
+                if any(not row["ha_zone_entity_id"] for row in rows)
+                else []
             )
-            for row in rows
-        }
+        return {cast("str", row["location_id"]): _source(row, people) for row in rows}
 
     def record_results(
         self,

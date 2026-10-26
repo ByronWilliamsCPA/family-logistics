@@ -10,19 +10,25 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from fl_relay import (
     DATA_KEY,
+    DRIVER_S_ADDRESS,
     HOME_ADDRESS,
     NOW,
+    PASSENGER_E_ADDRESS,
     STUDIO_ADDRESS,
     ZONE,
     Clock,
     audit_key_text,
+    clear_zone,
     local,
     make_engine,
     make_writes_fail,
+    register_passenger_default,
+    register_person,
 )
 from pydantic import SecretStr
 from sqlalchemy import text
 
+from family_logistics.adapters.routing import HaRelayRouteProvider
 from family_logistics.api import route_relay as route_relay_api
 from family_logistics.api.app import create_app
 from family_logistics.api.ha import MAX_FAILURES, build_ha_router
@@ -32,6 +38,7 @@ from family_logistics.api.route_relay import (
     register_route_relay_routes,
 )
 from family_logistics.core.config import Settings
+from family_logistics.core.crypto import AddressCipher
 from family_logistics.core.database import create_sqlite_engine
 from family_logistics.db.route_relay import (
     MAX_REQUESTS_PER_POLL,
@@ -40,6 +47,7 @@ from family_logistics.db.route_relay import (
     RouteAnswer,
     RouteRelayRepository,
 )
+from family_logistics.domain.models import PersonRole
 
 pytestmark = pytest.mark.unit
 
@@ -341,6 +349,163 @@ class TestGetRouteRequests:
             connection.execute(text("DROP TABLE route_request"))
         response = client.get(GET, headers=GOOD)
         assert response.status_code == 503
+
+
+class TestAddressRelease:
+    """The owner's address-release gate at serve time (domain/address_release)."""
+
+    @pytest.fixture
+    def decrypted(self, monkeypatch):
+        """Record every address decryption attempted while a poll is built."""
+        calls = []
+        original = AddressCipher.decrypt
+
+        def spy(cipher, token):
+            calls.append(token)
+            return original(cipher, token)
+
+        monkeypatch.setattr(AddressCipher, "decrypt", spy)
+        return calls
+
+    def ciphertext(self, engine, location_id):
+        with engine.connect() as connection:
+            stored = connection.execute(
+                text("SELECT address_ciphertext FROM location WHERE location_id = :i"),
+                {"i": location_id},
+            ).scalar_one()
+        return stored.decode() if isinstance(stored, bytes) else stored
+
+    def test_a_zone_less_other_family_home_never_appears_in_a_route_request_payload(
+        self, client, repo, engine, decrypted, caplog
+    ):
+        register_person(engine, "driver-s", PersonRole.CONTACT, "driver-s-home")
+        leg_to = Leg("home", "driver-s-home", FRIDAY, 32)
+        leg_from = Leg("driver-s-home", "studio", FRIDAY, 33)
+        ids = queue(repo, leg_to, leg_from, HOME_TO_SCHOOL)
+        with caplog.at_level(logging.WARNING):
+            response = client.get(GET, headers=GOOD)
+        assert response.status_code == 200
+        assert [r["request_id"] for r in response.json()["requests"]] == [
+            ids[HOME_TO_SCHOOL]
+        ]
+        ciphertext = self.ciphertext(engine, "driver-s-home")
+        assert ciphertext.startswith("gAAAAA")
+        for secret in (DRIVER_S_ADDRESS, ciphertext):
+            assert secret not in response.text
+            assert secret not in caplog.text
+        assert "driver-s-home" not in response.text
+        assert ids[leg_to] not in response.text
+        assert ids[leg_from] not in response.text
+        # Not decrypted at all: not the withheld address, and not the studio
+        # address of the leg that merely touches a withheld home.
+        assert decrypted == []
+        assert STUDIO_ADDRESS not in response.text + caplog.text
+        assert "route_relay.request_withheld" in caplog.text
+
+    def test_a_withheld_request_stays_pending_and_is_cleared_by_expiry(
+        self, client, repo, engine, clock
+    ):
+        register_person(engine, "driver-s", PersonRole.CONTACT, "driver-s-home")
+        queue(repo, Leg("home", "driver-s-home", FRIDAY, 32))
+        assert client.get(GET, headers=GOOD).json() == {"requests": []}
+        assert len(repo.pending(now=clock())) == 1
+        later = clock() + timedelta(days=9)
+        assert repo.pending(now=later) == []
+
+    def test_a_registry_change_after_enqueue_stops_release_at_get_time(
+        self, client, repo, engine, clock
+    ):
+        # The leg is queued by the provider while nobody is registered at the
+        # home, so the enqueue gate lets it through (it is a venue then).
+        provider = HaRelayRouteProvider(repo, ZONE, clock=clock)
+        assert (
+            provider.estimate("home", "driver-s-home", local(8, 5), "driving") is None
+        )
+        (queued,) = repo.pending(now=clock())
+        released = client.get(GET, headers=GOOD).json()["requests"]
+        assert [r["request_id"] for r in released] == [queued.request_id]
+        assert released[0]["destination"] == {
+            "kind": "address",
+            "value": DRIVER_S_ADDRESS,
+        }
+
+        # A contact is registered for that home: the same request is no longer
+        # served, and nothing is decrypted for it.
+        register_person(engine, "driver-s", PersonRole.CONTACT, "driver-s-home")
+        response = client.get(GET, headers=GOOD)
+        assert response.json() == {"requests": []}
+        assert DRIVER_S_ADDRESS not in response.text
+        assert [r.request_id for r in repo.pending(now=clock())] == [queued.request_id]
+
+    def test_the_households_own_zone_less_home_and_a_venue_are_still_sent_as_addresses(
+        self, client, repo, engine
+    ):
+        clear_zone(engine, "home")
+        register_person(engine, "morgan", PersonRole.PARENT, "home")
+        register_person(engine, "alex", PersonRole.CHILD, "home")
+        queue(repo, HOME_TO_STUDIO)
+        (item,) = client.get(GET, headers=GOOD).json()["requests"]
+        assert item["origin"] == {"kind": "address", "value": HOME_ADDRESS}
+        assert item["destination"] == {"kind": "address", "value": STUDIO_ADDRESS}
+
+    def test_a_passengers_default_pickup_alone_is_a_venue_and_is_sent(
+        self, client, repo, engine
+    ):
+        register_passenger_default(engine, "passenger-e", "passenger-e-home")
+        queue(repo, Leg("home", "passenger-e-home", FRIDAY, 32))
+        (item,) = client.get(GET, headers=GOOD).json()["requests"]
+        assert item["destination"] == {
+            "kind": "address",
+            "value": PASSENGER_E_ADDRESS,
+        }
+
+    def test_a_contact_from_the_passengers_household_withholds_that_home(
+        self, client, repo, engine
+    ):
+        register_passenger_default(engine, "passenger-e", "passenger-e-home")
+        register_person(engine, "driver-s", PersonRole.CONTACT, "passenger-e-home")
+        queue(repo, Leg("home", "passenger-e-home", FRIDAY, 32))
+        response = client.get(GET, headers=GOOD)
+        assert response.json() == {"requests": []}
+        assert PASSENGER_E_ADDRESS not in response.text
+
+    def test_a_home_shared_by_a_household_member_and_a_contact_is_withheld(
+        self, client, repo, engine
+    ):
+        register_person(engine, "alex", PersonRole.CHILD, "driver-s-home")
+        register_person(engine, "driver-s", PersonRole.CONTACT, "driver-s-home")
+        queue(repo, Leg("home", "driver-s-home", FRIDAY, 32))
+        response = client.get(GET, headers=GOOD)
+        assert response.json() == {"requests": []}
+        assert DRIVER_S_ADDRESS not in response.text
+
+    def test_a_zoned_contact_home_is_sent_as_its_zone_id_never_its_address(
+        self, client, repo, engine, decrypted
+    ):
+        register_person(engine, "driver-s", PersonRole.CONTACT, "high-school")
+        queue(repo, HOME_TO_SCHOOL)
+        (item,) = client.get(GET, headers=GOOD).json()["requests"]
+        assert item["destination"] == {"kind": "zone", "value": "zone.school_a"}
+        assert decrypted == []
+
+    def test_a_contact_home_whose_zone_was_removed_is_withheld(
+        self, client, repo, engine
+    ):
+        register_person(engine, "driver-s", PersonRole.CONTACT, "high-school")
+        clear_zone(engine, "high-school")
+        queue(repo, HOME_TO_SCHOOL)
+        assert client.get(GET, headers=GOOD).json() == {"requests": []}
+
+    def test_withheld_requests_do_not_starve_a_releasable_one(
+        self, client, repo, engine, monkeypatch
+    ):
+        monkeypatch.setattr(route_relay_api, "MAX_REQUESTS_PER_POLL", 1)
+        register_person(engine, "driver-s", PersonRole.CONTACT, "driver-s-home")
+        for bucket in (40, 41, 42):
+            repo.enqueue(Leg("home", "driver-s-home", FRIDAY, bucket), now=NOW)
+        ids = queue(repo, HOME_TO_SCHOOL, now=NOW + timedelta(seconds=1))
+        items = client.get(GET, headers=GOOD).json()["requests"]
+        assert [i["request_id"] for i in items] == [ids[HOME_TO_SCHOOL]]
 
 
 class TestPostRouteResults:

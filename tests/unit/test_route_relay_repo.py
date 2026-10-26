@@ -6,7 +6,16 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from fl_relay import NOW, ZONE, local, make_engine, make_writes_fail
+from fl_relay import (
+    DRIVER_S_ADDRESS,
+    NOW,
+    ZONE,
+    clear_zone,
+    local,
+    make_engine,
+    make_writes_fail,
+    register_person,
+)
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 
@@ -29,6 +38,8 @@ from family_logistics.db.route_relay import (
     due_weekday,
     slot_of,
 )
+from family_logistics.domain.address_release import HaRelayEndpoint
+from family_logistics.domain.models import PersonRole
 
 pytestmark = pytest.mark.unit
 
@@ -329,13 +340,49 @@ class TestDueRequests:
 
 class TestLocationSources:
     def test_zone_and_protected_address_are_returned_undecrypted(self, repo):
-        sources = repo.location_sources({"home", "middle-school", "missing"})
-        assert set(sources) == {"home", "middle-school"}
+        # "studio" has a stored address and no zone; nobody lists it as a home.
+        sources = repo.location_sources({"home", "studio", "middle-school", "missing"})
+        assert set(sources) == {"home", "studio", "middle-school"}
         assert sources["home"].zone_entity_id == "zone.home_base"
-        assert sources["home"].address_token is not None
-        assert sources["home"].address_token.startswith("gAAAAA")
-        assert sources["middle-school"].zone_entity_id is None
+        assert sources["home"].endpoint is HaRelayEndpoint.ZONE
+        assert sources["studio"].zone_entity_id is None
+        assert sources["studio"].endpoint is HaRelayEndpoint.ADDRESS
+        assert sources["studio"].address_token is not None
+        assert sources["studio"].address_token.startswith("gAAAAA")
+        assert sources["middle-school"].endpoint is HaRelayEndpoint.ADDRESS
         assert sources["middle-school"].address_token is None
+
+    def test_a_zoned_location_carries_no_address_token(self, repo):
+        # "home" has both a zone and a stored address; only the zone is sent.
+        source = repo.location_sources({"home"})["home"]
+        assert source.address_token is None
+
+    def test_a_zone_less_contact_home_is_withheld_with_no_ciphertext(
+        self, engine, repo
+    ):
+        register_person(engine, "driver-s", PersonRole.CONTACT, "driver-s-home")
+        source = repo.location_sources({"driver-s-home"})["driver-s-home"]
+        assert source.endpoint is HaRelayEndpoint.WITHHELD
+        assert source.address_token is None
+        assert DRIVER_S_ADDRESS not in repr(source)
+
+    def test_the_registry_is_read_afresh_on_every_call(self, engine, repo):
+        before = repo.location_sources({"driver-s-home"})["driver-s-home"]
+        assert before.endpoint is HaRelayEndpoint.ADDRESS
+        register_person(engine, "driver-s", PersonRole.CONTACT, "driver-s-home")
+        after = repo.location_sources({"driver-s-home"})["driver-s-home"]
+        assert after.endpoint is HaRelayEndpoint.WITHHELD
+
+    def test_a_zone_beats_the_contact_home_rule(self, engine, repo):
+        register_person(engine, "driver-s", PersonRole.CONTACT, "high-school")
+        source = repo.location_sources({"high-school"})["high-school"]
+        assert source.endpoint is HaRelayEndpoint.ZONE
+
+    def test_removing_the_zone_from_a_contact_home_withholds_it(self, engine, repo):
+        register_person(engine, "driver-s", PersonRole.CONTACT, "high-school")
+        clear_zone(engine, "high-school")
+        source = repo.location_sources({"high-school"})["high-school"]
+        assert source.endpoint is HaRelayEndpoint.WITHHELD
 
     def test_no_ids_means_no_query(self, repo):
         assert repo.location_sources(set()) == {}
