@@ -59,8 +59,8 @@ class EngineSettings:
             no earlier than this before the activity starts.
         reachability_window: Driver reachability between back-to-back
             commitments is checked only when the gap is at most this long.
-        imminent_window: Rides starting within this window are imminent; an
-            unverified destination is then critical.
+        imminent_window: A ride is imminent when it starts within this window
+            or has already started; an unverified destination is then critical.
         unverified_capacity_seats: Report an unknown vehicle capacity only
             when a ride needs at least this many seats (driver included).
         source_max_ages: Staleness limit per source name.
@@ -256,13 +256,13 @@ class AssessmentContext:
         )
 
     def is_imminent(self, start: datetime) -> bool:
-        """Report whether a ride starts within the imminent window.
+        """Report whether a ride starts within the imminent window or has started.
 
         Args:
             start: Ride start (UTC).
 
         Returns:
-            True when the ride starts between now and the window's end.
+            True when the ride starts within the window or has already started.
         """
         return start - self.now <= self.settings.imminent_window
 

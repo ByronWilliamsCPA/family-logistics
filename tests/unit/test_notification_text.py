@@ -1423,8 +1423,9 @@ class TestStatusCounts:
 class TestEscalated:
     def test_the_field_is_last_and_defaults_false(self):
         names = [f.name for f in fields(PlannedPush)]
-        assert names[-1] == "escalated"
-        assert PlannedPush("k", PushKind.NOTICE, "fl-warning").escalated is False
+        assert names[-2:] == ["escalated", "kind_only_escalation"]
+        bare = PlannedPush("k", PushKind.NOTICE, "fl-warning")
+        assert (bare.escalated, bare.kind_only_escalation) == (False, False)
 
     @pytest.mark.parametrize("lifecycle", list(Lifecycle))
     def test_an_escalated_critical_finding_says_now_critical(self, lifecycle):
@@ -1440,6 +1441,25 @@ class TestEscalated:
         rendered = render_one(replace(push(found), escalated=True))
         assert f"(now could not verify, ref {found.issue_id})" in rendered.body
         assert "now critical" not in rendered.body
+
+    def test_a_kind_only_escalation_says_now_imminent_not_now_critical(self):
+        found = finding()
+        pushed = replace(push(found), escalated=True, kind_only_escalation=True)
+        rendered = render_one(pushed)
+        assert f"(now imminent, ref {found.issue_id})" in rendered.body
+        assert "now critical" not in rendered.body
+
+    def test_a_kind_only_incomplete_escalation_is_not_called_could_not_verify(self):
+        found = finding("ROUTE-010", severity=Severity.INCOMPLETE)
+        pushed = replace(push(found), escalated=True, kind_only_escalation=True)
+        rendered = render_one(pushed)
+        assert f"(now imminent, ref {found.issue_id})" in rendered.body
+        assert "now could not verify" not in rendered.body
+
+    def test_the_kind_only_flag_alone_changes_nothing(self):
+        found = finding()
+        rendered = render_one(replace(push(found), kind_only_escalation=True))
+        assert f"(new, ref {found.issue_id})" in rendered.body
 
     def test_not_escalated_keeps_the_lifecycle_word(self):
         found = finding()

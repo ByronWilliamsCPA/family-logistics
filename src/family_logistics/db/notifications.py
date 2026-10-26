@@ -83,6 +83,8 @@ from family_logistics.domain.notification_policy import (
     PushKind,
     StateView,
     decide,
+    is_escalation,
+    severity_rose,
     starts_new_episode,
 )
 from family_logistics.utils.logging import get_logger
@@ -109,6 +111,50 @@ CLAIM_LOCK_BACKOFF_SECONDS: Final = 0.1
 _table = schema.notification_state
 _watermark = schema.notification_watermark
 _WATERMARK_ID: Final = 1
+
+
+def load_name_rows(
+    engine: Engine,
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str]]]:
+    """Read the narrow name rows a ``NameDirectory`` is built from (D2).
+
+    Two column-limited reads (not ``load_snapshot``), so no address and no
+    cipher is involved. The caller masks the names: this returns them as stored.
+
+    Args:
+        engine: Database engine at the schema head.
+
+    Returns:
+        ``(person_id, display_name, role)`` rows of the ``person`` table and
+        ``(passenger_id, display_first_name)`` rows of ``external_passenger``.
+    """
+    people_table = schema.person
+    passenger_table = schema.external_passenger
+    with engine.connect() as connection:
+        people = [
+            (
+                cast("str", row.person_id),
+                cast("str", row.display_name),
+                cast("str", row.role),
+            )
+            for row in connection.execute(
+                select(
+                    people_table.c.person_id,
+                    people_table.c.display_name,
+                    people_table.c.role,
+                )
+            )
+        ]
+        passengers = [
+            (cast("str", row.passenger_id), cast("str", row.display_first_name))
+            for row in connection.execute(
+                select(
+                    passenger_table.c.passenger_id,
+                    passenger_table.c.display_first_name,
+                )
+            )
+        ]
+    return people, passengers
 
 
 class NotificationStateBusyError(DatabaseError):
@@ -352,6 +398,19 @@ class NotificationStateRepository:
         ctx = _ClaimContext(mode, token, run_id, evaluated_at, now, quiet, policy)
         return self._retrying(lambda: self._claim_once(plan, ctx))
 
+    def watermark_run_id(self) -> str | None:
+        """Return the run that holds the watermark, for a stale-outcome log.
+
+        A plain read outside any write transaction; it only labels a log line.
+
+        Returns:
+            The run ID, or None before the first dispatch.
+        """
+        with self._engine.connect() as connection:
+            return connection.execute(
+                select(_watermark.c.run_id).where(_watermark.c.id == _WATERMARK_ID)
+            ).scalar_one_or_none()
+
     def _retrying[T](self, operation: Callable[[], T]) -> T:
         """Run one write transaction, retrying while the database is busy.
 
@@ -479,6 +538,14 @@ class NotificationStateRepository:
         )
         new_episode = starts_new_episode(effective, view, ctx.run_id)
         if decision is Decision.SEND:
+            if not new_episode and view is not None and is_escalation(effective, view):
+                # The stored row, not the plan, knows what was last delivered,
+                # so the claim is where "now critical" is learned (D4).
+                effective = replace(
+                    effective,
+                    escalated=True,
+                    kind_only_escalation=not severity_rose(effective, view),
+                )
             self._write_claim(connection, effective, row, ctx)
         elif (
             decision is Decision.QUIET_HOURS
@@ -715,4 +782,5 @@ __all__ = [
     "NotificationStateBusyError",
     "NotificationStateRepository",
     "PushDecision",
+    "load_name_rows",
 ]

@@ -220,8 +220,11 @@ class PlannedPush:
         subject: The derived subject, for rendering.
         run_status: The run's status, for ``status`` and ``report`` pushes.
         escalated: The severity or kind rose since the last delivery. ``plan``
-            never sets it (it needs the state row); the service sets it after
+            never sets it (it needs the state row); the claim sets it after
             ``decide`` so the renderer can say ``now critical``.
+        kind_only_escalation: With ``escalated``, only the kind rose (notice to
+            urgent at the same severity), so the renderer says ``now imminent``
+            rather than repeating a severity the parent already read.
     """
 
     subject_key: str
@@ -236,6 +239,7 @@ class PlannedPush:
     subject: Subject | None = None
     run_status: RunStatus | None = None
     escalated: bool = False
+    kind_only_escalation: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -621,18 +625,55 @@ def plan_unavailable(*, now: datetime, policy: NotificationPolicy) -> Plan:
     )
 
 
+def is_escalation(push: PlannedPush, row: StateView) -> bool:
+    """Say whether a push outranks what its row last delivered (D5).
+
+    The severity rose above the delivered severity, or the kind rose from
+    ``notice`` to ``urgent``. An undelivered row has nothing to outrank, so it
+    is never an escalation. The notification state repository uses this to set
+    ``PlannedPush.escalated`` on a claimed push, so the renderer can say
+    ``now critical`` or, for a kind-only rise, ``now imminent``.
+
+    Args:
+        push: The planned push (for a retry, the effective push).
+        row: The subject's stored row.
+
+    Returns:
+        True when the delivered push is outranked.
+    """
+    kind_rose = (
+        row.delivered and push.kind is PushKind.URGENT and row.kind is PushKind.NOTICE
+    )
+    return severity_rose(push, row) or kind_rose
+
+
+def severity_rose(push: PlannedPush, row: StateView) -> bool:
+    """Say whether a push's severity outranks the severity last delivered.
+
+    Separates a severity rise from a kind-only rise (a notice that became
+    urgent at the same severity), because the two are worded differently.
+
+    Args:
+        push: The planned push (for a retry, the effective push).
+        row: The subject's stored row.
+
+    Returns:
+        True when the row was delivered and the severity is now higher.
+    """
+    return (
+        row.delivered
+        and row.severity is not None
+        and push.severity is not None
+        and severity_rank(push.severity) > severity_rank(row.severity)
+    )
+
+
 def _owed_in_episode(push: PlannedPush, row: StateView, *, new_day: bool) -> bool:
     """Report whether an open episode's row is owed another push."""
     if not row.delivered:
         return True
-    escalated = (
-        row.severity is not None
-        and push.severity is not None
-        and severity_rank(push.severity) > severity_rank(row.severity)
-    )
-    kind_rose = push.kind is PushKind.URGENT and row.kind is PushKind.NOTICE
     rearmed = push.run_wide and push.kind is PushKind.URGENT and new_day
-    return escalated or kind_rose or rearmed
+    return is_escalation(push, row) or rearmed
 
 
 def starts_new_episode(push: PlannedPush, row: StateView | None, run_id: str) -> bool:
@@ -779,9 +820,11 @@ __all__ = [
     "delivery_tag",
     "finding_kind",
     "in_quiet_hours",
+    "is_escalation",
     "plan",
     "plan_unavailable",
     "production_tag",
     "severity_rank",
+    "severity_rose",
     "starts_new_episode",
 ]

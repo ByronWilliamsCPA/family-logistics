@@ -362,10 +362,11 @@ class Settings(BaseSettings):
         apprise_url: Apprise API base URL (http or https, no embedded credentials).
         apprise_config_key: Key of the saved Apprise configuration that holds the
             app's notification services; sent as ``POST /notify/{key}``.
-        apprise_tag_report: Weekly and daily report email.
+        apprise_tag_report: Weekly run summary.
         apprise_tag_status: Completed-assessment short push.
-        apprise_tag_warning: New validation error push.
-        apprise_tag_urgent: Critical issue on an imminent ride (bypasses quiet hours).
+        apprise_tag_warning: Non-urgent findings.
+        apprise_tag_urgent: Critical or unverifiable imminent ride; one quiet-hours
+            push per episode.
         apprise_tag_ops: Service-health alerts (meant for Morgan only; the
             recipients are set in the Apprise configuration, not enforced here).
         apprise_tag_shadow: Shadow-mode output (meant for Morgan only; the
@@ -394,17 +395,19 @@ class Settings(BaseSettings):
         weekly_cron: Cron expression for the weekly review (local time).
         daily_cron: Cron expression for the daily review (local time).
         change_scan_minutes: Interval of the incremental change scan.
-        notification_mode: ``shadow`` (default) is the safe mode: the Sunday
-            report goes to Morgan only. ``production`` is a deliberate operator
-            decision taken jointly after the M3 shadow gate
-            (docs/project/roadmap.md). Recipient
-            routing is configured in Apprise; today ``serve`` and ``config``
-            are the only readers of this value.
-        quiet_hours_start: Start of quiet hours (local time).
+        notification_mode: ``shadow`` (default) is the safe mode: every push,
+            ops alerts included, goes to the shadow tag only (ADR 0008, D1).
+            ``production`` is a deliberate operator decision taken jointly
+            after the M3 shadow gate (docs/project/roadmap.md). Recipient
+            routing is configured in Apprise; the notification service reads
+            this value, but nothing calls it until the scheduler does.
+        quiet_hours_start: Start of quiet hours (local time). Only an urgent
+            push bypasses them, once per episode; CAP-014 never does.
         quiet_hours_end: End of quiet hours (local time).
-        imminent_window_minutes: Rides starting within this window are
-            imminent; their critical issues bypass quiet hours and an
-            unverified destination on them is critical.
+        imminent_window_minutes: A ride is imminent from this long before it
+            starts until it ends; its critical or unverifiable findings are
+            urgent (so they may bypass quiet hours, once per episode) and an
+            unverified destination on it is critical.
         same_location_gap_minutes: Largest idle gap between two activities at
             one place that still counts as a single stay (no ride needed).
         overnight_gap_hours: Largest idle gap between stays at one place on
