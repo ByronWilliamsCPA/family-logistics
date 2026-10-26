@@ -485,6 +485,35 @@ class TestHeldPushes:
                 tag="fl-ops",
                 rule_id=None,
                 severity=None,
+                delivered=False,
+                send_count=0,
+            ),
+        )
+        before = get_row(engine, OPS_FAILED)
+        result = claim(
+            repo,
+            push(OPS_FAILED, PushKind.OPS),
+            run_id="run-2",
+            evaluated_at=NIGHT,
+            quiet=True,
+            now=NIGHT,
+            completed=False,
+        )
+        assert decisions(result) == [Decision.QUIET_HOURS]
+        assert result.claimed == ()
+        assert get_row(engine, OPS_FAILED) == before
+
+    def test_a_delivered_ops_push_on_an_open_row_is_a_duplicate_at_night(
+        self, repo, engine
+    ):
+        put_row(
+            engine,
+            **delivered_row(
+                subject_key=OPS_FAILED,
+                kind="ops",
+                tag="fl-ops",
+                rule_id=None,
+                severity=None,
             ),
         )
         before = get_row(engine, OPS_FAILED)

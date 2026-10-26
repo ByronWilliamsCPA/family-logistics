@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from fl_notification_state import (
@@ -81,6 +82,40 @@ class TestBoundary:
     def test_the_age_is_measured_from_updated_at_not_creation(self, engine):
         put_row(engine, **closed(CUTOFF, created_at=T0))
         assert purge(engine) == 0
+
+
+class TestDaylightSavingTime:
+    """The cutoff is 90 elapsed days, not 90 calendar days in the local zone."""
+
+    # 2026-04-01 12:00 in Los Angeles is 19:00 UTC (PDT). Ninety calendar days
+    # earlier in local wall-clock time is 2026-01-01 12:00 PST, which is 20:00
+    # UTC, an hour after the true cutoff of 2026-01-01 19:00 UTC.
+    LOCAL_NOW = datetime(2026, 4, 1, 12, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
+    TRUE_CUTOFF = datetime(2026, 1, 1, 19, 0, tzinfo=UTC)
+
+    def test_the_cutoff_is_ninety_elapsed_days_across_a_dst_change(self, engine):
+        assert self.LOCAL_NOW.astimezone(UTC) - self.TRUE_CUTOFF == timedelta(days=90)
+        put_row(
+            engine,
+            subject_key=ISSUE,
+            **closed(self.TRUE_CUTOFF - timedelta(seconds=1)),
+        )
+        put_row(engine, subject_key=ISSUE_B, **closed(self.TRUE_CUTOFF))
+        put_row(
+            engine,
+            subject_key=OTHER_ISSUE,
+            **closed(self.TRUE_CUTOFF + timedelta(minutes=30)),
+        )
+        assert purge(engine, now=self.LOCAL_NOW) == 1
+        assert keys(engine) == {(ISSUE_B, "shadow"), (OTHER_ISSUE, "shadow")}
+
+    def test_an_aware_utc_and_a_local_now_for_one_instant_purge_the_same(self, engine):
+        put_row(
+            engine,
+            **closed(self.TRUE_CUTOFF + timedelta(minutes=30)),
+        )
+        assert purge(engine, now=self.LOCAL_NOW.astimezone(UTC)) == 0
+        assert purge(engine, now=self.LOCAL_NOW) == 0
 
 
 class TestOnlyClosedRowsGo:

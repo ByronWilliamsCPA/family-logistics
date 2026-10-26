@@ -23,7 +23,7 @@ subject (hashed keys, no personal data). Closed rows older than
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from sqlalchemy import delete, func, literal, or_, select, update
@@ -224,8 +224,12 @@ def purge_expired_notification_state(connection: Connection, *, now: datetime) -
     than ``NOTIFICATION_STATE_RETENTION_DAYS`` days before ``now``; a row exactly
     that old is kept. Open rows are never purged, however old, because deleting
     one would make the next scan notify its still-open finding again. Nothing
-    else is touched: not the watermark, not the audit log. The caller owns the
-    transaction; a second call with the same ``now`` deletes nothing.
+    else is touched: not the watermark, not the audit log. The cutoff is
+    computed in UTC, so a ``now`` in a zone with daylight saving time still
+    gives exactly 90 elapsed days. ``julianday`` compares at millisecond
+    precision, so a row less than a millisecond inside the cutoff is kept until
+    the next purge (it fails safe). The caller owns the transaction; a second
+    call with the same ``now`` deletes nothing.
 
     Args:
         connection: An open connection, normally inside ``engine.begin()``.
@@ -245,7 +249,7 @@ def purge_expired_notification_state(connection: Connection, *, now: datetime) -
     # #VERIFY: tests/unit/test_notification_state_retention.py pins the exact
     # 90-day boundary, that open rows survive, and that no other table changes.
     _require_aware(now)
-    cutoff = now - timedelta(days=NOTIFICATION_STATE_RETENTION_DAYS)
+    cutoff = now.astimezone(UTC) - timedelta(days=NOTIFICATION_STATE_RETENTION_DAYS)
     table = schema.notification_state
     expired = func.julianday(table.c.updated_at) < func.julianday(
         literal(cutoff, UtcDateTime())
