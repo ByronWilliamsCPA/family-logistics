@@ -331,29 +331,37 @@ async def _read_body(request: Request) -> bytes:
     Returns:
         The body bytes.
 
-    Raises:
-        HTTPException: 413 when the body is over the cap.
+    Note:
+        A body over the cap raises ``HTTPException`` with status 413, via
+        ``_refuse_over_cap``.
     """
     # #CRITICAL: Security: the cap must hold before anything parses the body;
     # an unbounded read is a memory-exhaustion path for a caller with the token.
     # #VERIFY: tests/unit/test_route_relay_api.py (the 413 cases, with and
     # without a Content-Length header).
     declared = request.headers.get("content-length")
-    if declared is not None and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
-        raise _too_large()
+    if declared is not None and declared.isdigit():
+        _refuse_over_cap(int(declared))
     body = bytearray()
     async for chunk in request.stream():
         body.extend(chunk)
-        if len(body) > MAX_BODY_BYTES:
-            raise _too_large()
+        _refuse_over_cap(len(body))
     return bytes(body)
 
 
-def _too_large() -> HTTPException:
-    """Build the 413 for a body over ``MAX_BODY_BYTES``."""
-    return HTTPException(
-        status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=BODY_TOO_LARGE
-    )
+def _refuse_over_cap(size: int) -> None:
+    """Refuse a body of ``size`` bytes when it is over ``MAX_BODY_BYTES``.
+
+    Args:
+        size: The declared or accumulated body size in bytes.
+
+    Raises:
+        HTTPException: 413 when ``size`` is over the cap.
+    """
+    if size > MAX_BODY_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=BODY_TOO_LARGE
+        )
 
 
 def _parse_answers(raw: bytes) -> list[RouteAnswer]:

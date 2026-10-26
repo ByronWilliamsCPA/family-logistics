@@ -486,11 +486,8 @@ def _write_locked(engine: Engine, lock_timeout_ms: int) -> Generator[Connection]
 
     Raises:
         RouteRelayBusyError: The write lock was not granted in time.
-
-    Note:
-        An operational error that is not lock contention propagates unchanged
-        (``sqlalchemy.exc.OperationalError``), so callers report a store error
-        rather than a retryable busy state.
+        OperationalError: Any other operational error, unchanged, so callers
+            report a store error rather than a retryable busy state.
     """
     with engine.connect() as connection:
         connection.exec_driver_sql(f"PRAGMA busy_timeout={int(lock_timeout_ms)}")
