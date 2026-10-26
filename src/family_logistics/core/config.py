@@ -401,12 +401,13 @@ class Settings(BaseSettings):
             after the M3 shadow gate (docs/project/roadmap.md). Recipient
             routing is configured in Apprise; the notification service reads
             this value, but nothing calls it until the scheduler does.
-        quiet_hours_start: Start of quiet hours (local time).
-        quiet_hours_end: End of quiet hours (local time); one urgent push per
-            episode bypasses quiet hours.
+        quiet_hours_start: Start of quiet hours (local time). Only an urgent
+            push bypasses them, once per episode; CAP-014 never does.
+        quiet_hours_end: End of quiet hours (local time).
         imminent_window_minutes: A ride is imminent from this long before it
-            starts until it ends; critical issues on it bypass quiet hours and
-            an unverified destination on it is critical.
+            starts until it ends; its critical or unverifiable findings are
+            urgent (so they may bypass quiet hours, once per episode) and an
+            unverified destination on it is critical.
         same_location_gap_minutes: Largest idle gap between two activities at
             one place that still counts as a single stay (no ride needed).
         overnight_gap_hours: Largest idle gap between stays at one place on

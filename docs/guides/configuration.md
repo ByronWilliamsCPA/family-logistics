@@ -70,11 +70,11 @@ shows non-secret values only.
 | `FL_APPRISE_TAG_STATUS` | `fl-status` | Completed daily or on-demand run summary |
 | `FL_APPRISE_TAG_WARNING` | `fl-warning` | Non-urgent findings |
 | `FL_APPRISE_TAG_URGENT` | `fl-urgent` | Critical or unverifiable imminent ride; one quiet-hours push per episode |
-| `FL_APPRISE_TAG_OPS` | `fl-ops` | One alert per failed or incomplete episode, to the operator |
+| `FL_APPRISE_TAG_OPS` | `fl-ops` | Operator alerts: one per failed or incomplete episode, and (with the scheduler) collection failures, the routing budget and an unreachable database |
 | `FL_APPRISE_TAG_SHADOW` | `fl-shadow` | All output while in shadow mode |
 | `FL_NOTIFICATION_MODE` | `shadow` | `shadow` or `production`; production needs both parents' approval |
-| `FL_QUIET_HOURS_START` | `22:00` | Start of quiet hours (local time) |
-| `FL_QUIET_HOURS_END` | `06:00` | End of quiet hours (local time); one urgent push per episode bypasses quiet hours |
+| `FL_QUIET_HOURS_START` | `22:00` | Start of quiet hours (local time); only an urgent push bypasses them, once per episode (CAP-014 never does) |
+| `FL_QUIET_HOURS_END` | `06:00` | End of quiet hours (local time) |
 | `FL_IMMINENT_WINDOW_MINUTES` | `180` | A ride or move is imminent from this long before it starts until it ends; urgent pushes about it may bypass quiet hours, and an unverified destination on it is critical |
 | `FL_SAME_LOCATION_GAP_MINUTES` | `60` | Largest idle gap between activities at one place that still counts as one stay (no ride needed) |
 | `FL_OVERNIGHT_GAP_HOURS` | `14` | Largest idle gap between stays at one place on consecutive days that still counts as an overnight (no return home, no morning trip) |
