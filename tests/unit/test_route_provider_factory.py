@@ -1,4 +1,4 @@
-"""NullRouteProvider and the route provider factory (ADR-006, PR 1 of 3)."""
+"""NullRouteProvider and the route provider factory (ADR 0006, PR 1 of 3)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from family_logistics.adapters.routing import (
     NullRouteProvider,
     RouteConstraints,
     RouteProvider,
-    RouteProviderNotImplementedError,
+    RouteProviderUnavailableError,
     StaticRouteProvider,
     build_route_provider,
 )
@@ -75,9 +75,36 @@ class TestNullProvider:
         result = NullRouteProvider().optimize("P", stops, None, constraints)
         assert result.status is OrderStatus.INCOMPLETE
         assert result.order == ()
+        assert result.reason.startswith("A travel estimate is unavailable")
         assert result == StaticRouteProvider({}).optimize("P", stops, None, constraints)
         populated = StaticRouteProvider(MATRIX).optimize("P", stops, None, constraints)
         assert populated.order == ("b", "a")
+
+    def test_a_manual_order_missing_a_stop_is_refused_for_that_reason(self):
+        # fixed_order reaches choose_stop_order: the coverage check runs before
+        # any travel time is asked for, so the reason is the STOP_ORDER one.
+        constraints = RouteConstraints(departure_time=NOW, fixed_order=("a",))
+        stops = [Stop("a", "A"), Stop("b", "B")]
+        result = NullRouteProvider().optimize("P", stops, None, constraints)
+        assert result.status is OrderStatus.INCOMPLETE
+        assert result.reason.startswith("STOP_ORDER")
+
+    def test_no_stops_is_vacuously_feasible(self):
+        constraints = RouteConstraints(departure_time=NOW)
+        result = NullRouteProvider().optimize("P", [], None, constraints)
+        assert result.status is OrderStatus.FEASIBLE
+        assert result.order == ()
+
+    def test_no_stops_with_an_end_is_incomplete(self):
+        constraints = RouteConstraints(departure_time=NOW)
+        result = NullRouteProvider().optimize("P", [], "H", constraints)
+        assert result.status is OrderStatus.INCOMPLETE
+
+    def test_an_end_location_makes_the_final_leg_unknown(self):
+        constraints = RouteConstraints(departure_time=NOW, fixed_order=("a",))
+        result = NullRouteProvider().optimize("P", [Stop("a", "A")], "H", constraints)
+        assert result.status is OrderStatus.INCOMPLETE
+        assert result.reason.startswith("A travel estimate is unavailable")
 
     def test_free_order_with_unknown_times_is_incomplete_never_guessed(self):
         constraints = RouteConstraints(departure_time=NOW)
@@ -95,8 +122,15 @@ class TestNullProvider:
 
 
 class TestFactory:
-    def test_default_setting_is_ha_relay(self):
-        assert settings().route_provider == "ha_relay"
+    def test_default_setting_is_ha_relay(self, monkeypatch):
+        # Built without route_provider, and isolated from FL_ROUTE_PROVIDER and
+        # from .env, so a change to the shipped default fails this test.
+        monkeypatch.delenv("FL_ROUTE_PROVIDER", raising=False)
+        assert Settings(_env_file=None).route_provider == "ha_relay"
+
+    def test_the_environment_selects_the_provider(self, monkeypatch):
+        monkeypatch.setenv("FL_ROUTE_PROVIDER", "google_routes")
+        assert Settings(_env_file=None).route_provider == "google_routes"
 
     def test_ha_relay_yields_null_provider_and_warns(self, caplog):
         with caplog.at_level("WARNING"):
@@ -105,7 +139,10 @@ class TestFactory:
         assert provider.estimate("a", "b", NOW, "driving") is None
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
         assert len(warnings) == 1
-        assert "routing.ha_relay_not_implemented" in warnings[0].getMessage()
+        message = warnings[0].getMessage()
+        assert "routing.ha_relay_not_implemented" in message
+        assert "ha_relay" in message
+        assert "ROUTE-010" in message
 
     def test_the_ha_relay_warning_is_logged_once_per_process(self, caplog):
         with caplog.at_level("WARNING"):
@@ -114,20 +151,59 @@ class TestFactory:
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
         assert len(warnings) == 1
 
+    def test_concurrent_builds_log_the_ha_relay_warning_once(self, caplog):
+        # Probabilistic evidence only: the barrier releases all threads at
+        # once, but a missing lock would not always lose the race.
+        threads_count = 8
+        barrier = threading.Barrier(threads_count)
+        cfg = settings("ha_relay")
+
+        def build() -> None:
+            barrier.wait()
+            build_route_provider(cfg)
+
+        threads = [threading.Thread(target=build) for _ in range(threads_count)]
+        with caplog.at_level("WARNING"):
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+
     def test_google_routes_is_refused_not_silently_replaced(self):
-        with pytest.raises(RouteProviderNotImplementedError) as caught:
-            build_route_provider(settings("google_routes"))
+        cfg = settings("google_routes")
+        with pytest.raises(RouteProviderUnavailableError) as caught:
+            build_route_provider(cfg)
         assert "google_routes" in str(caught.value)
         assert "not implemented" in str(caught.value)
+        assert caught.value.provider == "google_routes"
         assert caught.value.details["provider"] == "google_routes"
+        assert caught.value.error_code == "ROUTE_PROVIDER_NOT_IMPLEMENTED"
 
     def test_the_typed_error_belongs_to_the_hierarchy(self):
-        assert issubclass(RouteProviderNotImplementedError, ConfigurationError)
+        assert issubclass(RouteProviderUnavailableError, ConfigurationError)
+
+    def test_the_typed_error_reports_provider_and_code(self):
+        error = RouteProviderUnavailableError(
+            "boom",
+            provider="static",
+            details={"provider": "other", "extra": 1},
+            error_code="CUSTOM",
+        )
+        assert error.provider == "static"
+        assert error.details == {"provider": "static", "extra": 1}
+        assert error.error_code == "CUSTOM"
+        default = RouteProviderUnavailableError("boom", provider="static")
+        assert default.error_code == "ROUTE_PROVIDER_NOT_IMPLEMENTED"
 
     def test_static_without_a_table_is_refused(self):
-        with pytest.raises(RouteProviderNotImplementedError) as caught:
-            build_route_provider(settings("static"))
+        cfg = settings("static")
+        with pytest.raises(RouteProviderUnavailableError) as caught:
+            build_route_provider(cfg)
         assert "static" in str(caught.value)
+        assert caught.value.details["provider"] == "static"
+        assert caught.value.error_code == "ROUTE_PROVIDER_MATRIX_REQUIRED"
 
     def test_static_with_an_explicit_table_is_built(self):
         provider = build_route_provider(settings("static"), static_matrix=MATRIX)
@@ -141,26 +217,26 @@ class TestFactory:
         assert isinstance(provider, StaticRouteProvider)
         assert provider.estimate("P", "A", NOW, "driving") is None
 
-    def test_a_table_does_not_turn_ha_relay_into_the_static_provider(self):
-        provider = build_route_provider(settings("ha_relay"), static_matrix=MATRIX)
-        assert isinstance(provider, NullRouteProvider)
-        assert not isinstance(provider, StaticRouteProvider)
-        assert provider.estimate("P", "A", NOW, "driving") is None
-
-    def test_a_table_does_not_rescue_google_routes(self):
-        with pytest.raises(RouteProviderNotImplementedError):
-            build_route_provider(settings("google_routes"), static_matrix=MATRIX)
+    @pytest.mark.parametrize("name", ["ha_relay", "google_routes"])
+    def test_a_table_with_a_non_static_provider_is_rejected(self, name, caplog):
+        cfg = settings(name)
+        caplog.set_level("WARNING")
+        with pytest.raises(ValueError, match="static_matrix"):
+            build_route_provider(cfg, static_matrix=MATRIX)
+        # Rejected before any provider is chosen: no placeholder warning.
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
     def test_an_unknown_provider_name_fails_closed(self):
         unvalidated = Settings.model_construct(route_provider="bogus")
-        with pytest.raises(RouteProviderNotImplementedError) as caught:
+        with pytest.raises(RouteProviderUnavailableError) as caught:
             build_route_provider(unvalidated)
         assert caught.value.details["provider"] == "bogus"
+        assert caught.value.error_code == "ROUTE_PROVIDER_UNKNOWN"
 
     def test_factory_is_exported_from_the_package(self):
         assert set(routing.__all__) >= {
             "NullRouteProvider",
-            "RouteProviderNotImplementedError",
+            "RouteProviderUnavailableError",
             "build_route_provider",
         }
 
@@ -186,6 +262,11 @@ def ride(uid, start, end, *, pickup, destinations):
     )
 
 
+def default_provider() -> RouteProvider:
+    """The provider an unconfigured deployment gets (the factory's output)."""
+    return build_route_provider(settings("ha_relay"))
+
+
 class TestEngineFailsClosed:
     def test_a_run_on_the_null_provider_is_incomplete_with_route_010(self):
         lesson = activity("lesson", ("sam",), "studio", at(16), at(17))
@@ -208,7 +289,7 @@ class TestEngineFailsClosed:
         with_data = assess(inp, routes(), now=NOW)
         assert with_data.run_status is RunStatus.CLEAR
 
-        result = assess(inp, NullRouteProvider(), now=NOW)
+        result = assess(inp, default_provider(), now=NOW)
         rule_ids = [t.finding.rule_id for t in result.findings]
         assert "ROUTE-010" in rule_ids
         assert result.run_status is RunStatus.INCOMPLETE
@@ -241,9 +322,12 @@ class TestEngineFailsClosed:
         slow = assess(inp, routes(30), now=NOW)
         assert [t.finding.rule_id for t in slow.findings] == ["DRIVER-006"]
 
-        result = assess(inp, NullRouteProvider(), now=NOW)
+        result = assess(inp, default_provider(), now=NOW)
         route_gaps = [
             t.finding for t in result.findings if t.finding.rule_id == "ROUTE-010"
         ]
-        assert any("pickup" in f.message for f in route_gaps)
+        assert [f.message for f in route_gaps] == [
+            "Travel time to a ride pickup is unavailable; timing is unchecked."
+        ]
+        assert "DRIVER-006" not in [t.finding.rule_id for t in result.findings]
         assert result.run_status is RunStatus.INCOMPLETE

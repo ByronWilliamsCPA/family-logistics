@@ -6,7 +6,7 @@ across the application. All project-specific exceptions inherit from ProjectBase
 Exception Hierarchy:
     ProjectBaseError (base for all project exceptions)
     ├── ConfigurationError (configuration/settings issues)
-    │   └── RouteProviderNotImplementedError (configured routing provider unavailable)
+    │   └── RouteProviderUnavailableError (configured routing provider cannot be built)
     ├── ValidationError (input/data validation failures)
     ├── ResourceNotFoundError (missing resources/entities)
     ├── AuthenticationError (authentication failures)
@@ -147,25 +147,34 @@ class ConfigurationError(ProjectBaseError):
     """
 
 
-class RouteProviderNotImplementedError(ConfigurationError):
+class RouteProviderUnavailableError(ConfigurationError):
     """The configured route provider cannot be built.
 
     Raised by the route provider factory when ``FL_ROUTE_PROVIDER`` names a
-    provider that is not implemented yet or lacks required input. The factory
-    never falls back to another provider silently.
+    provider that is not implemented yet, lacks required input, or is not a
+    known provider at all. The factory never falls back to another provider
+    silently. ``error_code`` tells the causes apart:
+    ``ROUTE_PROVIDER_NOT_IMPLEMENTED`` (the default), ``ROUTE_PROVIDER_MATRIX_REQUIRED``
+    and ``ROUTE_PROVIDER_UNKNOWN``.
 
     Args:
         message: Why the provider cannot be built.
         provider: The configured provider name.
-        details: Additional context.
+        details: Additional context. The ``provider`` key always reports the
+            ``provider`` argument, whatever ``details`` holds.
         error_code: Machine-readable error code.
 
+    Attributes:
+        provider: The configured provider name.
+
     Example:
-        >>> raise RouteProviderNotImplementedError(
+        >>> raise RouteProviderUnavailableError(
         ...     "FL_ROUTE_PROVIDER=google_routes is not implemented yet",
         ...     provider="google_routes",
         ... )
     """
+
+    provider: str
 
     def __init__(
         self,
@@ -180,6 +189,7 @@ class RouteProviderNotImplementedError(ConfigurationError):
             details={**(details or {}), "provider": provider},
             error_code=error_code or "ROUTE_PROVIDER_NOT_IMPLEMENTED",
         )
+        self.provider = provider
 
 
 class ValidationError(ProjectBaseError):
@@ -516,6 +526,6 @@ __all__ = [
     "ExternalServiceError",
     "ProjectBaseError",
     "ResourceNotFoundError",
-    "RouteProviderNotImplementedError",
+    "RouteProviderUnavailableError",
     "ValidationError",
 ]

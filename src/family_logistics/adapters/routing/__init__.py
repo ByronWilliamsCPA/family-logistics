@@ -8,14 +8,14 @@ from family_logistics.adapters.routing.base import (
 )
 from family_logistics.adapters.routing.factory import build_route_provider
 from family_logistics.adapters.routing.null import NullRouteProvider
-from family_logistics.core.exceptions import RouteProviderNotImplementedError
+from family_logistics.core.exceptions import RouteProviderUnavailableError
 
 __all__ = [
     "NullRouteProvider",
     "RouteConstraints",
     "RouteEstimate",
     "RouteProvider",
-    "RouteProviderNotImplementedError",
+    "RouteProviderUnavailableError",
     "StaticRouteProvider",
     "build_route_provider",
 ]

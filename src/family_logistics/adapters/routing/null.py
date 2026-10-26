@@ -1,8 +1,8 @@
 """A route provider that knows nothing, so every travel time is unknown.
 
-This is the fail-closed fallback for a configured provider that is not
-available yet. Unknown travel time flows to ROUTE-010 and an INCOMPLETE run
-(ADR-006); the provider never returns a guessed duration.
+This is the placeholder the factory returns for the ``ha_relay`` provider
+until the relay exists. Unknown travel time flows to ROUTE-010 and an
+INCOMPLETE run (ADR 0006); the provider never returns a guessed duration.
 """
 
 from __future__ import annotations
@@ -18,6 +18,10 @@ if TYPE_CHECKING:
     from family_logistics.adapters.routing.base import RouteConstraints, RouteEstimate
 
 
+# #CRITICAL: External resources: an unknown travel time must never be turned
+# into a duration, or a ride would be judged feasible on a guess.
+# #VERIFY: tests/unit/test_route_provider_factory.py::TestEngineFailsClosed
+# pins ROUTE-010 and an INCOMPLETE run for the default provider.
 def _unknown_duration(
     origin: str, destination: str, departure: datetime
 ) -> timedelta | None:
@@ -30,7 +34,10 @@ class NullRouteProvider:
     """Route provider whose every estimate is unknown (``None``).
 
     Attributes:
-        name: Provider name recorded on results.
+        name: The implementation name (``"null"``), as ``StaticRouteProvider``
+            reports ``"static"``. It identifies this class, not the configured
+            ``FL_ROUTE_PROVIDER`` value, so a result recorded while the
+            ``ha_relay`` placeholder is in use is visibly degraded.
     """
 
     name = "null"
@@ -61,8 +68,14 @@ class NullRouteProvider:
     ) -> OrderResult:
         """Choose a stop order with no travel times.
 
-        A manual order is honoured and any free ordering is INCOMPLETE,
-        exactly as for a static provider with an empty matrix.
+        No leg has a known travel time, so this behaves exactly like a static
+        provider with an empty matrix. The manual order in
+        ``constraints.fixed_order`` is passed to ``choose_stop_order``, but with
+        at least one stop it cannot be checked against deadlines: the result is
+        INCOMPLETE with an empty order, as is any free ordering. A manual order
+        that does not cover every stop is INCOMPLETE for that reason. Only an
+        empty stop list with no ``end`` is FEASIBLE (nothing to drive); with an
+        ``end`` the final leg is unknown and the result is INCOMPLETE.
 
         Args:
             origin: Pickup location ID.
