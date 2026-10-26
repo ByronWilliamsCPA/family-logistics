@@ -13,6 +13,11 @@ source: "Project initialization"
 
 This directory contains the essential planning documents for Family Logistics.
 
+> **Note**: The planning-template documents below were never generated. The
+> project's plan is [docs/project/roadmap.md](../project/roadmap.md); design
+> decisions are in [docs/ADRs](../ADRs/README.md). `project-vision.md`,
+> `tech-spec.md` and `roadmap.md` here are redirects to those documents.
+
 ## Quick Start
 
 > **Complete Guide**: See [PROJECT_SETUP.md](../PROJECT_SETUP.md#project-planning-with-claude-code) for the full workflow.
@@ -34,10 +39,10 @@ This directory contains the essential planning documents for Family Logistics.
 
 | Document | Purpose | Status |
 |----------|---------|--------|
-| [project-vision.md](./project-vision.md) | What & Why | Awaiting Generation |
-| [tech-spec.md](./tech-spec.md) | How to build | Awaiting Generation |
-| [roadmap.md](./roadmap.md) | Implementation plan | Awaiting Generation |
-| [adr/](./adr/) | Architecture decisions | Awaiting Generation |
+| [project-vision.md](./project-vision.md) | What & Why | Redirect to the project roadmap |
+| [tech-spec.md](./tech-spec.md) | How to build | Redirect to the project roadmap |
+| [roadmap.md](./roadmap.md) | Implementation plan | Redirect to the project roadmap |
+| [adr/](../ADRs/README.md) | Architecture decisions | Redirect to docs/ADRs |
 
 ## Using Documents During Development
 
@@ -45,9 +50,9 @@ This directory contains the essential planning documents for Family Logistics.
 
 ```text
 Load context from:
-- project-vision.md sections 2-3
-- adr/adr-001-*.md
-- tech-spec.md section [relevant section]
+- docs/project/roadmap.md (the current milestone)
+- docs/ADRs/0001-deterministic-authority-and-llm-boundary.md
+- docs/development/architecture.md section [relevant section]
 
 Then implement [feature].
 ```
@@ -56,8 +61,8 @@ Then implement [feature].
 
 ```text
 Review this code against:
-- tech-spec.md section 6 (security)
-- adr/adr-002-*.md (relevant decision)
+- SECURITY.md and docs/privacy/privacy-and-retention-spec.md (security and privacy)
+- docs/ADRs/0004-passenger-level-commitments.md (relevant decision)
 
 Flag any violations.
 ```

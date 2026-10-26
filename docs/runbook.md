@@ -92,17 +92,23 @@ Rotate after any suspected exposure and at least once a year.
 
 ### `FL_DATA_KEY`
 
-`FL_DATA_KEY` encrypts protected addresses at rest. A wrong or missing key
-fails closed: protected addresses cannot be read and nothing is stored in
-plain text.
+`FL_DATA_KEY` encrypts protected addresses and coordinates at rest. A wrong or
+missing key fails closed: protected addresses and coordinates cannot be read and
+nothing is stored in plain text.
 
-1. Generate a key: `python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`.
-2. Stop the container and take a backup (see below).
-3. Re-encrypt stored addresses with the old and new keys (a re-key command is
-   planned with the registry in M1; until then no addresses are stored).
-4. Set the new key and start the container.
+Do not rotate `FL_DATA_KEY` yet. The re-key command is not delivered, and it is
+tracked as an open carry-over in [the roadmap](project/roadmap.md). The registry
+stores Fernet-encrypted addresses and coordinates under this one key. Setting a
+new key without re-encrypting both leaves the stored values unreadable, and the
+app fails closed on them; restoring the old key is then the only recovery.
+Rotation stays blocked until a procedure re-encrypts and verifies every
+encrypted registry field.
 
-Keep the previous key until a restore test with the new key succeeds.
+Once that command exists, the procedure is: generate a key with
+`python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`,
+stop the container and take a backup (see below), re-encrypt with the old and
+new keys, then set the new key and start the container. Keep the previous key
+until a restore test with the new key succeeds.
 
 ### `FL_AUDIT_KEY`
 

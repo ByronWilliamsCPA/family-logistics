@@ -15,9 +15,13 @@ and uses deterministic rules to find missing or conflicting rides, including
 rides promised to children from other families. Results feed a Home Assistant
 status card and Apprise notifications.
 
-**Status: M0 (discovery).** The domain core is implemented and tested;
-collection, scheduling, notifications and the Home Assistant API arrive in
-milestones M1 to M5. Notifications default to shadow mode.
+**Status: between M2 and M3.** The calendar collector, the rule engine and
+the assessment orchestrator are implemented and tested, and the first M3
+work is merged: the Home Assistant school snapshot ingest, the route
+providers and the Home Assistant route relay. Provider wiring, `google_routes`,
+notifications and the scheduler complete M3, and
+the Home Assistant UI arrives in M4. See the [roadmap](project/roadmap.md). Notifications
+default to shadow mode.
 
 ## Quick start
 

@@ -19,7 +19,7 @@ src/family_logistics/
 │   ├── apprise/       # notification client (dedicated fl-* tags only)
 │   ├── home_assistant/
 │   └── llama_cpp/     # narrative LLM client (M5)
-├── api/               # FastAPI app, /healthz, Home Assistant routes (M3)
+├── api/               # FastAPI app, /healthz, Home Assistant routes (snapshot ingest, route relay; M4 adds the rest)
 ├── core/              # settings, address encryption, SQLite, exceptions
 ├── db/                # table definitions, Alembic migrations, audit log
 ├── domain/            # models, notes parser, confirmation codes, change

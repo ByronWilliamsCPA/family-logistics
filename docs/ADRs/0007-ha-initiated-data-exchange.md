@@ -23,7 +23,7 @@ purpose: "Record the application side of the Home Assistant trust boundary."
 **Decision Date**: 2026-10-21
 **Deciders**: Byron Williams
 **Affected Components**: api (HA routes), adapters/home_assistant and services/school_snapshot (HA snapshot), adapters/routing (ha_relay)
-**Implementation Target**: M3 (snapshot, first PR; the original target was M2), M3 (route relay), M4 (status card)
+**Implementation Target**: M3 (snapshot and route relay), M4 (status card). The snapshot moved from M2 to M3 on 2026-10-25 ([#25](https://github.com/ByronWilliamsCPA/family-logistics/issues/25)) and merged in M3 as #27 to #29; the route relay routes merged in M3 as #32.
 
 ## Context
 

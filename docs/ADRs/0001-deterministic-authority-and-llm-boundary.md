@@ -8,14 +8,14 @@ tags:
   - adr
   - validation
   - llm
-status: draft
+status: published
 owner: core-maintainer
 component: Strategy
 source: "Family Logistics development handoff v1.0 (2026-10-21), sections 1, 7 and 9"
 purpose: "Fix the authority boundary between deterministic validation and the local LLM, and the run-status semantics that keep incomplete analysis from looking safe."
 ---
 
-> **Status**: `proposed`
+> **Status**: `published` (accepted 2026-10-25)
 
 **Decision Date**: 2026-10-21
 **Deciders**: Byron Williams (owner), Riley (co-approver for family-facing behavior)

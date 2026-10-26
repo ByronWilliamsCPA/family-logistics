@@ -7,14 +7,14 @@ tags:
   - decisions
   - adr
   - storage
-status: draft
+status: published
 owner: core-maintainer
 component: Strategy
 source: "Family Logistics development handoff v1.0, section 5"
 purpose: "Choose the storage engine and its operating constraints."
 ---
 
-> **Status**: `proposed`
+> **Status**: `published` (accepted 2026-10-25)
 
 **Decision Date**: 2026-10-21
 **Deciders**: Byron Williams

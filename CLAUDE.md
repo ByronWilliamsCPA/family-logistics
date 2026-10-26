@@ -50,12 +50,18 @@ passed to the template team out-of-band.
 iCloud ride commitments before a child is stranded.
 **Author**: Byron Williams
 **Repository**: <https://github.com/ByronWilliamsCPA/family-logistics>
-**Status**: M0 (discovery). Implemented: the domain core, the SQLite schema
-with Alembic migrations and an append-only audit log, the Apprise client,
-structured logging and startup checks, and the Home Assistant school snapshot
-ingest (`POST /api/v1/ingest/ha-snapshot`, stored but not yet read by any run).
-Collection wiring, scheduling, notification wiring and the rest of the Home
-Assistant API arrive in M1 to M5.
+**Status**: between M2 and M3 (as of 2026-10-26). Implemented: the domain
+core, the read-only CalDAV collector, the rule engine and the assessment
+orchestrator, the SQLite schema with Alembic migrations and an append-only
+audit log, the Apprise client, structured logging and startup checks, the Home
+Assistant school snapshot ingest (`POST /api/v1/ingest/ha-snapshot`, stored
+but not yet read by any run), and the route providers with their factory
+(the null provider and `ha_relay`, with the route cache and the Home Assistant
+relay routes `GET /api/v1/route-requests` and `POST /api/v1/route-results`;
+no service calls the factory yet). `collect --once` and those three Home
+Assistant routes are the only wired production paths; nothing runs an
+assessment yet. Provider wiring, `google_routes`, notifications and the
+scheduler arrive in M3, the rest of the Home Assistant API and UI in M4. Plan: [docs/project/roadmap.md](docs/project/roadmap.md).
 **Distribution**: container image `ghcr.io/byronwilliamscpa/family-logistics`
 only. Not published to PyPI.
 
@@ -131,7 +137,7 @@ uv run family-logistics migrate            # schema to head (serve refuses an ol
 ```text
 src/family_logistics/
 ├── adapters/      # caldav (read-only transport), routing, apprise, home_assistant, llama_cpp
-├── api/           # FastAPI app, /healthz, Home Assistant routes (snapshot ingest; M3-M4 add the rest)
+├── api/           # FastAPI app, /healthz, Home Assistant routes (snapshot ingest, route relay; M4 adds the rest)
 ├── core/          # config, crypto, database, exceptions
 ├── db/            # schema, audit log, migrations_api, Alembic migrations/
 ├── domain/        # models, events, parser, confirmation, change_impact,
@@ -198,4 +204,4 @@ Always skip `CLAUDE.md`, `REUSE.toml`, `docs/template_feedback.md`,
 
 ---
 
-**Last Updated**: 2026-10-21
+**Last Updated**: 2026-10-26

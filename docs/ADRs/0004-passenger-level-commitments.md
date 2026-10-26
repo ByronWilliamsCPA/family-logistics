@@ -7,14 +7,14 @@ tags:
   - decisions
   - adr
   - domain_model
-status: draft
+status: published
 owner: core-maintainer
 component: Strategy
 source: "Family Logistics development handoff v1.0, sections 3.3 and 16; planning response (Friday regression)"
 purpose: "Make external children's rides survive edits to family children's plans, and alert when a confirmed commitment disappears."
 ---
 
-> **Status**: `proposed`
+> **Status**: `published` (accepted 2026-10-25)
 
 **Decision Date**: 2026-10-21
 **Deciders**: Byron Williams
