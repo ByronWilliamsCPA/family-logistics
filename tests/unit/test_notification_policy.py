@@ -726,7 +726,12 @@ class TestDecide:
         assert decide_it(again, delivered) is Decision.DUPLICATE
 
     def test_a_closed_row_is_a_new_episode(self):
-        closed = state(is_open=False, delivered=False, severity=None)
+        closed = state(
+            is_open=False,
+            delivered=False,
+            severity=None,
+            last_sent_at=NOW - RENOTIFY_COOLDOWN,
+        )
         assert decide_it(push(), closed) is Decision.SEND
 
     def test_notice_cooldown_after_regression(self):
@@ -747,6 +752,30 @@ class TestDecide:
         assert decide_it(urgent, closed) is Decision.SEND
         never = replace(closed, last_sent_at=None)
         assert decide_it(regressed, never) is Decision.SEND
+
+    def test_a_held_notice_stays_held_on_the_next_scan(self):
+        """A held regression is ONGOING on the next scan and must stay held."""
+        closed = state(
+            is_open=False,
+            delivered=False,
+            severity=None,
+            last_sent_at=NOW - timedelta(hours=1),
+        )
+        ongoing = push(episode_start=False)
+        assert decide_it(ongoing, closed) is Decision.COOLDOWN
+        long_ago = replace(closed, last_sent_at=NOW - RENOTIFY_COOLDOWN)
+        assert decide_it(ongoing, long_ago) is Decision.SEND
+
+    def test_an_open_delivered_row_is_not_held_by_the_cooldown(self):
+        """A regression after a missed dispatch is news, not flapping (F4)."""
+        open_row = state(
+            episode_run_id="run-1",
+            kind=PushKind.NOTICE,
+            severity=Severity.WARNING,
+            last_sent_at=NOW - timedelta(hours=1),
+        )
+        regressed = push(episode_start=True)
+        assert decide_it(regressed, open_row, run_id="run-2") is Decision.SEND
 
     def test_cooldown_is_checked_before_quiet_hours(self):
         closed = state(is_open=False, delivered=False, severity=None, last_sent_at=NOW)

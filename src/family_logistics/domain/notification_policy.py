@@ -3,8 +3,10 @@
 Everything here is pure: no I/O, no clock reads (``now`` is passed in), no
 logging, and no push text. The policy decides the kind of each push, its
 production tag, whether it is owed again, and whether quiet hours hold it. The
-service (a later PR) claims, renders and sends; the policy never sees a
-finding's message, suggestion or raw entity keys.
+service (a later PR) claims, renders and sends. A ``PlannedPush`` carries the
+tracked finding (the ADR interface), so the content boundary (D2) is enforced
+at render time: the renderer reads only the structured subject and rule id,
+never the finding's message, suggestion or raw entity keys.
 
 Kinds (D3): ``urgent`` and ``notice`` for findings, ``status`` and ``report``
 for completed runs, ``ops`` for service-health episodes. The kind alone
@@ -645,14 +647,19 @@ def _owed(
     return _owed_in_episode(push, row, new_day=new_day), False
 
 
-def _in_cooldown(
-    push: PlannedPush, row: StateView | None, now: datetime, kind: PushKind
-) -> bool:
-    """Report whether a new episode's notice is held by the cooldown."""
+def _in_cooldown(row: StateView | None, now: datetime, kind: PushKind) -> bool:
+    """Report whether a new episode's notice is held by the cooldown (D5).
+
+    The test is the persisted row, not the transient ``episode_start`` flag: a
+    held notice writes nothing, so on the next scan its finding is ``ongoing``
+    and only the still-closed row shows it is owed as a new episode. An open
+    row means the episode never closed (a missed dispatch), so a regression
+    on it is news and is not held.
+    """
     return (
-        push.episode_start
-        and kind is PushKind.NOTICE
+        kind is PushKind.NOTICE
         and row is not None
+        and not row.is_open
         and row.last_sent_at is not None
         and now - row.last_sent_at < RENOTIFY_COOLDOWN
     )
@@ -678,8 +685,8 @@ def decide(  # noqa: PLR0913 - the clock and quiet flag are keyword-only
 
     The order is: in flight, duplicate, cooldown, quiet hours or a used
     bypass, send. A retry uses the kind stored on its row. The cooldown holds
-    only a notice that starts a new episode (``episode_start``), so an
-    undelivered notice of the same episode is never held by it.
+    only a notice that starts a new episode against a closed row, so an
+    undelivered notice of an open episode is never held by it.
 
     Args:
         push: The planned push.
@@ -708,7 +715,7 @@ def decide(  # noqa: PLR0913 - the clock and quiet flag are keyword-only
     if not owed:
         return Decision.DUPLICATE
     kind = state.kind if push.retry_only and state is not None else push.kind
-    if new_episode and _in_cooldown(push, state, now, kind):
+    if new_episode and _in_cooldown(state, now, kind):
         return Decision.COOLDOWN
     if not quiet:
         return Decision.SEND
