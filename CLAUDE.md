@@ -53,15 +53,17 @@ iCloud ride commitments before a child is stranded.
 **Status**: between M2 and M3 (as of 2026-10-26). Implemented: the domain
 core, the read-only CalDAV collector, the rule engine and the assessment
 orchestrator, the SQLite schema with Alembic migrations and an append-only
-audit log, the Apprise client, structured logging and startup checks, the Home
-Assistant school snapshot ingest (`POST /api/v1/ingest/ha-snapshot`, stored
-but not yet read by any run), and the route providers with their factory
+audit log, the Apprise client and notification service, structured logging and
+startup checks, the Home Assistant school snapshot ingest
+(`POST /api/v1/ingest/ha-snapshot`), the route providers with their factory
 (the null provider and `ha_relay`, with the route cache and the Home Assistant
-relay routes `GET /api/v1/route-requests` and `POST /api/v1/route-results`;
-no service calls the factory yet). `collect --once` and those three Home
-Assistant routes are the only wired production paths; nothing runs an
-assessment yet. Provider wiring, `google_routes`, notifications and the
-scheduler arrive in M3, the rest of the Home Assistant API and UI in M4. Plan: [docs/project/roadmap.md](docs/project/roadmap.md).
+relay routes `GET /api/v1/route-requests` and `POST /api/v1/route-results`), and
+the scheduler (`services/scheduler.py`: scan, daily, weekly, purge and the one
+urgent retry; shadow mode by default). The scheduler ships disabled
+(`FL_SCHEDULER_ENABLED=false`), so `collect --once` and the three Home
+Assistant routes are the only production paths until the owner enables it;
+nothing runs an assessment in production before then. `google_routes` and the
+rest of the Home Assistant API and UI are still to come (M3, M4). Plan: [docs/project/roadmap.md](docs/project/roadmap.md).
 **Distribution**: container image `ghcr.io/byronwilliamscpa/family-logistics`
 only. Not published to PyPI.
 
