@@ -928,8 +928,15 @@ class TestRealSchedulerShutdown:
         assert rig.on_stop_calls == ["closed"]
 
     def test_a_retry_queued_before_the_stop_is_kept_for_shutdown_to_drop(self, engine):
+        # A real scheduler runs a job whose run_date is already past, so the
+        # fixed fake NOW (days ago) would race the assertion; use the wall clock.
         real = BackgroundScheduler(timezone="Etc/UTC")
-        rig = Rig(engine, aps=real, notifier=FakeNotifier([], reports=[self.URGENT]))
+        rig = Rig(
+            engine,
+            aps=real,
+            clock=Clock(datetime.now(UTC)),
+            notifier=FakeNotifier([], reports=[self.URGENT]),
+        )
         rig.service.start()
         rig.service.run_scan()
         assert real.get_job(URGENT_RETRY_JOB) is not None
@@ -1087,8 +1094,9 @@ class TestFromSettings:
             raise ValueError(msg)
 
         monkeypatch.setattr(scheduler_module, "build_collector", broken)
+        settings = self.settings()
         with pytest.raises(ValueError, match="unrelated wiring failure") as caught:
-            SchedulerService.from_settings(self.settings(), engine)
+            SchedulerService.from_settings(settings, engine)
         assert caught.type is ValueError
         assert closed == ["notifier"]
 
@@ -1151,10 +1159,8 @@ class TestWiring:
             SchedulerService, "from_settings", lambda *_a, **_k: Failing()
         )
         settings = Settings(database_path=tmp_path / "fl.db", scheduler_enabled=True)
-        with (
-            pytest.raises(RuntimeError, match="start failed"),
-            TestClient(create_app(settings)),
-        ):
+        app = create_app(settings)
+        with pytest.raises(RuntimeError, match="start failed"), TestClient(app):
             pass
         assert events == ["start", "stop"]
 

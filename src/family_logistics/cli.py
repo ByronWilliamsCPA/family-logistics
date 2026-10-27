@@ -560,7 +560,9 @@ def collect(ctx: click.Context, once: bool, calendars: tuple[str, ...]) -> None:
     if ctx.invoked_subcommand is not None:
         return
     if not once:
-        _fail("Use `collect --once` or `collect discover` (scheduling arrives in M3).")
+        _fail(
+            "Use `collect --once` or `collect discover`; scheduled collection runs inside `serve` when FL_SCHEDULER_ENABLED=true."
+        )
     settings = _settings()
     _configure_logging(settings)
     problems = _credential_problems(settings) + directory_problems(

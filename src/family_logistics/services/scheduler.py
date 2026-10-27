@@ -43,7 +43,8 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from copy import copy
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, Protocol
 from zoneinfo import ZoneInfo
@@ -346,7 +347,8 @@ class SchedulerService:
         ConfigurationError: ``scheduler_problems`` found something.
     """
 
-    def __init__(  # noqa: PLR0913 - keyword-only collaborators, injected for tests
+    # Keyword-only collaborators are injected so tests can replace each one.
+    def __init__(  # noqa: PLR0913
         self,
         settings: Settings,
         engine: Engine,
@@ -496,7 +498,7 @@ class SchedulerService:
             Counters by job name.
         """
         with self._stats_lock:
-            return {name: replace(s) for name, s in self._stats.items()}
+            return {name: copy(s) for name, s in self._stats.items()}
 
     @property
     def pipeline_lock(self) -> threading.Lock:
@@ -566,10 +568,22 @@ class SchedulerService:
         """Count a job APScheduler skipped; announce a missed status or report.
 
         A missed daily or weekly fire is a status the family expected and will
-        not get, so it is reported as "could not verify" (ADR 0008, F6). APScheduler
-        calls this from a worker thread for a missed fire (no scheduler lock
-        held) and from its own thread for an overlapping instance, which is
-        only counted; nothing here touches APScheduler.
+        not get, so it is reported as "could not verify" (ADR 0008, F6). That
+        path may queue the urgent retry (``_missed`` -> ``_unverified`` ->
+        ``_dispatch`` -> ``_schedule_urgent_retry``), which calls APScheduler
+        under ``_guard``. APScheduler 3.x delivers a missed fire from the
+        executor's worker thread, after ``run_job`` returns.
+
+        An overlapping instance (``max_instances``) is only counted and logged:
+        this listener must never call APScheduler for it. APScheduler delivers
+        that event from its own scheduler thread, so a blocking call here would
+        stall job dispatch.
+
+        #ASSUME: Concurrency: in APScheduler 3.11 neither event is delivered
+        with the job-store lock held (``_process_jobs`` dispatches its events
+        after leaving the lock; the executor dispatches missed fires itself).
+        #VERIFY: tests/unit/test_scheduler.py (TestRealSchedulerShutdown); on an
+        APScheduler upgrade re-read ``_process_jobs`` and ``_run_job_success``.
 
         Args:
             event: The skipped-job event.
@@ -631,7 +645,7 @@ class SchedulerService:
                 stats.skipped += 1
                 if report.outcome == "skipped_busy":
                     stats.consecutive_skips += 1
-                return replace(stats)
+                return copy(stats)
             now = self._clock()
             stats.ticks += 1
             stats.consecutive_skips = 0
@@ -641,7 +655,7 @@ class SchedulerService:
                 stats.failures += 1
             elif report.outcome == "ok":
                 stats.last_ok = now
-            return replace(stats)
+            return copy(stats)
 
     def _warn_if_scans_stuck(self, consecutive: int) -> None:
         """Warn once per hour's worth of scans that found a pipeline running."""
