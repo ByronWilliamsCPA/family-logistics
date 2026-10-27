@@ -13,14 +13,24 @@ import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from fl_service import make_settings
+
+from family_logistics.api.assessments import register_assessment_routes
+from family_logistics.api.ha import HaAuthThrottle, build_ha_router
 from family_logistics.core.database import create_sqlite_engine
 from family_logistics.db import migrations_api
 from family_logistics.db.assessments import AssessmentRepository
+from family_logistics.db.school_snapshots import SchoolSnapshotRepository
 from family_logistics.domain.engine import AssessmentResult
 from family_logistics.domain.models import RunStatus
 from family_logistics.services.assessments import RunOutcome
 from family_logistics.services.collector import CollectionRun
 from family_logistics.services.notifications import DispatchReport
+from family_logistics.services.on_demand import OnDemandService
+from family_logistics.services.pipeline import PipelineCoordinator
+from family_logistics.services.status import StatusService
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -189,3 +199,44 @@ class NoAps:
     """The slice of ``BackgroundScheduler`` the scheduler reads when not started."""
 
     running = False
+
+
+TOKEN = "t" * 40
+AUTH = {"Authorization": f"Bearer {TOKEN}"}
+NOW = datetime(2026, 10, 26, 15, 0, tzinfo=UTC)
+"""The status clock: runs and snapshots are placed relative to it."""
+
+
+class Rig:
+    """The HA router with the status and assessment routes over fakes.
+
+    Attributes:
+        client: A test client for the app (no lifespan).
+        on_demand: The on-demand service (stop it at the end of a test).
+        coordinator: The shared lock.
+        status: The status service.
+        runs: The run repository.
+        schools: The school snapshot store.
+        settings: The settings the app was built with.
+    """
+
+    def __init__(self, engine, assessor, *, clock=None, **settings) -> None:
+        self.settings = make_settings(ha_token=TOKEN, **settings)
+        self.coordinator = PipelineCoordinator()
+        self.runs = AssessmentRepository(engine)
+        self.schools = SchoolSnapshotRepository(engine)
+        self.on_demand = OnDemandService(
+            self.coordinator, lambda: assessor, FakeSchool(), self.runs
+        )
+        self.status = StatusService(
+            self.settings,
+            self.runs,
+            self.schools,
+            self.on_demand,
+            clock=clock or (lambda: NOW),
+        )
+        router = build_ha_router(self.settings, throttle=HaAuthThrottle())
+        register_assessment_routes(router, self.status, self.on_demand)
+        app = FastAPI()
+        app.include_router(router)
+        self.client = TestClient(app, client=("192.0.2.1", 50000))

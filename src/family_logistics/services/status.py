@@ -1,0 +1,186 @@
+"""The family-wide status card for ``GET /api/v1/status`` (ADR 0007).
+
+Counts and times only: no child names, addresses, calendar ids or finding text
+(privacy spec, section 4). The card answers one question, "may the family trust
+that nothing is wrong right now", and answers yes (``clear``) only when the
+latest finished run was clear and nothing below makes it untrustworthy.
+
+#CRITICAL: Data integrity: design rule 4 (ADR 0001): a failed or incomplete
+analysis is never reported as clear. ``clear`` is downgraded to ``incomplete``
+when there is no finished run, the latest run is older than
+``ANALYSIS_MAX_AGE`` (the iCloud staleness limit,
+``FL_SOURCE_MAX_STALENESS_MINUTES``: a run older than the data it may judge is
+not evidence), or the school snapshot is missing or older than its limit (26
+hours, ``DEFAULT_SOURCE_MAX_AGES``). A run that started and never finished while
+no run is executing (the process died) reads as ``failed``. ``attention_required``,
+``incomplete`` and ``failed`` are never loosened.
+#VERIFY: tests/unit/test_status_api.py (TestNeverClear).
+#ASSUME: Timing: ``clock`` and the database agree on UTC; both stamps are
+timezone-aware UTC (``UtcDateTime``), so an age is a plain subtraction.
+#VERIFY: tests/unit/test_status_api.py (TestStale).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Final
+
+from family_logistics.domain.context import HA_SNAPSHOT_SOURCE, EngineSettings
+from family_logistics.domain.models import RunStatus
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
+    from family_logistics.core.config import Settings
+    from family_logistics.db.assessments import AssessmentRepository, RunRecord
+    from family_logistics.db.school_snapshots import SchoolSnapshotRepository
+    from family_logistics.services.on_demand import OnDemandService
+
+NO_RUN: Final = "no_run"
+RUN_INTERRUPTED: Final = "run_interrupted"
+ANALYSIS_STALE: Final = "analysis_stale"
+SCHOOL_MISSING: Final = "school_snapshot_missing"
+SCHOOL_STALE: Final = "school_snapshot_stale"
+"""Reasons a card is not clear (``StatusCard.reasons``); a fixed vocabulary."""
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class StatusCard:
+    """What the Home Assistant card shows.
+
+    Attributes:
+        status: ``clear``, ``attention_required``, ``incomplete`` or ``failed``,
+            after the downgrades in the module docstring.
+        reasons: Why a run that was clear is not (``NO_RUN`` and the like).
+        counts: Open findings per severity from the latest finished run
+            (a failed run carries the still-open findings); None without one.
+        lifecycle: Open findings per lifecycle state (new, ongoing, regressed);
+            None without a finished run.
+        last_analysis_at: When the latest finished run finished.
+        last_school_sync_at: The school snapshot's fetch time (its age is
+            measured from it).
+        analysis_stale: The latest finished run is older than the limit, or
+            there is none.
+        school_snapshot_stale: The snapshot is older than its limit or missing.
+        run_in_flight: A run is queued or executing in this process.
+        generated_at: When the card was built.
+    """
+
+    status: RunStatus
+    reasons: tuple[str, ...]
+    counts: Mapping[str, int] | None
+    lifecycle: Mapping[str, int] | None
+    last_analysis_at: datetime | None
+    last_school_sync_at: datetime | None
+    analysis_stale: bool
+    school_snapshot_stale: bool
+    run_in_flight: bool
+    generated_at: datetime
+
+
+class StatusService:
+    """Builds the status card from the stored runs and the school snapshot.
+
+    Args:
+        settings: Application settings (the staleness limits).
+        runs: The run repository.
+        schools: The school snapshot store.
+        on_demand: Says whether a run is in flight in this process.
+        clock: The current aware time (replaceable in tests).
+    """
+
+    # Keyword-only collaborators are injected so tests can replace each one.
+    def __init__(  # noqa: PLR0913
+        self,
+        settings: Settings,
+        runs: AssessmentRepository,
+        schools: SchoolSnapshotRepository,
+        on_demand: OnDemandService,
+        *,
+        clock: Callable[[], datetime] = _utc_now,
+    ) -> None:
+        self._runs = runs
+        self._schools = schools
+        self._on_demand = on_demand
+        self._clock = clock
+        self._analysis_max_age = timedelta(
+            minutes=settings.source_max_staleness_minutes
+        )
+        self._school_max_age = EngineSettings.from_config(settings).max_age_for(
+            HA_SNAPSHOT_SOURCE
+        )
+
+    def card(self) -> StatusCard:
+        """Build the card.
+
+        Returns:
+            The card.
+
+        Raises:
+            sqlalchemy.exc.SQLAlchemyError: A store read failed; the caller must
+                answer "unavailable", never a card.
+        """
+        now = self._clock()
+        in_flight = self._on_demand.in_flight()
+        latest = self._runs.latest_run()
+        interrupted = self._interrupted(latest)
+        basis = latest
+        if latest is None or latest.finished_at is None:
+            basis = self._runs.latest_finished_run()
+        reasons: list[str] = []
+        if interrupted:
+            reasons.append(RUN_INTERRUPTED)
+        if basis is None:
+            reasons.append(NO_RUN)
+        analysis_stale = basis is None or self._older(
+            now, basis.finished_at, self._analysis_max_age
+        )
+        if analysis_stale and basis is not None:
+            reasons.append(ANALYSIS_STALE)
+        freshness = self._schools.freshness()
+        school_at = freshness.fetched_at if freshness is not None else None
+        school_stale = school_at is None or self._older(
+            now, school_at, self._school_max_age
+        )
+        if school_stale:
+            reasons.append(SCHOOL_MISSING if school_at is None else SCHOOL_STALE)
+        run_status = (
+            RunStatus.FAILED
+            if interrupted
+            else (basis.status if basis else RunStatus.INCOMPLETE)
+        )
+        if run_status is RunStatus.CLEAR and reasons:
+            run_status = RunStatus.INCOMPLETE
+        return StatusCard(
+            status=run_status,
+            reasons=tuple(reasons),
+            counts=basis.counts if basis is not None else None,
+            lifecycle=self._runs.open_lifecycle_counts() if basis is not None else None,
+            last_analysis_at=basis.finished_at if basis is not None else None,
+            last_school_sync_at=school_at,
+            analysis_stale=analysis_stale,
+            school_snapshot_stale=school_stale,
+            run_in_flight=in_flight,
+            generated_at=now,
+        )
+
+    def _interrupted(self, latest: RunRecord | None) -> bool:
+        """Report whether the latest started run died without finishing."""
+        if latest is None or latest.finished_at is not None:
+            return False
+        # The row is read before the executing mark, which is set before the
+        # row exists and cleared after the outcome is stored (PipelineCoordinator),
+        # so an unfinished row with no mark is a dead run unless it just finished.
+        if self._on_demand.active_run_id() == latest.run_id:
+            return False
+        again = self._runs.get_run(latest.run_id)
+        return again is None or again.finished_at is None
+
+    @staticmethod
+    def _older(now: datetime, then: datetime | None, limit: timedelta) -> bool:
+        return then is None or now - then > limit
