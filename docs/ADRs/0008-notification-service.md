@@ -182,6 +182,18 @@ Every push has a **kind**; the kind alone decides the production tag. v1 has fiv
 > `on_demand` describe the intended behaviour. The caller sees the result through `GET /api/v1/assessments/{run_id}`
 > and the status card. Wiring the dispatch (and its shadow-mode and episode rules) is recorded in the
 > [roadmap](../project/roadmap.md) as an M4 gap.
+>
+> The gap is wider than the `status` push. An `on_demand` run sends **no push of any kind**: no `urgent` or `notice`
+> push for the findings it finds, and no `ops:run_failed` or `ops:run_incomplete` when it fails or ends incomplete.
+> A finding first found by an on-demand run is still pushed later, because the policy treats a missing
+> `notification_state` row as owed (`_owed` in `domain/notification_policy.py`), with the next scheduled dispatch, up
+> to `FL_CHANGE_SCAN_MINUTES` later, and **never** when the scheduler is disabled. For example, an imminent-ride
+> finding discovered by a button press 20 minutes before pickup is not pushed; only the card count shows it.
+>
+> One narrower loss case, reasoned from the code by a second reviewer and **not probed**: a finding that resolves and
+> then regresses, with both transitions seen only by on-demand runs, on an open delivered row, is never re-notified.
+> The policy starts an episode only for a `new` or `regressed` lifecycle as seen by a scheduled dispatch
+> (`starts_new_episode`), and the next scheduled run sees the finding as `ongoing`.
 
 Per-finding decision table (completed runs; a failed run is D4):
 

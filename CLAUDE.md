@@ -61,9 +61,9 @@ relay routes `GET /api/v1/route-requests` and `POST /api/v1/route-results`),
 the scheduler (`services/scheduler.py`: scan, daily, weekly, purge and the one
 urgent retry; shadow mode by default) and the M4 status and assessment API
 (`GET /api/v1/status`, `POST /api/v1/assessments`,
-`GET /api/v1/assessments/{run_id}`; on-demand runs share the scheduler's
-pipeline lock, which is process-local, so run one `serve`). The scheduler ships
-disabled (`FL_SCHEDULER_ENABLED=false`) and `POST /api/v1/assessments` ships
+`GET /api/v1/assessments/{run_id}`; on-demand runs and the scheduler share one
+`PipelineCoordinator` lock, which is process-local, so run one `serve`). The
+scheduler ships disabled (`FL_SCHEDULER_ENABLED=false`) and `POST /api/v1/assessments` ships
 refused (`FL_ON_DEMAND_ENABLED=false`, a 503), so `collect --once` and the Home
 Assistant routes are the only production paths, and nothing runs an assessment
 in production until the owner enables the scheduler or on-demand runs.

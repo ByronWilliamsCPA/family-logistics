@@ -19,9 +19,11 @@ status card and Apprise notifications.
 the assessment orchestrator are implemented and tested, and the first M3
 work is merged: the Home Assistant school snapshot ingest, the route
 providers, the Home Assistant route relay and the notification service. The
-scheduler exists but ships disabled (`FL_SCHEDULER_ENABLED=false`), so nothing
-runs in production until the owner enables it. `google_routes` is still to
-come, and the Home Assistant UI arrives in M4. See the
+scheduler exists but ships disabled (`FL_SCHEDULER_ENABLED=false`), and the
+on-demand run route (`POST /api/v1/assessments`) ships refused
+(`FL_ON_DEMAND_ENABLED=false`), so nothing runs an assessment in production
+until the owner enables one of them. `google_routes` is still to come, and the
+Home Assistant UI arrives in M4. See the
 [roadmap](project/roadmap.md). Notifications default to shadow mode.
 
 ## Quick start

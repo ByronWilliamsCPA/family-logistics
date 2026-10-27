@@ -154,10 +154,25 @@ what is stored, with the latest school snapshot, and answers 202 with a
   for a started run that never finished while nothing is executing. None of
   them is ever clear. A run still queued when the service stops leaves no row,
   so its `run_id` answers 404 after a restart; press again.
-- **Stale or missing data on the card.** `analysis_stale` appears when the
-  latest finished run is older than `FL_SOURCE_MAX_STALENESS_MINUTES`;
-  `school_snapshot_stale` appears after 26 hours without a snapshot. Either
-  turns an otherwise clear card into `incomplete`.
+- **Stale or missing data on the card.** The card carries three stale flags
+  (`analysis_stale`, `calendar_stale`, `school_snapshot_stale`) and a list of
+  `reasons`; any reason turns an otherwise clear card into `incomplete`.
+  `analysis_stale` and the reason of the same name mean the latest finished
+  run is older than `FL_SOURCE_MAX_STALENESS_MINUTES`; with no run at all the
+  reason is `no_run` (and `analysis_stale` is still true). `calendar_stale`
+  means the oldest successful calendar collection is older than that same limit,
+  or no calendar was ever collected. `school_snapshot_stale` is true after 26
+  hours without a snapshot, and the reason is `school_snapshot_stale`; with no
+  snapshot at all the reason is `school_snapshot_missing` (the flag is true
+  either way).
+- **Failed press, unchanged card.** A run that failed without leaving a database
+  row (it never got the lock, the route provider could not be built, or it was
+  abandoned at shutdown) shows `failed` on `GET /api/v1/assessments/{run_id}`,
+  but `GET /api/v1/status` keeps the previous verdict, possibly `clear`, until
+  that analysis is older than `FL_SOURCE_MAX_STALENESS_MINUTES` (default 120).
+  The card is the last stored analysis, so this is by design (design rule 4 is
+  not broken). Home Assistant should poll the run id after a press and treat
+  `failed` there as authoritative for that press.
 - **`run_in_flight`.** True while an on-demand run is queued or executing, and
   also while any pipeline holds the lock: a scheduled collect, assess and
   notify, or the nightly purge. It means "the lock is busy", not only "a button

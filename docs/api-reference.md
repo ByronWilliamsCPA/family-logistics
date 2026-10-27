@@ -17,7 +17,9 @@ Three routes on the Home Assistant router, all behind the `FL_HA_TOKEN` bearer
 token (a missing or wrong token is a 401 with a fixed body, throttled like the
 other Home Assistant routes). Answers carry counts, times and fixed strings
 only: no child names, addresses, calendar identifiers or finding text. Every
-error body is `{"detail": "<fixed sentence>"}` and never echoes the request.
+error body is `{"detail": "<fixed sentence>"}` and never echoes the request; the
+disabled-gate 503 of `POST /api/v1/assessments` also carries a machine-readable
+`code` (below).
 
 ### `GET /api/v1/status`
 
@@ -30,11 +32,21 @@ snapshot.
 | `reasons` | why the card is not simply the latest run's verdict, set for any status: `no_run`, `analysis_stale`, `calendar_stale`, `school_snapshot_missing`, `school_snapshot_stale`; or `run_interrupted` (a run started and never finished) |
 | `counts` | open findings per severity; `null` when no run has finished |
 | `lifecycle` | open findings per lifecycle state (`new`, `ongoing`, `regressed`); `null` when no run has finished |
-| `last_analysis_at`, `last_school_sync_at` | when the latest run finished; when the school snapshot was fetched |
+| `last_analysis_at`, `last_school_sync_at` | when the latest *finished* run finished (a run still executing, or one that died, does not move it); when the school snapshot was fetched |
 | `analysis_stale`, `school_snapshot_stale` | the run, or the snapshot, is older than its limit (or missing) |
 | `calendar_stale` | the oldest successful collection among the enabled calendar sources is older than `FL_SOURCE_MAX_STALENESS_MINUTES`, judged against now (no source, or one never collected, counts as stale) |
 | `run_in_flight` | a run is queued or executing in this process, or the pipeline lock is held (a scheduled scan, collection or purge) |
 | `generated_at` | when the card was built |
+
+The card is defined as the last *stored* analysis. A failed on-demand run that
+left no database row (it never got the pipeline lock, the route provider could
+not be built, or it was abandoned at shutdown) does not change it: `GET
+/api/v1/assessments/{run_id}` reports that run as `failed`, while `GET
+/api/v1/status` keeps the previous verdict, possibly `clear`, until that analysis
+goes stale (`FL_SOURCE_MAX_STALENESS_MINUTES`, default 120). This does not break
+design rule 4, because the card never claims to describe a run that stored
+nothing. After a button press, Home Assistant should poll the run id and treat a
+`failed` there as authoritative for that press, not wait for the card to change.
 
 A failed or incomplete analysis is never reported as clear (design rule 4). A
 card is `clear` only when the latest finished run was clear, it is no older than
