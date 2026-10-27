@@ -33,6 +33,7 @@ from fl_notification_service import (
     result_of,
 )
 from fl_notification_state import all_rows, make_engine, put_row
+from fl_on_demand import StoringAssessor
 from fl_service import make_settings
 from structlog.testing import capture_logs
 
@@ -51,6 +52,7 @@ from family_logistics.services.notifications import (
     NotificationService,
     NotificationStateError,
 )
+from family_logistics.services.pipeline import PipelineCoordinator
 from family_logistics.services.scheduler import (
     DAILY_JOB,
     PURGE_JOB,
@@ -1074,6 +1076,53 @@ class TestFromSettings:
         service = SchedulerService.from_settings(self.settings(), engine)
         service.stop()
         assert closed == ["notifier"]
+
+    def test_a_coordinator_gives_the_scheduler_its_lock_and_tracks_its_runs(
+        self, engine, monkeypatch
+    ):
+        coordinator = PipelineCoordinator()
+        marked: list[tuple[str | None, str | None]] = []
+
+        class Recording(StoringAssessor):
+            def run(self, trigger, school=None, *, run_id=None):
+                marked.append((coordinator.active_run_id, run_id))
+                return super().run(trigger, school, run_id=run_id)
+
+        monkeypatch.setattr(
+            scheduler_module, "AssessmentService", lambda *_a, **_k: Recording(engine)
+        )
+        monkeypatch.setattr(
+            scheduler_module,
+            "build_collector",
+            lambda *_a, **_k: (FakeCollector([]), SimpleNamespace(close=lambda: None)),
+        )
+        monkeypatch.setattr(
+            NotificationService,
+            "dispatch",
+            lambda _self, run: DispatchReport(run.run_id, "shadow"),
+        )
+        service = SchedulerService.from_settings(
+            self.settings(), engine, coordinator=coordinator
+        )
+        try:
+            assert service.pipeline_lock is coordinator.lock
+            assert service.run_scan().outcome == "ok"
+        finally:
+            service.stop()
+        assert len(marked) == 1
+        active, run_id = marked[0]
+        assert run_id is not None
+        assert active == run_id
+        assert coordinator.active_run_id is None
+
+    def test_without_a_coordinator_each_scheduler_has_a_private_lock(self, engine):
+        coordinator = PipelineCoordinator()
+        first = SchedulerService.from_settings(self.settings(), engine)
+        second = SchedulerService.from_settings(self.settings(), engine)
+        first.stop()
+        second.stop()
+        assert first.pipeline_lock is not second.pipeline_lock
+        assert coordinator.lock not in (first.pipeline_lock, second.pipeline_lock)
 
     def test_missing_caldav_credentials_are_a_configuration_error(
         self, engine, monkeypatch
