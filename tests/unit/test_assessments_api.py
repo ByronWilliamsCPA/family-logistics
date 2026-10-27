@@ -35,7 +35,7 @@ pytestmark = pytest.mark.unit
 URL = "/api/v1/assessments"
 UNKNOWN = "00000000-0000-4000-8000-000000000000"
 START_FAILED = {"detail": "Could not start the run", "code": "on_demand_start_failed"}
-SECRET = "distinctive-thread-detail-7731"
+LEAK_CANARY = "distinctive-thread-detail-7731"
 
 
 @pytest.fixture
@@ -142,7 +142,7 @@ class TestStartFailure:
         def start(thread):
             if thread.name == "on-demand-run" and not refused:
                 refused.append(thread)
-                raise RuntimeError(SECRET)
+                raise RuntimeError(LEAK_CANARY)
             real_start(thread)
 
         monkeypatch.setattr(threading.Thread, "start", start)
@@ -159,7 +159,7 @@ class TestStartFailure:
         assert response.status_code == 503
         assert response.json() == START_FAILED
         assert "Retry-After" not in response.headers
-        assert SECRET not in response.text + caplog.text
+        assert LEAK_CANARY not in response.text + caplog.text
         assert "assessments.start_failed" in caplog.text
         assert "OnDemandStartError" in caplog.text
         assert assessor.run_ids == []
@@ -183,14 +183,14 @@ class TestStartFailure:
         rig, _ = make_rig(engine)
 
         def refuse():
-            raise OnDemandStartError(SECRET)
+            raise OnDemandStartError(LEAK_CANARY)
 
         monkeypatch.setattr(rig.on_demand, "request", refuse)
         with caplog.at_level("DEBUG"):
             response = rig.client.post(URL, headers=AUTH)
         assert response.status_code == 503
         assert response.json() == START_FAILED
-        assert SECRET not in response.text + caplog.text
+        assert LEAK_CANARY not in response.text + caplog.text
 
 
 class TestDisabled:
