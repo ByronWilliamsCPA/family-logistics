@@ -68,8 +68,9 @@ already-collected calendar rows, judges source freshness, runs
 run's rides. Collection stays in `services/collector.py`. Timeline, rules,
 change impact and run status all run inside `assess()`. School overlays apply
 only when a `SchoolSnapshot` is supplied. The Home Assistant ingest route
-(M3, #27 to #29) now stores one, but no production caller of `run` reads it
-yet, so a run without a snapshot still ends non-CLEAR (DATA-011, #26).
+(M3, #27 to #29) stores one. The scheduler and the on-demand API (each off by
+default) pass `school=repo.latest()` to `run`, and a run without a snapshot
+still ends non-CLEAR (DATA-011, #26).
 
 Also in the tree as groundwork for later milestones: the SQLite schema with
 Alembic migrations, an append-only audit log, the pilot registry and seed
@@ -151,8 +152,9 @@ Open items that block the M0, M1 and M2 exit gates:
 ### M3 progress
 
 Merged M3 work, and the scheduler PR in review. Until a deployment sets
-`FL_SCHEDULER_ENABLED=true`, none of it is read by a run, because nothing else
-calls `AssessmentService.run`.
+`FL_SCHEDULER_ENABLED=true` (or `FL_ON_DEMAND_ENABLED=true`, which lets
+`POST /api/v1/assessments` start a run), none of it is read by a run, because
+nothing else calls `AssessmentService.run`.
 
 | PR | State | What it completed |
 |----|-------|-------------------|
