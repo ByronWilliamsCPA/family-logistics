@@ -1115,11 +1115,14 @@ class TestFromSettings:
         assert active == run_id
         assert coordinator.active_run_id is None
 
-    def test_without_a_coordinator_the_scheduler_has_a_private_lock(self, engine):
+    def test_without_a_coordinator_each_scheduler_has_a_private_lock(self, engine):
         coordinator = PipelineCoordinator()
-        service = SchedulerService.from_settings(self.settings(), engine)
-        service.stop()
-        assert service.pipeline_lock is not coordinator.lock
+        first = SchedulerService.from_settings(self.settings(), engine)
+        second = SchedulerService.from_settings(self.settings(), engine)
+        first.stop()
+        second.stop()
+        assert first.pipeline_lock is not second.pipeline_lock
+        assert coordinator.lock not in (first.pipeline_lock, second.pipeline_lock)
 
     def test_missing_caldav_credentials_are_a_configuration_error(
         self, engine, monkeypatch

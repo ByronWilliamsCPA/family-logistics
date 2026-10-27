@@ -16,15 +16,16 @@ on-demand request that joined a scheduled run) still learn how it ended.
 #CRITICAL: Concurrency: the lock is process-local. A second process on the same
 database (the ``collect`` CLI, a second ``serve``) is not excluded, and issue
 #22 (one database write lock from history load to run completion) stays open.
-#VERIFY: tests/unit/test_on_demand.py (TestSharedLock); docs/runbook.md
-(On-demand runs) tells the operator to run one ``serve`` only.
+#VERIFY: tests/unit/test_on_demand.py (TestSharedLock). The operator guidance
+to run one ``serve`` only lands with the routes pull request (#42).
 
 #CRITICAL: Timing: a run id that was handed to a caller must always resolve. A
 run that raises is recorded as failed BEFORE its executing mark is cleared, so
 a reader that sees no executing run also sees the failure. The memory holds
 ``REMEMBERED_FAILURES`` ids and is lost on restart; an evicted or restarted id
 with no row reads as not found, never as clear.
-#VERIFY: tests/unit/test_on_demand.py (TestFailureMemory).
+#VERIFY: tests/unit/test_on_demand.py (TestFailureMemory,
+test_a_failure_is_recorded_before_the_executing_mark_clears).
 """
 
 from __future__ import annotations
@@ -102,8 +103,12 @@ class PipelineCoordinator:
         The caller must hold ``lock``. The mark is cleared after the run's row
         is stored (the block ends after ``AssessmentService.run`` returns), so
         a reader that sees no active run and an unfinished row knows the run
-        died; see ``services.status``. A block that raises records ``run_id``
-        as failed first, then clears the mark, and passes the error on.
+        died (``OnDemandService.progress`` reads it that way). In the moment
+        between the stored row and the cleared mark a run that succeeded is
+        still the active one: a caller that joins it then gets a run whose
+        progress already reads finished with its real status. A run that raised
+        is never joined: a block that raises records ``run_id`` as failed
+        first, then clears the mark, and passes the error on.
 
         Args:
             run_id: The run about to execute.
@@ -153,7 +158,9 @@ class TrackedAssessor:
         """Run one assessment with a pre-allocated, tracked run id.
 
         A run that raises is remembered as failed by the coordinator, so a
-        caller that was given this id can still learn how the run ended.
+        caller that was given this id can still learn how the run ended. As with
+        ``tracking``, a caller that joins this run after its row is stored and
+        before the mark clears gets the run that just finished.
 
         Args:
             trigger: What started the run.

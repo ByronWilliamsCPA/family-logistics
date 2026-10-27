@@ -7,6 +7,7 @@ fictional; the assessor is a fake that stores real run rows.
 from __future__ import annotations
 
 import threading
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -27,8 +28,10 @@ from fl_service import make_settings
 
 from family_logistics.db.assessments import AssessmentRepository
 from family_logistics.domain.models import RunStatus
+from family_logistics.services import on_demand as on_demand_module
 from family_logistics.services.on_demand import (
     OnDemandService,
+    OnDemandStartError,
     OnDemandStoppedError,
 )
 from family_logistics.services.pipeline import (
@@ -99,6 +102,71 @@ class RaisesWhenReleased:
         assert self.release.wait(JOIN_SECONDS), "the test never released the run"
         msg = "database busy before the run began"
         raise RuntimeError(msg)
+
+
+class RacingRepository(AssessmentRepository):
+    """A repository that lets something happen around its first ``get_run``.
+
+    ``before_first`` runs before the row is read and ``after_first`` after it;
+    each runs once, so a test can place a run's start or end exactly between
+    two reads that ``progress`` makes.
+    """
+
+    def __init__(self, engine) -> None:
+        super().__init__(engine)
+        self.before_first = None
+        self.after_first = None
+
+    def get_run(self, run_id):
+        before, self.before_first = self.before_first, None
+        after, self.after_first = self.after_first, None
+        if before is not None:
+            before()
+        row = super().get_run(run_id)
+        if after is not None:
+            after()
+        return row
+
+
+class AsksWhenFailed(PipelineCoordinator):
+    """A coordinator whose first recorded failure makes a request, as a client might."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.service = None
+        self.tickets = []
+
+    def remember_failed(self, run_id: str) -> None:
+        super().remember_failed(run_id)
+        if self.service is not None and not self.tickets:
+            self.tickets.append(self.service.request())
+
+
+class RecordsActiveMark(PipelineCoordinator):
+    """A coordinator that notes which run is marked executing at each failure."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.active_at_failure = []
+
+    def remember_failed(self, run_id: str) -> None:
+        self.active_at_failure.append(self.active_run_id)
+        super().remember_failed(run_id)
+
+
+class SpiesOnClearPending(OnDemandService):
+    """A service that asks, once, in the moment its run's id is cleared."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.seen = {}
+
+    def _clear_pending(self, run_id: str) -> None:
+        super()._clear_pending(run_id)
+        if not self.seen and threading.current_thread().name == "on-demand-run":
+            ticket = self.request()
+            self.seen["ticket"] = ticket
+            self.seen["progress"] = self.progress(ticket.run_id)
 
 
 class TestCoalescing:
@@ -358,11 +426,23 @@ class TestFailureMemory:
         coordinator = PipelineCoordinator()
         assessor = RaisesWhenReleased()
         assessor.release.set()
+        tracked = coordinator.tracked(assessor)
         with coordinator.lock, pytest.raises(RuntimeError):
-            coordinator.tracked(assessor).run("daily")
+            tracked.run("daily")
         assert coordinator.active_run_id is None
         assert assessor.run_id is not None
         assert coordinator.has_failed(assessor.run_id)
+
+    def test_a_failure_is_recorded_before_the_executing_mark_clears(self, engine):
+        coordinator = RecordsActiveMark()
+        assessor = RaisesWhenReleased()
+        assessor.release.set()
+        tracked = coordinator.tracked(assessor)
+        with coordinator.lock, pytest.raises(RuntimeError):
+            tracked.run("daily")
+        assert assessor.run_id is not None
+        assert coordinator.active_at_failure == [assessor.run_id]
+        assert coordinator.active_run_id is None
 
     def test_a_tracked_run_that_succeeds_is_not_remembered_as_failed(self, engine):
         coordinator = PipelineCoordinator()
@@ -437,6 +517,55 @@ class TestProgressBranches:
         assert (progress.state, progress.status) == ("finished", RunStatus.CLEAR)
 
 
+class TestProgressRaces:
+    """``progress`` reads in-memory state and the row in two steps; a run can move between."""
+
+    def queued_service(self, engine, assessor):
+        repo = RacingRepository(engine)
+        coordinator = PipelineCoordinator()
+        service = OnDemandService(coordinator, lambda: assessor, FakeSchool(), repo)
+        coordinator.lock.acquire()
+        ticket = service.request()
+        assert wait_until(lambda: service.progress(ticket.run_id).state == "queued")
+
+        def start_run():
+            coordinator.lock.release()
+            assert assessor.started.wait(JOIN_SECONDS), "the queued run never began"
+
+        repo.before_first = start_run
+        return service, repo, ticket
+
+    def test_a_queued_run_that_starts_between_the_reads_is_running(self, engine):
+        hold = threading.Event()
+        service, _, ticket = self.queued_service(
+            engine, StoringAssessor(engine, hold=hold)
+        )
+        progress = service.progress(ticket.run_id)
+        hold.set()
+        assert progress is not None
+        assert (progress.state, progress.status) == ("running", None)
+        assert finished(service, ticket.run_id).status is RunStatus.CLEAR
+        service.stop()
+
+    def test_a_run_that_starts_and_ends_between_the_reads_reads_as_it_ended(
+        self, engine
+    ):
+        hold = threading.Event()
+        service, repo, ticket = self.queued_service(
+            engine, StoringAssessor(engine, hold=hold)
+        )
+
+        def let_it_end():
+            hold.set()
+            assert wait_until(lambda: not service.in_flight()), "the run never ended"
+
+        repo.after_first = let_it_end
+        progress = service.progress(ticket.run_id)
+        assert progress is not None
+        assert (progress.state, progress.status) == ("finished", RunStatus.CLEAR)
+        service.stop()
+
+
 class TestSettling:
     """No stale answer in the moment a run has ended but its lock is not free."""
 
@@ -474,6 +603,45 @@ class TestSettling:
         assert (progress.state, progress.status) == ("finished", RunStatus.FAILED)
         assert seen["next"].run_id != ticket.run_id
         assert not seen["next"].coalesced
+
+
+class TestJoiningAtTheEdges:
+    """A request in the moment a run ends joins the right run, or starts its own."""
+
+    def test_a_run_that_raised_is_not_joined_while_its_mark_is_still_set(self, engine):
+        coordinator = AsksWhenFailed()
+        service, _ = build(
+            engine,
+            StoringAssessor(engine, fail_at="before_begin"),
+            coordinator=coordinator,
+        )
+        coordinator.service = service
+        first = service.request()
+        assert wait_until(lambda: bool(coordinator.tickets)), "no request was made"
+        ticket = coordinator.tickets[0]
+        assert ticket.run_id != first.run_id
+        assert not ticket.coalesced
+        assert finished(service, first.run_id).status is RunStatus.FAILED
+        assert finished(service, ticket.run_id).status is RunStatus.FAILED
+        service.stop()
+
+    def test_a_request_as_the_run_ends_joins_it_and_reads_its_real_status(self, engine):
+        service = SpiesOnClearPending(
+            PipelineCoordinator(),
+            lambda: StoringAssessor(engine, status=RunStatus.ATTENTION_REQUIRED),
+            FakeSchool(),
+            AssessmentRepository(engine),
+        )
+        first = service.request()
+        assert wait_until(lambda: "ticket" in service.seen), "the run never ended"
+        service.stop()
+        joined = service.seen["ticket"]
+        assert (joined.run_id, joined.coalesced) == (first.run_id, True)
+        progress = service.seen["progress"]
+        assert (progress.state, progress.status) == (
+            "finished",
+            RunStatus.ATTENTION_REQUIRED,
+        )
 
 
 class TestInFlight:
@@ -581,3 +749,60 @@ class TestShutdown:
         service.stop()
         with pytest.raises(OnDemandStoppedError):
             service.request()
+
+
+class TestStartFailure:
+    @staticmethod
+    def fail_first_start(monkeypatch):
+        """Make the first on-demand thread refuse to start; return its ids."""
+        real_start = threading.Thread.start
+        refused = []
+
+        def start(thread):
+            if thread.name == "on-demand-run" and not refused:
+                refused.append(thread)
+                msg = "can't start new thread"
+                raise RuntimeError(msg)
+            real_start(thread)
+
+        monkeypatch.setattr(threading.Thread, "start", start)
+        return refused
+
+    def test_a_thread_that_cannot_start_queues_nothing(self, engine, monkeypatch):
+        assessor = StoringAssessor(engine)
+        service, coordinator = build(engine, assessor)
+        refused = self.fail_first_start(monkeypatch)
+        with pytest.raises(OnDemandStartError):
+            service.request()
+        assert len(refused) == 1
+        assert not service.in_flight()
+        assert not coordinator.lock.locked()
+        service.stop()
+
+    def test_the_next_request_starts_a_new_run_not_a_dead_one(
+        self, engine, monkeypatch
+    ):
+        assessor = StoringAssessor(engine)
+        service, _ = build(engine, assessor)
+        self.fail_first_start(monkeypatch)
+        with pytest.raises(OnDemandStartError):
+            service.request()
+        ticket = service.request()
+        assert not ticket.coalesced
+        progress = finished(service, ticket.run_id)
+        assert progress.status is RunStatus.CLEAR
+        assert assessor.run_ids == [ticket.run_id]
+        assert not service.in_flight()
+        service.stop()
+
+    def test_the_run_id_that_never_started_is_unknown_not_queued(
+        self, engine, monkeypatch
+    ):
+        service, _ = build(engine, StoringAssessor(engine))
+        self.fail_first_start(monkeypatch)
+        issued = uuid.UUID(int=41)
+        monkeypatch.setattr(on_demand_module.uuid, "uuid4", lambda: issued)
+        with pytest.raises(OnDemandStartError):
+            service.request()
+        assert service.progress(str(issued)) is None
+        service.stop()
