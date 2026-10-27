@@ -40,6 +40,9 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from family_logistics.api.ha import ErrorBody
 from family_logistics.services.on_demand import OnDemandStoppedError
+from family_logistics.services.status import (  # noqa: TC001 - pydantic needs it
+    StatusReason,
+)
 from family_logistics.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -62,6 +65,9 @@ RUN_NOT_FOUND: Final = "Run not found"
 """Fixed 404 text for an unknown run id."""
 INVALID_RUN_ID: Final = "Invalid run id"
 """Fixed 422 text for an id that is not a UUID."""
+
+RunStatusValue = Literal["clear", "attention_required", "incomplete", "failed"]
+"""The ``RunStatus`` values; ``TestResponseSchema`` pins them to the enum."""
 
 _RUN_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 """The shape ``uuid.uuid4()`` gives a run id (lower-case hex)."""
@@ -92,8 +98,8 @@ class StatusBody(BaseModel):
         generated_at: When this answer was built.
     """
 
-    status: str
-    reasons: list[str]
+    status: RunStatusValue
+    reasons: list[StatusReason]
     counts: dict[str, int] | None
     lifecycle: dict[str, int] | None
     last_analysis_at: datetime | None
@@ -135,7 +141,7 @@ class AssessmentBody(BaseModel):
     run_id: str
     state: Literal["queued", "running", "finished"]
     trigger: str | None
-    status: Literal["clear", "attention_required", "incomplete", "failed"] | None
+    status: RunStatusValue | None
     counts: dict[str, int] | None
     started_at: datetime | None
     finished_at: datetime | None
@@ -177,6 +183,54 @@ def _assessment_body(run: RunProgress) -> AssessmentBody:
     )
 
 
+def _store_failed(event: str, exc: SQLAlchemyError) -> JSONResponse:
+    """Log a store error by class only and answer the fixed 503."""
+    # A traceback can carry SQL parameters, so only the class name is logged.
+    logger.error(event, error=type(exc).__name__)
+    return _fixed(status.HTTP_503_SERVICE_UNAVAILABLE, STORE_UNAVAILABLE)
+
+
+def _card_answer(status_service: StatusService) -> StatusBody | JSONResponse:
+    try:
+        card = status_service.card()
+    except SQLAlchemyError as exc:
+        return _store_failed("status.store_failed", exc)
+    return _status_body(card)
+
+
+def _start_answer(
+    on_demand: OnDemandService, *, enabled: bool
+) -> AssessmentStartedBody | JSONResponse:
+    if not enabled:
+        return _fixed(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            ON_DEMAND_DISABLED,
+            ON_DEMAND_DISABLED_CODE,
+        )
+    try:
+        ticket = on_demand.request()
+    except OnDemandStoppedError:
+        return _fixed(status.HTTP_503_SERVICE_UNAVAILABLE, STOPPING)
+    logger.info(
+        "assessments.requested", run_id=ticket.run_id, coalesced=ticket.coalesced
+    )
+    return AssessmentStartedBody(run_id=ticket.run_id, coalesced=ticket.coalesced)
+
+
+def _run_answer(
+    on_demand: OnDemandService, run_id: str
+) -> AssessmentBody | JSONResponse:
+    if _RUN_ID.fullmatch(run_id) is None:
+        return _fixed(status.HTTP_422_UNPROCESSABLE_CONTENT, INVALID_RUN_ID)
+    try:
+        run = on_demand.progress(run_id)
+    except SQLAlchemyError as exc:
+        return _store_failed("assessments.store_failed", exc)
+    if run is None:
+        return _fixed(status.HTTP_404_NOT_FOUND, RUN_NOT_FOUND)
+    return _assessment_body(run)
+
+
 def register_assessment_routes(
     router: APIRouter,
     status_service: StatusService,
@@ -193,51 +247,43 @@ def register_assessment_routes(
         on_demand_enabled: ``FL_ON_DEMAND_ENABLED``; False makes the POST route
             a fixed 503 that starts nothing.
     """
-    unavailable: dict[int | str, dict[str, object]] = {
+    store_unavailable: dict[int | str, dict[str, object]] = {
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "model": ErrorBody,
-            "description": "Retry",
+            "description": "The store is unavailable; retry",
+        }
+    }
+    not_accepted: dict[int | str, dict[str, object]] = {
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "model": ErrorBody,
+            "description": (
+                "Not accepted. With code on_demand_disabled the setting is off "
+                "and retrying cannot succeed until the owner enables it; "
+                "otherwise the service is shutting down, so retry once it is back"
+            ),
         }
     }
 
-    @router.get("/status", response_model=StatusBody, responses=unavailable)
+    @router.get("/status", response_model=StatusBody, responses=store_unavailable)
     def get_status() -> StatusBody | JSONResponse:
         """Return the family-wide card: status, counts, last times, stale flags."""
-        try:
-            card = status_service.card()
-        except SQLAlchemyError as exc:
-            logger.error("status.store_failed", error=type(exc).__name__)  # noqa: TRY400
-            return _fixed(status.HTTP_503_SERVICE_UNAVAILABLE, STORE_UNAVAILABLE)
-        return _status_body(card)
+        return _card_answer(status_service)
 
     @router.post(
         "/assessments",
         status_code=status.HTTP_202_ACCEPTED,
         response_model=AssessmentStartedBody,
-        responses=unavailable,
+        responses=not_accepted,
     )
     def post_assessment() -> AssessmentStartedBody | JSONResponse:
         """Start an on-demand run, or join the one already queued or running."""
-        if not on_demand_enabled:
-            return _fixed(
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-                ON_DEMAND_DISABLED,
-                ON_DEMAND_DISABLED_CODE,
-            )
-        try:
-            ticket = on_demand.request()
-        except OnDemandStoppedError:
-            return _fixed(status.HTTP_503_SERVICE_UNAVAILABLE, STOPPING)
-        logger.info(
-            "assessments.requested", run_id=ticket.run_id, coalesced=ticket.coalesced
-        )
-        return AssessmentStartedBody(run_id=ticket.run_id, coalesced=ticket.coalesced)
+        return _start_answer(on_demand, enabled=on_demand_enabled)
 
     @router.get(
         "/assessments/{run_id}",
         response_model=AssessmentBody,
         responses={
-            **unavailable,
+            **store_unavailable,
             status.HTTP_404_NOT_FOUND: {
                 "model": ErrorBody,
                 "description": "Unknown run",
@@ -250,13 +296,4 @@ def register_assessment_routes(
     )
     def get_assessment(run_id: str) -> AssessmentBody | JSONResponse:
         """Report whether one run is queued, running or finished, and how it ended."""
-        if _RUN_ID.fullmatch(run_id) is None:
-            return _fixed(status.HTTP_422_UNPROCESSABLE_CONTENT, INVALID_RUN_ID)
-        try:
-            run = on_demand.progress(run_id)
-        except SQLAlchemyError as exc:
-            logger.error("assessments.store_failed", error=type(exc).__name__)  # noqa: TRY400
-            return _fixed(status.HTTP_503_SERVICE_UNAVAILABLE, STORE_UNAVAILABLE)
-        if run is None:
-            return _fixed(status.HTTP_404_NOT_FOUND, RUN_NOT_FOUND)
-        return _assessment_body(run)
+        return _run_answer(on_demand, run_id)

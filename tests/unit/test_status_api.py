@@ -293,6 +293,29 @@ class TestStale:
         assert body["analysis_stale"] is True
 
 
+class TestFutureStamps:
+    """A stamp ahead of the clock has a negative age and reads as fresh."""
+
+    def test_a_run_a_minute_in_the_future_is_not_stale(self, rig):
+        seed_run(rig, RunStatus.CLEAR, NOW + timedelta(minutes=1))
+        seed_school(rig)
+        body = card(rig)
+        assert (body["status"], body["analysis_stale"]) == ("clear", False)
+
+    def test_a_snapshot_a_minute_in_the_future_is_not_stale(self, rig):
+        seed_run(rig, RunStatus.CLEAR)
+        seed_school(rig, NOW + timedelta(minutes=1))
+        body = card(rig)
+        assert (body["status"], body["school_snapshot_stale"]) == ("clear", False)
+
+    def test_a_collection_a_minute_in_the_future_is_not_stale(self, rig):
+        rig.collect_calendar(NOW + timedelta(minutes=1))
+        seed_run(rig, RunStatus.CLEAR)
+        seed_school(rig)
+        body = card(rig)
+        assert (body["status"], body["calendar_stale"]) == ("clear", False)
+
+
 class TestCalendarStale:
     """A fresh run on old calendar data is not evidence (M3 in the review)."""
 

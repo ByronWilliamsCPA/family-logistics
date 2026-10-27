@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 
 from family_logistics.domain.context import HA_SNAPSHOT_SOURCE, EngineSettings
 from family_logistics.domain.models import RunStatus
@@ -45,12 +45,22 @@ if TYPE_CHECKING:
     from family_logistics.db.sources import CalendarSourceRepository
     from family_logistics.services.on_demand import OnDemandService
 
-NO_RUN: Final = "no_run"
-RUN_INTERRUPTED: Final = "run_interrupted"
-ANALYSIS_STALE: Final = "analysis_stale"
-CALENDAR_STALE: Final = "calendar_stale"
-SCHOOL_MISSING: Final = "school_snapshot_missing"
-SCHOOL_STALE: Final = "school_snapshot_stale"
+StatusReason = Literal[
+    "no_run",
+    "run_interrupted",
+    "analysis_stale",
+    "calendar_stale",
+    "school_snapshot_missing",
+    "school_snapshot_stale",
+]
+"""The closed vocabulary of ``StatusCard.reasons``."""
+
+NO_RUN: Final[StatusReason] = "no_run"
+RUN_INTERRUPTED: Final[StatusReason] = "run_interrupted"
+ANALYSIS_STALE: Final[StatusReason] = "analysis_stale"
+CALENDAR_STALE: Final[StatusReason] = "calendar_stale"
+SCHOOL_MISSING: Final[StatusReason] = "school_snapshot_missing"
+SCHOOL_STALE: Final[StatusReason] = "school_snapshot_stale"
 """Reasons a card is not clear (``StatusCard.reasons``); a fixed vocabulary."""
 
 
@@ -85,7 +95,7 @@ class StatusCard:
     """
 
     status: RunStatus
-    reasons: tuple[str, ...]
+    reasons: tuple[StatusReason, ...]
     counts: Mapping[str, int] | None
     lifecycle: Mapping[str, int] | None
     last_analysis_at: datetime | None
@@ -146,45 +156,19 @@ class StatusService:
         in_flight = self._on_demand.in_flight()
         latest = self._runs.latest_run()
         interrupted = self._interrupted(latest)
-        basis = latest
-        if latest is None or latest.finished_at is None:
-            basis = self._runs.latest_finished_run()
-        reasons: list[str] = []
-        if interrupted:
-            reasons.append(RUN_INTERRUPTED)
-        if basis is None:
-            reasons.append(NO_RUN)
-        analysis_stale = basis is None or self._older(
-            now, basis.finished_at, self._analysis_max_age
+        basis = self._basis(latest)
+        analysis_stale, analysis_reason = self._analysis(now, basis)
+        calendar_stale = self._calendar_stale(now)
+        school_at, school_stale, school_reason = self._school(now)
+        reasons = _reasons(
+            RUN_INTERRUPTED if interrupted else None,
+            analysis_reason,
+            CALENDAR_STALE if calendar_stale else None,
+            school_reason,
         )
-        if analysis_stale and basis is not None:
-            reasons.append(ANALYSIS_STALE)
-        # The same collapse the run uses (oldest success of the calendars the
-        # collector reads), judged against NOW: the run's own DATA-011 check
-        # looked at the data as of when the run happened.
-        _, collected_at = icloud_freshness(
-            enabled_selected_sources(self._sources.all(), self._collector_config)
-        )
-        calendar_stale = self._older(now, collected_at, self._analysis_max_age)
-        if calendar_stale:
-            reasons.append(CALENDAR_STALE)
-        freshness = self._schools.freshness()
-        school_at = freshness.fetched_at if freshness is not None else None
-        school_stale = school_at is None or self._older(
-            now, school_at, self._school_max_age
-        )
-        if school_stale:
-            reasons.append(SCHOOL_MISSING if school_at is None else SCHOOL_STALE)
-        run_status = (
-            RunStatus.FAILED
-            if interrupted
-            else (basis.status if basis else RunStatus.INCOMPLETE)
-        )
-        if run_status is RunStatus.CLEAR and reasons:
-            run_status = RunStatus.INCOMPLETE
         return StatusCard(
-            status=run_status,
-            reasons=tuple(reasons),
+            status=_verdict(interrupted=interrupted, basis=basis, reasons=reasons),
+            reasons=reasons,
             counts=basis.counts if basis is not None else None,
             lifecycle=self._runs.open_lifecycle_counts() if basis is not None else None,
             last_analysis_at=basis.finished_at if basis is not None else None,
@@ -195,6 +179,46 @@ class StatusService:
             run_in_flight=in_flight,
             generated_at=now,
         )
+
+    def _basis(self, latest: RunRecord | None) -> RunRecord | None:
+        """Return the run the card judges: the latest, or else the last finished."""
+        if latest is None or latest.finished_at is None:
+            return self._runs.latest_finished_run()
+        return latest
+
+    def _analysis(
+        self, now: datetime, basis: RunRecord | None
+    ) -> tuple[bool, StatusReason | None]:
+        """Say whether the judged run is stale, and the reason that gives."""
+        if basis is None:
+            return True, NO_RUN
+        if self._older(now, basis.finished_at, self._analysis_max_age):
+            return True, ANALYSIS_STALE
+        return False, None
+
+    def _calendar_stale(self, now: datetime) -> bool:
+        """Say whether the calendar data the run read is too old now.
+
+        The same collapse the run uses (oldest success of the calendars the
+        collector reads), judged against NOW: the run's own DATA-011 check
+        looked at the data as of when the run happened.
+        """
+        _, collected_at = icloud_freshness(
+            enabled_selected_sources(self._sources.all(), self._collector_config)
+        )
+        return self._older(now, collected_at, self._analysis_max_age)
+
+    def _school(
+        self, now: datetime
+    ) -> tuple[datetime | None, bool, StatusReason | None]:
+        """Return the snapshot's fetch time, whether it is stale, and why."""
+        freshness = self._schools.freshness()
+        school_at = freshness.fetched_at if freshness is not None else None
+        if school_at is None:
+            return None, True, SCHOOL_MISSING
+        if self._older(now, school_at, self._school_max_age):
+            return school_at, True, SCHOOL_STALE
+        return school_at, False, None
 
     def _interrupted(self, latest: RunRecord | None) -> bool:
         """Report whether the latest started run died without finishing."""
@@ -210,4 +234,28 @@ class StatusService:
 
     @staticmethod
     def _older(now: datetime, then: datetime | None, limit: timedelta) -> bool:
+        # #EDGE: Timing: a stamp in the future gives a negative age, so it reads
+        # as fresh, never stale. This matches ``domain/run_status`` and the
+        # snapshot's ``fetched_at``, which is clamped to the server clock when
+        # stored (``MAX_FUTURE_SKEW``), so a skewed clock cannot make old data
+        # look new through the snapshot; a run's ``finished_at`` is the app's
+        # own clock.
+        # #VERIFY: tests/unit/test_status_api.py (TestFutureStamps).
         return then is None or now - then > limit
+
+
+def _reasons(*found: StatusReason | None) -> tuple[StatusReason, ...]:
+    """Keep the reasons that apply, in the order the card lists them."""
+    return tuple(reason for reason in found if reason is not None)
+
+
+def _verdict(
+    *, interrupted: bool, basis: RunRecord | None, reasons: tuple[StatusReason, ...]
+) -> RunStatus:
+    """Return the card status: a clear run with any reason is incomplete."""
+    if interrupted:
+        return RunStatus.FAILED
+    run_status = basis.status if basis is not None else RunStatus.INCOMPLETE
+    if run_status is RunStatus.CLEAR and reasons:
+        return RunStatus.INCOMPLETE
+    return run_status

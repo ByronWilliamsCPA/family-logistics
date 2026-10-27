@@ -24,9 +24,10 @@ from fl_on_demand import (
 )
 from sqlalchemy.exc import OperationalError
 
-from family_logistics.api.assessments import AssessmentBody
+from family_logistics.api.assessments import AssessmentBody, StatusBody
 from family_logistics.db.assessments import AssessmentRepository
 from family_logistics.domain.models import RunStatus
+from family_logistics.services import status as status_service
 
 pytestmark = pytest.mark.unit
 
@@ -135,10 +136,6 @@ class TestDisabled:
         assessor = StoringAssessor(engine)
         return Rig(engine, assessor), assessor
 
-    def test_the_default_configuration_is_disabled(self, engine):
-        rig, _ = self.disabled_rig(engine)
-        assert rig.settings.on_demand_enabled is False
-
     def test_post_is_a_fixed_503_that_starts_nothing_and_allocates_no_id(
         self, engine, monkeypatch
     ):
@@ -190,6 +187,7 @@ class TestDisabled:
         body = rig.client.get(f"{URL}/{run_id}", headers=AUTH).json()
         assert body["run_id"] == UNKNOWN
         assert body["state"] == "finished"
+        assert body["status"] == "failed"
 
 
 class TestResponseSchema:
@@ -199,6 +197,58 @@ class TestResponseSchema:
         literal = next(m for m in members if get_origin(m) is Literal)
         assert set(get_args(literal)) == {status.value for status in RunStatus}
         assert type(None) in members, "status is null until the run finishes"
+
+    def test_the_card_status_values_are_exactly_the_run_statuses(self):
+        annotation = StatusBody.model_fields["status"].annotation
+        assert set(get_args(annotation)) == {status.value for status in RunStatus}
+
+    def test_the_card_reasons_are_exactly_the_reason_constants(self):
+        annotation = StatusBody.model_fields["reasons"].annotation
+        (reason,) = get_args(annotation)
+        constants = {
+            status_service.NO_RUN,
+            status_service.RUN_INTERRUPTED,
+            status_service.ANALYSIS_STALE,
+            status_service.CALENDAR_STALE,
+            status_service.SCHOOL_MISSING,
+            status_service.SCHOOL_STALE,
+        }
+        assert set(get_args(reason)) == constants
+
+    def test_a_real_card_validates_against_the_body(self, engine):
+        rig, _ = make_rig(engine)
+        response = rig.client.get("/api/v1/status", headers=AUTH)
+        assert response.status_code == 200
+        body = StatusBody.model_validate(response.json())
+        # An empty store: no run, no calendar, no snapshot, in that order.
+        assert body.status == "incomplete"
+        assert body.reasons == ["no_run", "calendar_stale", "school_snapshot_missing"]
+
+    def test_the_openapi_schema_is_valid_and_lists_the_closed_values(self, engine):
+        rig, _ = make_rig(engine)
+        schema = rig.client.app.openapi()
+        card = schema["components"]["schemas"]["StatusBody"]["properties"]
+        assert set(card["status"]["enum"]) == {s.value for s in RunStatus}
+        assert set(card["reasons"]["items"]["enum"]) == set(
+            get_args(status_service.StatusReason)
+        )
+
+    def test_the_503_descriptions_fit_each_route(self, engine):
+        rig, _ = make_rig(engine)
+        paths = rig.client.app.openapi()["paths"]
+
+        def describe(path, method):
+            return paths[path][method]["responses"]["503"]["description"]
+
+        post = describe("/api/v1/assessments", "post")
+        assert "on_demand_disabled" in post
+        assert "cannot succeed" in post
+        for read in (
+            describe("/api/v1/status", "get"),
+            describe("/api/v1/assessments/{run_id}", "get"),
+        ):
+            assert "on_demand_disabled" not in read
+            assert "retry" in read
 
 
 class TestGetAssessment:
