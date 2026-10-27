@@ -3,8 +3,8 @@
 ``dispatch`` plans the pushes with the pure policy, claims what is owed through
 the state repository (no lock held while sending), renders and sends each push
 with ``AppriseClient`` and records the result. ``dispatch_unavailable`` does the
-same for a run that never produced an outcome. Nothing calls either yet: the
-scheduler wires them (``services/scheduler.py``, the M3 gate).
+same for a run that never produced an outcome. The scheduler
+(``services/scheduler.py``) is the only caller.
 
 A delivery failure never raises: the push stays owed and a later dispatch
 retries it (an urgent push once more in the same dispatch). Only
@@ -14,7 +14,7 @@ operation and carries the ``DispatchReport``); the run is already stored, so
 neither changes it. In production mode a missing Apprise client is a
 ``ConfigurationError`` at construction; only shadow mode may run without one.
 
-The scheduler PR owes two things this service cannot do alone (ADR 0008, D11):
+The scheduler does two things this service cannot do alone (ADR 0008, D11):
 serialize ``dispatch`` and ``dispatch_unavailable`` calls (the watermark is
 checked at claim time only, so two concurrent dispatches of different runs can
 deliver the older status after the newer one), and know that

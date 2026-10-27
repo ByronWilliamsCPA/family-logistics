@@ -31,6 +31,9 @@ class TestDefaults:
     def test_notification_mode_defaults_to_shadow(self):
         assert Settings().notification_mode == "shadow"
 
+    def test_the_scheduler_is_off_by_default(self):
+        assert Settings().scheduler_enabled is False
+
     def test_default_tags_are_the_dedicated_tags(self):
         settings = Settings()
         assert [getattr(settings, name) for name in DEDICATED_TAG_FIELDS] == [

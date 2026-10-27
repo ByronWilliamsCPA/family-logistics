@@ -18,10 +18,11 @@ status card and Apprise notifications.
 **Status: between M2 and M3.** The calendar collector, the rule engine and
 the assessment orchestrator are implemented and tested, and the first M3
 work is merged: the Home Assistant school snapshot ingest, the route
-providers and the Home Assistant route relay. Provider wiring, `google_routes`,
-notifications and the scheduler complete M3, and
-the Home Assistant UI arrives in M4. See the [roadmap](project/roadmap.md). Notifications
-default to shadow mode.
+providers, the Home Assistant route relay and the notification service. The
+scheduler exists but ships disabled (`FL_SCHEDULER_ENABLED=false`), so nothing
+runs in production until the owner enables it. `google_routes` is still to
+come, and the Home Assistant UI arrives in M4. See the
+[roadmap](project/roadmap.md). Notifications default to shadow mode.
 
 ## Quick start
 

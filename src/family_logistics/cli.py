@@ -49,6 +49,7 @@ from family_logistics.services.registry_seed import (
     apply_seed,
     load_seed_file,
 )
+from family_logistics.services.scheduler import scheduler_problems
 from family_logistics.utils.logging import setup_logging
 
 if TYPE_CHECKING:
@@ -101,6 +102,8 @@ def _config_problems(settings: Settings) -> list[str]:
             problems.append(
                 "FL_APPRISE_URL is required when FL_NOTIFICATION_MODE=production"
             )
+    if settings.scheduler_enabled:
+        problems += _credential_problems(settings) + scheduler_problems(settings)
     return problems
 
 
@@ -211,7 +214,10 @@ def cli() -> None:
     help="Upgrade the database schema to head before serving.",
 )
 def serve(upgrade_db: bool) -> None:
-    """Run the API server (single process, single writer)."""
+    """Run the API server (single process, single writer).
+
+    The scheduler runs inside it when FL_SCHEDULER_ENABLED is true.
+    """
     settings = _settings()
     _configure_logging(settings)
     problems = startup_problems(settings, upgrade_db=upgrade_db)
@@ -535,7 +541,7 @@ def _credential_problems(settings: Settings) -> list[str]:
 @click.option(
     "--once",
     is_flag=True,
-    help="Collect once and exit (the scheduled collector arrives in M3).",
+    help="Collect once and exit (the scheduler collects on its own interval).",
 )
 @click.option(
     "--calendar",
@@ -554,7 +560,9 @@ def collect(ctx: click.Context, once: bool, calendars: tuple[str, ...]) -> None:
     if ctx.invoked_subcommand is not None:
         return
     if not once:
-        _fail("Use `collect --once` or `collect discover` (scheduling arrives in M3).")
+        _fail(
+            "Use `collect --once` or `collect discover`; scheduled collection runs inside `serve` when FL_SCHEDULER_ENABLED=true."
+        )
     settings = _settings()
     _configure_logging(settings)
     problems = _credential_problems(settings) + directory_problems(

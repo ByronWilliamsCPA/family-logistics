@@ -20,18 +20,15 @@ later explain findings, but it never decides them.
 **Status: between M2 and M3.** The read-only CalDAV collector (the M1
 ingestion half), the M2 rule engine and the assessment orchestrator are merged
 and tested, as is the platform around them: Alembic schema migrations, a
-hash-only audit log, a minimal Apprise API client, and `serve` startup checks
-that refuse to start on missing secrets or an out-of-date schema. M3 has
-started: the Home Assistant school snapshot ingest
-(`POST /api/v1/ingest/ha-snapshot`) and the first two of three routing parts
-(the null and `ha_relay` route providers with their factory, the route cache
-and the Home Assistant relay routes `GET /api/v1/route-requests` and
-`POST /api/v1/route-results`) are merged. `collect --once` and those three Home
-Assistant routes are the only wired production paths; no CLI command, API route
-or scheduler runs an assessment yet, and no service calls the route provider
-factory. Provider wiring, `google_routes`, notifications and the scheduler
-complete M3,
-and the Home Assistant UI arrives in M4; see the
+hash-only audit log, the Apprise client and notification service, and `serve`
+startup checks that refuse to start on missing secrets or an out-of-date
+schema. M3 has started: the Home Assistant school snapshot ingest
+(`POST /api/v1/ingest/ha-snapshot`), the null and `ha_relay` route providers
+with the Home Assistant relay routes, and the notification service are merged.
+The scheduler (collect, assess and notify on a schedule, in shadow mode by
+default) exists but ships disabled (`FL_SCHEDULER_ENABLED=false`): nothing runs
+an assessment in production until the owner enables it. `google_routes` and the
+Home Assistant UI are still to come (M3 and M4); see the
 [roadmap](docs/project/roadmap.md). Production notifications stay off
 (`FL_NOTIFICATION_MODE=shadow`) until the household approves the defaults and
 the M3 shadow gate is met: 7 consecutive days in shadow mode with zero
