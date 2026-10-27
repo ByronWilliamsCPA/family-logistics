@@ -102,7 +102,8 @@ LOCK_WAIT: Final = timedelta(minutes=30)
 PURGE_HOUR: Final = 3
 PURGE_MINUTE: Final = 30
 QUIET_SAMPLE_DAYS: Final = 8
-_MAX_SAMPLED_FIRES: Final = 500
+SCAN_SKIP_WARN_AFTER: Final = timedelta(hours=1)
+"""Consecutive busy scans that add up to this long raise a warning."""
 _GRACE_SECONDS: Final = int(CLAIM_TTL.total_seconds())
 """A job that cannot start within this long of its time is skipped."""
 _PURGES: Final[tuple[tuple[str, Callable[..., int]], ...]] = (
@@ -116,6 +117,8 @@ _FAILURES: Final = frozenset(
     {"unavailable", "dispatch_failed", "crashed", "purge_failed"}
 )
 _SKIPS: Final = frozenset({"skipped_busy", "stopped"})
+_MISSABLE: Final = {DAILY_JOB: "daily", WEEKLY_JOB: "weekly"}
+"""The jobs whose missed fire is announced, with the trigger they run as."""
 
 
 def _utc_now() -> datetime:
@@ -168,9 +171,10 @@ class TickReport:
 
     Attributes:
         job: The job name.
-        outcome: ``ok``, ``unavailable`` (the run raised; the unavailable push
-            ran), ``dispatch_failed``, ``crashed``, ``skipped_busy``,
-            ``stopped`` or ``purge_failed``.
+        outcome: ``ok``, ``unavailable`` (the run raised, the lock wait ran
+            out or a fire was missed; the unavailable push ran),
+            ``dispatch_failed``, ``crashed``, ``skipped_busy`` (a scan or purge
+            found the pipeline busy), ``stopped`` or ``purge_failed``.
         run_id: The stored run, when there is one.
         run_status: The run's status value, when there is a run.
         collection: ``complete``, ``incomplete``, ``crashed`` or None.
@@ -195,6 +199,7 @@ class JobStats:
         ticks: Ticks that ran (skipped ones excluded).
         failures: Ticks that ended in a failure outcome.
         skipped: Ticks skipped (busy, stopping, missed or overlapping).
+        consecutive_skips: Busy skips in a row; any tick that ran resets it.
         last_outcome: The last tick's outcome.
         last_finished: When the last tick finished.
         last_ok: When the last ``ok`` tick finished.
@@ -203,6 +208,7 @@ class JobStats:
     ticks: int = 0
     failures: int = 0
     skipped: int = 0
+    consecutive_skips: int = 0
     last_outcome: str | None = None
     last_finished: datetime | None = None
     last_ok: datetime | None = None
@@ -219,6 +225,24 @@ def _status_crons(settings: Settings) -> tuple[tuple[str, str], ...]:
 def _cron(expression: str, zone: ZoneInfo) -> CronTrigger:
     """Parse a five-field cron expression in ``zone`` (use day names: SUN)."""
     return CronTrigger.from_crontab(expression, timezone=zone)
+
+
+def _numeric_day_of_week(expression: str) -> bool:
+    """Report whether the day-of-week field of a five-field cron has a digit.
+
+    APScheduler 3.x counts day-of-week 0 as Monday where standard cron counts
+    it as Sunday, so ``0 15 * * 0`` would fire on the wrong day. Names (``sun``,
+    ``mon-fri``) mean the same everywhere.
+
+    Args:
+        expression: The cron expression.
+
+    Returns:
+        True when the fifth field contains a digit; False for any other shape
+        (the parser reports a wrong field count).
+    """
+    fields = expression.split()
+    return len(fields) == 5 and any(ch.isdigit() for ch in fields[4])
 
 
 def scheduler_problems(settings: Settings, *, now: datetime | None = None) -> list[str]:
@@ -240,8 +264,21 @@ def scheduler_problems(settings: Settings, *, now: datetime | None = None) -> li
         problems.append(
             f"FL_CHANGE_SCAN_MINUTES must exceed the {minutes} minute {what}"
         )
+    if settings.route_provider != "ha_relay":
+        what = "the other providers cannot be built for a deployment yet"
+        problems.append(
+            f"FL_ROUTE_PROVIDER must be ha_relay when FL_SCHEDULER_ENABLED=true ({what})"
+        )
     zone = ZoneInfo(settings.timezone)
     for name, expression in _status_crons(settings):
+        # #CRITICAL: Timing: APScheduler 3.x day-of-week numbers start at Monday.
+        # #VERIFY: tests/unit/test_scheduler.py (TestProblems numeric day-of-week).
+        if _numeric_day_of_week(expression):
+            why = "APScheduler counts 0 as Monday where cron counts it as Sunday"
+            problems.append(
+                f"{name} must name the day of week (mon, tue, ..., sun): {why}"
+            )
+            continue
         try:
             fire = _cron(expression, zone).get_next_fire_time(None, now or _utc_now())
         except ValueError:
@@ -256,6 +293,9 @@ def crons_in_quiet_hours(settings: Settings, now: datetime) -> list[str]:
     """Name the status crons that fire inside quiet hours in the next days.
 
     A held ``status`` or ``report`` is dropped, not deferred (ADR 0008, D6).
+    The check probes the start of each day's quiet window, so it does not
+    depend on how often a cron fires: the first fire at or after the window
+    start is in the window exactly when the window holds any fire.
 
     Args:
         settings: Application settings (valid crons; see ``scheduler_problems``).
@@ -266,19 +306,23 @@ def crons_in_quiet_hours(settings: Settings, now: datetime) -> list[str]:
     """
     policy = NotificationPolicy.from_settings(settings)
     horizon = now + timedelta(days=QUIET_SAMPLE_DAYS)
+    today = now.astimezone(policy.zone).date()
+    probes: list[datetime] = []
+    for offset in range(-1, QUIET_SAMPLE_DAYS + 1):
+        opens = datetime.combine(
+            today + timedelta(days=offset), policy.quiet_start, tzinfo=policy.zone
+        )
+        probes.append(max(opens, now))
     named: list[str] = []
     for name, expression in _status_crons(settings):
         trigger = _cron(expression, policy.zone)
-        previous: datetime | None = None
-        current = now
-        for _ in range(_MAX_SAMPLED_FIRES):
-            fire = trigger.get_next_fire_time(previous, current)
+        for probe in probes:
+            fire = trigger.get_next_fire_time(None, probe)
             if fire is None or fire > horizon:
-                break
+                continue
             if in_quiet_hours(fire, policy.quiet_start, policy.quiet_end, policy.zone):
                 named.append(name)
                 break
-            previous, current = fire, fire + timedelta(seconds=1)
     return named
 
 
@@ -332,6 +376,7 @@ class SchedulerService:
         self._lock_wait = lock_wait
         self._on_stop = tuple(on_stop)
         self._lock = threading.Lock()
+        self._guard = threading.Lock()
         self._stopping = threading.Event()
         self._stats: dict[str, JobStats] = {}
         self._stats_lock = threading.Lock()
@@ -362,15 +407,19 @@ class SchedulerService:
             ConfigurationError: A setting is unusable (the scheduler problems,
                 the Apprise client, the route provider or the CalDAV
                 credentials); nothing stays open.
+            Exception: Any other failure building the collector, passed on
+                unchanged after the notification client is closed.
         """
+        if not settings.caldav_username or settings.caldav_app_password is None:
+            msg = "CalDAV credentials are not configured"
+            raise ConfigurationError(msg)
         provider = build_route_provider(settings, engine=engine)
         notifier = NotificationService.from_settings(engine, settings)
         try:
             collector, http = build_collector(settings, engine)
-        except ValueError as exc:
+        except Exception:
             notifier.close()
-            msg = "CalDAV credentials are not configured"
-            raise ConfigurationError(msg) from exc
+            raise
         cipher = None if settings.data_key is None else AddressCipher(settings.data_key)
         try:
             return cls(
@@ -393,20 +442,25 @@ class SchedulerService:
     def start(self) -> None:
         """Register the jobs and start the scheduler thread.
 
+        A second call while the scheduler is running does nothing.
+
         Raises:
             ConfigurationError: The service was stopped; build a new one.
         """
-        if self._stopping.is_set():
-            msg = "a stopped scheduler cannot be started again"
-            raise ConfigurationError(msg)
-        now = self._clock()
-        if not self._registered:
-            self._register(now)
-        for name in crons_in_quiet_hours(self._settings, now):
-            logger.warning("scheduler.cron_in_quiet_hours", setting=name)
-        if self._settings.apprise_url is None:
-            logger.warning("scheduler.notifications_unconfigured")
-        self._aps.start()
+        with self._guard:
+            if self._stopping.is_set():
+                msg = "a stopped scheduler cannot be started again"
+                raise ConfigurationError(msg)
+            if self._aps.running:
+                return
+            now = self._clock()
+            if not self._registered:
+                self._register(now)
+            for name in crons_in_quiet_hours(self._settings, now):
+                logger.warning("scheduler.cron_in_quiet_hours", setting=name)
+            if self._settings.apprise_url is None:
+                logger.warning("scheduler.notifications_unconfigured")
+            self._aps.start()
         logger.info(
             "scheduler.started",
             mode=self._settings.notification_mode,
@@ -419,9 +473,16 @@ class SchedulerService:
 
         Safe to call more than once and before ``start``.
         """
-        if self._stopping.is_set():
-            return
-        self._stopping.set()
+        # #CRITICAL: Concurrency: APScheduler 3.x ``shutdown(wait=True)`` holds
+        # its job-store lock while it waits for running jobs, and the urgent
+        # retry needs that lock from a job thread. The guard makes the stop flag
+        # and the retry scheduling mutually exclusive, and is released before
+        # the shutdown wait so a job that wants it is never blocked behind it.
+        # #VERIFY: tests/unit/test_scheduler.py (TestRealSchedulerShutdown).
+        with self._guard:
+            if self._stopping.is_set():
+                return
+            self._stopping.set()
         if self._aps.running:
             self._aps.shutdown(wait=True)
         for cleanup in self._on_stop:
@@ -502,12 +563,38 @@ class SchedulerService:
         self._registered = True
 
     def _on_skipped(self, event: JobEvent) -> None:
-        """Count a job APScheduler skipped (missed time or overlapping instance)."""
+        """Count a job APScheduler skipped; announce a missed status or report.
+
+        A missed daily or weekly fire is a status the family expected and will
+        not get, so it is reported as "could not verify" (ADR 0008, F6). APScheduler
+        calls this from a worker thread for a missed fire (no scheduler lock
+        held) and from its own thread for an overlapping instance, which is
+        only counted; nothing here touches APScheduler.
+
+        Args:
+            event: The skipped-job event.
+        """
         job = str(event.job_id)
         with self._stats_lock:
             self._stats.setdefault(job, JobStats()).skipped += 1
-        reason = "missed" if event.code == EVENT_JOB_MISSED else "max_instances"
-        logger.warning("scheduler.job_skipped", job=job, reason=reason)
+        missed = event.code == EVENT_JOB_MISSED
+        logger.warning(
+            "scheduler.job_skipped",
+            job=job,
+            reason="missed" if missed else "max_instances",
+        )
+        if missed and job in _MISSABLE:
+            self._tick(job, lambda: self._missed(job))
+
+    def _missed(self, job: str) -> TickReport:
+        """Send the unavailable push for a daily or weekly fire that never ran."""
+        if self._stopping.is_set():
+            return TickReport(job, "stopped")
+        # #CRITICAL: Timing: a fire missed beyond the grace time means the
+        # pipeline did not start (a stuck run or a stalled process). Without this
+        # push the family would hear nothing, and silence reads as clear.
+        # #VERIFY: tests/unit/test_scheduler.py (TestCouldNotVerify).
+        return self._unverified(job, _MISSABLE[job], retry=True)
 
     def _tick(self, job: str, body: Callable[[], TickReport]) -> TickReport:
         """Run one tick, keeping any crash inside it."""
@@ -517,7 +604,7 @@ class SchedulerService:
         except Exception as exc:  # noqa: BLE001 - a tick must never stop the scheduler
             _log_failure("scheduler.job_crashed", exc, job=job)
             report = TickReport(job, "crashed")
-        self._record(report)
+        stats = self._record(report)
         logger.info(
             "scheduler.tick_finished",
             job=job,
@@ -526,24 +613,45 @@ class SchedulerService:
             run_status=report.run_status,
             collection=report.collection,
             duration_ms=int((time.monotonic() - started) * 1000),
+            ticks=stats.ticks,
+            failures=stats.failures,
+            skipped=stats.skipped,
+            consecutive_skips=stats.consecutive_skips,
             **_dispatch_fields(report.dispatch),
         )
+        if report.job == SCAN_JOB and report.outcome == "skipped_busy":
+            self._warn_if_scans_stuck(stats.consecutive_skips)
         return report
 
-    def _record(self, report: TickReport) -> None:
+    def _record(self, report: TickReport) -> JobStats:
+        """Count one tick; return a copy of the job's counters."""
         with self._stats_lock:
             stats = self._stats.setdefault(report.job, JobStats())
             if report.outcome in _SKIPS:
                 stats.skipped += 1
-                return
+                if report.outcome == "skipped_busy":
+                    stats.consecutive_skips += 1
+                return replace(stats)
             now = self._clock()
             stats.ticks += 1
+            stats.consecutive_skips = 0
             stats.last_outcome = report.outcome
             stats.last_finished = now
             if report.outcome in _FAILURES:
                 stats.failures += 1
             elif report.outcome == "ok":
                 stats.last_ok = now
+            return replace(stats)
+
+    def _warn_if_scans_stuck(self, consecutive: int) -> None:
+        """Warn once per hour's worth of scans that found a pipeline running."""
+        every = max(
+            1,
+            SCAN_SKIP_WARN_AFTER
+            // timedelta(minutes=self._settings.change_scan_minutes),
+        )
+        if consecutive % every == 0:
+            logger.warning("scheduler.scans_blocked", consecutive_skips=consecutive)
 
     def _acquire(self, *, wait: bool) -> bool:
         if not wait:
@@ -558,13 +666,53 @@ class SchedulerService:
         # never queues behind a running pipeline; the others wait ``lock_wait``.
         # #VERIFY: tests/unit/test_scheduler.py (TestOverlap).
         if not self._acquire(wait=wait):
-            return TickReport(job, "skipped_busy")
+            return self._lock_unavailable(job, trigger, wait=wait, retry=retry)
         try:
             if self._stopping.is_set():
                 return TickReport(job, "stopped")
             return self._locked_pipeline(job, trigger, retry=retry)
         finally:
             self._lock.release()
+
+    def _lock_unavailable(
+        self, job: str, trigger: str, *, wait: bool, retry: bool
+    ) -> TickReport:
+        """Handle a tick that never got the pipeline lock.
+
+        A scan that finds it busy is skipped (the next scan covers it). A tick
+        that waited the whole ``lock_wait`` is a failure: the status or report
+        it owed is not coming, so the family is told "could not verify".
+        """
+        if self._stopping.is_set():
+            return TickReport(job, "stopped")
+        if not wait:
+            return TickReport(job, "skipped_busy")
+        logger.warning("scheduler.lock_wait_expired", job=job)
+        # #CRITICAL: Timing: a pipeline that held the lock for ``lock_wait`` is
+        # stuck or stale; this runs outside the lock, which is safe because the
+        # notification watermark (ADR 0008, D11) makes that run's later push
+        # stale and ``dispatch_unavailable`` advances it.
+        # #VERIFY: tests/unit/test_scheduler.py (TestCouldNotVerify).
+        return self._unverified(job, trigger, retry=retry)
+
+    def _unverified(
+        self,
+        job: str,
+        trigger: str,
+        *,
+        retry: bool,
+        collection: str | None = None,
+    ) -> TickReport:
+        """Send the "could not verify" push and report the tick as a failure."""
+        report, done = self._dispatch(
+            lambda: self._notifier.dispatch_unavailable(trigger), job, retry=retry
+        )
+        return TickReport(
+            job,
+            "unavailable" if done else "dispatch_failed",
+            collection=collection,
+            dispatch=report,
+        )
 
     def _locked_pipeline(self, job: str, trigger: str, *, retry: bool) -> TickReport:
         collection = self._collect(job)
@@ -574,15 +722,7 @@ class SchedulerService:
             outcome = self._assessor.run(trigger, self._school.latest())
         except Exception as exc:  # noqa: BLE001 - an unreadable run is never silence
             _log_failure("scheduler.run_failed", exc, job=job)
-            report, done = self._dispatch(
-                lambda: self._notifier.dispatch_unavailable(trigger), job, retry=retry
-            )
-            return TickReport(
-                job,
-                "unavailable" if done else "dispatch_failed",
-                collection=collection,
-                dispatch=report,
-            )
+            return self._unverified(job, trigger, retry=retry, collection=collection)
         report, done = self._dispatch(
             lambda: self._notifier.dispatch(outcome), job, retry=retry
         )
@@ -634,15 +774,23 @@ class SchedulerService:
         return report, done
 
     def _schedule_urgent_retry(self) -> None:
-        """Queue one extra pipeline; a pending one is not pushed back."""
-        if self._aps.get_job(URGENT_RETRY_JOB) is not None:
-            return
-        run_at = self._clock() + URGENT_RETRY_AFTER
-        self._add(
-            self.run_urgent_retry,
-            DateTrigger(run_date=run_at, timezone=self._zone),
-            URGENT_RETRY_JOB,
-        )
+        """Queue one extra pipeline; a pending one is not pushed back.
+
+        Nothing is queued once ``stop`` has begun. The guard keeps the stop flag
+        and the APScheduler calls apart (see ``stop``).
+        """
+        with self._guard:
+            if self._stopping.is_set():
+                logger.info("scheduler.urgent_retry_skipped", reason="stopping")
+                return
+            if self._aps.get_job(URGENT_RETRY_JOB) is not None:
+                return
+            run_at = self._clock() + URGENT_RETRY_AFTER
+            self._add(
+                self.run_urgent_retry,
+                DateTrigger(run_date=run_at, timezone=self._zone),
+                URGENT_RETRY_JOB,
+            )
         logger.warning("scheduler.urgent_retry_scheduled", run_at=run_at.isoformat())
 
     def _purge(self) -> TickReport:

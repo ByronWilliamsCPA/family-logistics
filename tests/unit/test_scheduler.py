@@ -15,7 +15,9 @@ from types import SimpleNamespace
 import pytest
 import structlog
 from apscheduler.events import EVENT_JOB_MAX_INSTANCES, EVENT_JOB_MISSED, JobEvent
+from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi.testclient import TestClient
@@ -53,7 +55,6 @@ from family_logistics.services.scheduler import (
     DAILY_JOB,
     PURGE_JOB,
     SCAN_JOB,
-    URGENT_RETRY_AFTER,
     URGENT_RETRY_JOB,
     WEEKLY_JOB,
     SchedulerService,
@@ -235,6 +236,24 @@ def in_thread(function):
     return thread, results
 
 
+@contextmanager
+def pipeline_held(engine, **options):
+    """Yield a rig whose pipeline lock is held by a running scan until exit."""
+    entered, release = threading.Event(), threading.Event()
+    calls: list[str] = []
+    collector = FakeCollector(
+        calls, on_run=lambda: (entered.set(), release.wait(JOIN_SECONDS))
+    )
+    rig = Rig(engine, collector=collector, calls=calls, **options)
+    holder, _ = in_thread(rig.service.run_scan)
+    assert entered.wait(JOIN_SECONDS)
+    try:
+        yield rig
+    finally:
+        release.set()
+        holder.join(JOIN_SECONDS)
+
+
 class TestProblems:
     def test_defaults_are_usable(self):
         assert scheduler_problems(make_settings()) == []
@@ -257,6 +276,43 @@ class TestProblems:
         settings = make_settings(weekly_cron="0 0 31 2 *")
         assert scheduler_problems(settings) == ["FL_WEEKLY_CRON never fires"]
 
+    @pytest.mark.parametrize(
+        "expression",
+        ["0 15 * * 0", "0 15 * * 7", "0 15 * * 1-5", "0 15 * * 1,3", "0 15 * * */2"],
+    )
+    @pytest.mark.parametrize("name", ["daily_cron", "weekly_cron"])
+    def test_a_numeric_day_of_week_is_refused(self, name, expression):
+        problems = scheduler_problems(make_settings(**{name: expression}))
+        assert len(problems) == 1
+        assert name.upper() in problems[0]
+        assert "day of week" in problems[0]
+        assert "mon, tue" in problems[0]
+
+    @pytest.mark.parametrize(
+        "expression",
+        ["0 15 * * sun", "0 15 * * SUN", "0 8 * * mon-fri", "0 8 * * mon,wed"],
+    )
+    def test_day_names_are_accepted(self, expression):
+        settings = make_settings(weekly_cron=expression, daily_cron=expression)
+        assert scheduler_problems(settings) == []
+
+    def test_a_star_or_a_digit_in_another_field_is_not_a_day_of_week(self):
+        assert scheduler_problems(make_settings(daily_cron="*/30 9-17 1,15 * *")) == []
+
+    def test_apscheduler_still_counts_day_zero_as_monday(self):
+        """The reason numbers are refused; if this fails the refusal can go."""
+        trigger = CronTrigger.from_crontab("0 15 * * 0", timezone=UTC)
+        sunday_evening = datetime(2026, 10, 25, 16, 0, tzinfo=UTC)
+        fire = trigger.get_next_fire_time(None, sunday_evening)
+        assert fire is not None
+        assert fire.strftime("%A") == "Monday"
+
+    @pytest.mark.parametrize("provider", ["static", "google_routes"])
+    def test_a_route_provider_the_factory_cannot_build_is_a_problem(self, provider):
+        problems = scheduler_problems(make_settings(route_provider=provider))
+        assert len(problems) == 1
+        assert "FL_ROUTE_PROVIDER" in problems[0]
+
     def test_construction_refuses_a_short_interval_with_a_clear_error(self, engine):
         settings = make_settings(change_scan_minutes=10)
         with pytest.raises(ConfigurationError) as caught:
@@ -277,6 +333,11 @@ class TestQuietHoursWarning:
     def test_a_weekly_cron_inside_quiet_hours_is_named(self):
         settings = make_settings(weekly_cron="30 5 * * SUN")
         assert crons_in_quiet_hours(settings, self.NOW) == ["FL_WEEKLY_CRON"]
+
+    def test_an_every_minute_cron_is_named_however_often_it_fires(self):
+        settings = make_settings(daily_cron="* * * * *")
+        morning = datetime(2026, 10, 26, 16, 0, tzinfo=UTC)  # 09:00 local
+        assert crons_in_quiet_hours(settings, morning) == ["FL_DAILY_CRON"]
 
     def test_start_warns_about_each_such_cron(self, engine, monkeypatch):
         settings = make_settings(daily_cron="0 23 * * *", weekly_cron="0 3 * * SUN")
@@ -329,6 +390,15 @@ class TestRegistration:
         callback(JobEvent(EVENT_JOB_MISSED, SCAN_JOB, "default"))
         callback(JobEvent(EVENT_JOB_MAX_INSTANCES, SCAN_JOB, "default"))
         assert rig.service.stats()[SCAN_JOB].skipped == 2
+
+    def test_a_second_start_on_a_real_scheduler_does_nothing(self, engine):
+        real = BackgroundScheduler(timezone="Etc/UTC")
+        rig = Rig(engine, aps=real)
+        rig.service.start()
+        rig.service.start()
+        assert real.running
+        assert len(real.get_jobs()) == 4
+        rig.service.stop()
 
     def test_a_real_scheduler_starts_and_stops_cleanly(self, engine):
         real = BackgroundScheduler(timezone="Etc/UTC")
@@ -453,7 +523,7 @@ class TestUrgentRetry:
         rig.service.run_scan()
         job = rig.aps.jobs[URGENT_RETRY_JOB]
         assert isinstance(job.trigger, DateTrigger)
-        assert job.trigger.run_date == rig.clock.now + URGENT_RETRY_AFTER
+        assert job.trigger.run_date == rig.clock.now + timedelta(minutes=5)
         assert job.max_instances == 1
         assert job.func == rig.service.run_urgent_retry
 
@@ -481,6 +551,23 @@ class TestUrgentRetry:
         assert report.outcome == "dispatch_failed"
         assert report.dispatch is self.URGENT
         assert URGENT_RETRY_JOB in rig.aps.jobs
+
+    def test_an_unavailable_push_that_fails_urgently_also_schedules_the_retry(
+        self, engine
+    ):
+        assessor = FakeAssessor([], error=ValueError(SENTINEL))
+        notifier = FakeNotifier([], reports=[self.URGENT])
+        rig = Rig(engine, assessor=assessor, notifier=notifier)
+        report = rig.service.run_scan()
+        assert report.outcome == "unavailable"
+        assert URGENT_RETRY_JOB in rig.aps.jobs
+
+    def test_nothing_is_scheduled_once_the_service_is_stopping(self, engine):
+        rig = Rig(engine, notifier=FakeNotifier([], reports=[self.URGENT]))
+        rig.notifier.on_call = rig.service.stop
+        report = rig.service.run_scan()
+        assert report.outcome == "ok"
+        assert URGENT_RETRY_JOB not in rig.aps.jobs
 
     def test_the_retry_is_a_fresh_pipeline_that_never_chains(self, engine):
         reports = [self.URGENT]
@@ -518,28 +605,11 @@ class TestOverlap:
         assert calls == ["collect", "run", "dispatch"]
         assert rig.service.stats()[SCAN_JOB].skipped == 1
 
-    def test_a_waiting_job_that_cannot_get_the_lock_in_time_is_skipped(self, engine):
-        entered, release = threading.Event(), threading.Event()
-        calls: list[str] = []
-        collector = FakeCollector(
-            calls, on_run=lambda: (entered.set(), release.wait(JOIN_SECONDS))
-        )
-        rig = Rig(
-            engine,
-            collector=collector,
-            assessor=FakeAssessor(calls),
-            notifier=FakeNotifier(calls),
-            lock_wait=timedelta(0),
-            calls=calls,
-        )
-        first, _ = in_thread(rig.service.run_scan)
-        assert entered.wait(JOIN_SECONDS)
-        daily = rig.service.run_daily()
-        purge = rig.service.run_purge()
-        release.set()
-        first.join(JOIN_SECONDS)
-        assert (daily.outcome, purge.outcome) == ("skipped_busy", "skipped_busy")
-        assert calls == ["collect", "run", "dispatch"]
+    def test_a_purge_that_cannot_get_the_lock_in_time_is_skipped(self, engine):
+        with pipeline_held(engine, lock_wait=timedelta(0)) as rig:
+            purge = rig.service.run_purge()
+            assert purge.outcome == "skipped_busy"
+            assert rig.notifier.unavailable == []
 
     def test_a_waiting_job_runs_after_the_pipeline_and_never_inside_it(self, engine):
         entered, release = threading.Event(), threading.Event()
@@ -597,6 +667,156 @@ class TestOverlap:
         assert not rig.service.pipeline_lock.locked()
 
 
+class TestCouldNotVerify:
+    """A tick that cannot start owes the family a "could not verify" push."""
+
+    URGENT = DispatchReport("run-1", "shadow", urgent_failed=1)
+
+    @pytest.mark.parametrize(
+        ("method", "job", "trigger"),
+        [("run_daily", DAILY_JOB, "daily"), ("run_weekly", WEEKLY_JOB, "weekly")],
+    )
+    def test_a_status_job_that_waited_out_the_lock_says_it_could_not_verify(
+        self, engine, method, job, trigger
+    ):
+        with pipeline_held(engine, lock_wait=timedelta(0)) as rig:
+            report = getattr(rig.service, method)()
+            assert report.outcome == "unavailable"
+            assert rig.notifier.unavailable == [trigger]
+            assert rig.notifier.dispatched == []
+        stats = rig.service.stats()[job]
+        assert (stats.ticks, stats.failures) == (1, 1)
+
+    def test_the_lock_wait_expiry_is_logged_without_content(self, engine, monkeypatch):
+        with pipeline_held(engine, lock_wait=timedelta(0)) as rig:
+            with scheduler_events(monkeypatch) as events:
+                rig.service.run_daily()
+            expired = [e for e in events if e["event"] == "scheduler.lock_wait_expired"]
+        assert len(expired) == 1
+        assert set(expired[0]) == {"event", "job", "log_level"}
+        assert expired[0]["log_level"] == "warning"
+
+    def test_an_urgent_retry_that_waited_out_the_lock_says_it_could_not_verify(
+        self, engine
+    ):
+        notifier = FakeNotifier([], reports=[self.URGENT])
+        with pipeline_held(engine, lock_wait=timedelta(0), notifier=notifier) as rig:
+            report = rig.service.run_urgent_retry()
+            assert report.outcome == "unavailable"
+            assert rig.notifier.unavailable == ["incremental"]
+            assert URGENT_RETRY_JOB not in rig.aps.jobs
+
+    def test_a_busy_scan_is_skipped_without_a_push(self, engine):
+        with pipeline_held(engine) as rig:
+            report = rig.service.run_scan()
+            assert report.outcome == "skipped_busy"
+            assert rig.notifier.unavailable == []
+        assert rig.service.stats()[SCAN_JOB].failures == 0
+
+    def test_a_push_that_fails_is_counted_and_never_raised(self, engine):
+        notifier = FakeNotifier([], error=RuntimeError(SENTINEL))
+        with pipeline_held(engine, lock_wait=timedelta(0), notifier=notifier) as rig:
+            report = rig.service.run_daily()
+        assert report.outcome == "dispatch_failed"
+        assert rig.service.stats()[DAILY_JOB].failures == 1
+
+    def test_an_urgent_failure_of_that_push_schedules_the_retry(self, engine):
+        notifier = FakeNotifier([], reports=[self.URGENT])
+        with pipeline_held(engine, lock_wait=timedelta(0), notifier=notifier) as rig:
+            rig.service.run_daily()
+            assert URGENT_RETRY_JOB in rig.aps.jobs
+
+    def test_nothing_is_sent_when_the_wait_ended_because_of_a_stop(self, engine):
+        with pipeline_held(engine, lock_wait=timedelta(0)) as rig:
+            rig.service.stop()
+            report = rig.service.run_daily()
+            assert report.outcome == "stopped"
+            assert rig.notifier.unavailable == []
+
+    @pytest.mark.parametrize(
+        ("job", "trigger"), [(DAILY_JOB, "daily"), (WEEKLY_JOB, "weekly")]
+    )
+    def test_a_missed_status_fire_says_it_could_not_verify(self, rig, job, trigger):
+        rig.service.start()
+        callback, _ = rig.aps.listeners[0]
+        callback(JobEvent(EVENT_JOB_MISSED, job, "default"))
+        assert rig.notifier.unavailable == [trigger]
+        stats = rig.service.stats()[job]
+        assert (stats.skipped, stats.failures) == (1, 1)
+
+    @pytest.mark.parametrize(
+        ("code", "job"),
+        [
+            (EVENT_JOB_MISSED, SCAN_JOB),
+            (EVENT_JOB_MISSED, PURGE_JOB),
+            (EVENT_JOB_MAX_INSTANCES, DAILY_JOB),
+        ],
+    )
+    def test_other_skipped_jobs_send_nothing(self, rig, code, job):
+        rig.service.start()
+        callback, _ = rig.aps.listeners[0]
+        callback(JobEvent(code, job, "default"))
+        assert rig.notifier.unavailable == []
+
+    def test_a_missed_fire_during_shutdown_sends_nothing(self, rig):
+        rig.service.start()
+        callback, _ = rig.aps.listeners[0]
+        rig.service.stop()
+        callback(JobEvent(EVENT_JOB_MISSED, DAILY_JOB, "default"))
+        assert rig.notifier.unavailable == []
+
+    def test_a_missed_fire_whose_push_fails_does_not_stop_the_scheduler(self, engine):
+        rig = Rig(engine, notifier=FakeNotifier([], error=RuntimeError(SENTINEL)))
+        rig.service.start()
+        callback, _ = rig.aps.listeners[0]
+        callback(JobEvent(EVENT_JOB_MISSED, DAILY_JOB, "default"))
+        assert rig.service.stats()[DAILY_JOB].failures == 1
+        assert rig.service.run_scan().outcome == "dispatch_failed"
+
+
+class TestBlockedScans:
+    def settings(self):
+        return make_settings(change_scan_minutes=20)
+
+    def test_consecutive_busy_scans_are_counted_and_a_run_resets_them(self, engine):
+        with pipeline_held(engine, settings=self.settings()) as rig:
+            rig.service.run_scan()
+            rig.service.run_scan()
+            assert rig.service.stats()[SCAN_JOB].consecutive_skips == 2
+        assert rig.service.run_scan().outcome == "ok"
+        assert rig.service.stats()[SCAN_JOB].consecutive_skips == 0
+
+    def test_an_hours_worth_of_busy_scans_warns(self, engine, monkeypatch):
+        with (
+            pipeline_held(engine, settings=self.settings()) as rig,
+            scheduler_events(monkeypatch) as events,
+        ):
+            for _ in range(3):
+                rig.service.run_scan()
+        warned = [e for e in events if e["event"] == "scheduler.scans_blocked"]
+        assert [e["consecutive_skips"] for e in warned] == [3]
+        assert warned[0]["log_level"] == "warning"
+
+    def test_fewer_busy_scans_do_not_warn(self, engine, monkeypatch):
+        with (
+            pipeline_held(engine, settings=self.settings()) as rig,
+            scheduler_events(monkeypatch) as events,
+        ):
+            rig.service.run_scan()
+            rig.service.run_scan()
+        assert not [e for e in events if e["event"] == "scheduler.scans_blocked"]
+
+    def test_the_tick_log_carries_the_counters(self, engine, monkeypatch):
+        with pipeline_held(engine) as rig, scheduler_events(monkeypatch) as events:
+            rig.service.run_scan()
+        tick = next(e for e in events if e["event"] == "scheduler.tick_finished")
+        assert (tick["failures"], tick["skipped"], tick["consecutive_skips"]) == (
+            0,
+            1,
+            1,
+        )
+
+
 class TestShutdown:
     def test_stop_waits_for_the_running_job_and_runs_the_cleanups_once(self, rig):
         rig.service.start()
@@ -642,6 +862,79 @@ class TestShutdown:
         rig.service.run_scan()
         stats = rig.service.stats()[SCAN_JOB]
         assert (stats.ticks, stats.failures, stats.skipped) == (0, 0, 1)
+
+    def test_a_purge_that_waited_for_the_lock_does_not_run_after_a_stop(
+        self, engine, monkeypatch
+    ):
+        ran: list[str] = []
+        monkeypatch.setattr(
+            scheduler_module,
+            "_PURGES",
+            (("only", lambda _c, *, now: ran.append("purged") or 1),),
+        )
+        with pipeline_held(engine) as rig:
+            waiting, results = in_thread(rig.service.run_purge)
+            rig.service.stop()
+        waiting.join(JOIN_SECONDS)
+        assert [r.outcome for r in results] == ["stopped"]
+        assert ran == []
+
+
+class SignallingExecutor(ThreadPoolExecutor):
+    """A pool whose ``shutdown`` says it was reached (APScheduler holds its
+    job-store lock while it runs)."""
+
+    def __init__(self, reached: threading.Event):
+        super().__init__(max_workers=2)
+        self.reached = reached
+
+    def shutdown(self, wait=True):
+        self.reached.set()
+        super().shutdown(wait)
+
+
+class TestRealSchedulerShutdown:
+    """APScheduler 3.x ``shutdown(wait=True)`` holds the job-store lock.
+
+    On a regression the first test fails after ``JOIN_SECONDS``; the deadlocked
+    pool thread then keeps the interpreter from exiting, so the CI job timeout
+    ends the run.
+    """
+
+    URGENT = DispatchReport("run-1", "shadow", urgent_failed=1)
+
+    def test_stop_during_an_urgent_failed_dispatch_does_not_deadlock(self, engine):
+        in_dispatch, go, reached = (threading.Event() for _ in range(3))
+
+        def hold_the_dispatch():
+            in_dispatch.set()
+            go.wait(JOIN_SECONDS)
+
+        real = BackgroundScheduler(
+            timezone="Etc/UTC", executors={"default": SignallingExecutor(reached)}
+        )
+        notifier = FakeNotifier([], reports=[self.URGENT], on_call=hold_the_dispatch)
+        rig = Rig(engine, aps=real, notifier=notifier)
+        rig.service.start()
+        real.add_job(rig.service.run_scan, id="now")
+        assert in_dispatch.wait(JOIN_SECONDS)
+        stopper = threading.Thread(target=rig.service.stop, daemon=True)
+        stopper.start()
+        assert reached.wait(JOIN_SECONDS)
+        go.set()
+        stopper.join(JOIN_SECONDS)
+        assert not stopper.is_alive()
+        assert not rig.service.pipeline_lock.locked()
+        assert rig.on_stop_calls == ["closed"]
+
+    def test_a_retry_queued_before_the_stop_is_kept_for_shutdown_to_drop(self, engine):
+        real = BackgroundScheduler(timezone="Etc/UTC")
+        rig = Rig(engine, aps=real, notifier=FakeNotifier([], reports=[self.URGENT]))
+        rig.service.start()
+        rig.service.run_scan()
+        assert real.get_job(URGENT_RETRY_JOB) is not None
+        rig.service.stop()
+        assert not real.running
 
 
 class TestPurge:
@@ -782,6 +1075,21 @@ class TestFromSettings:
         settings = make_settings(apprise_url="http://apprise.example.invalid")
         with pytest.raises(ConfigurationError):
             SchedulerService.from_settings(settings, engine)
+        assert closed == []
+
+    def test_another_collector_error_is_not_called_missing_credentials(
+        self, engine, monkeypatch
+    ):
+        closed = self.count_closes(monkeypatch)
+
+        def broken(*_args, **_kwargs):
+            msg = "unrelated wiring failure"
+            raise ValueError(msg)
+
+        monkeypatch.setattr(scheduler_module, "build_collector", broken)
+        with pytest.raises(ValueError, match="unrelated wiring failure") as caught:
+            SchedulerService.from_settings(self.settings(), engine)
+        assert caught.type is ValueError
         assert closed == ["notifier"]
 
     def test_a_short_interval_is_refused_and_nothing_stays_open(
@@ -827,6 +1135,29 @@ class TestWiring:
             assert events == ["start"]
         assert events == ["start", "stop"]
 
+    def test_a_failed_start_still_stops_the_service(self, tmp_path, monkeypatch):
+        events: list[str] = []
+
+        class Failing:
+            def start(self):
+                events.append("start")
+                msg = "start failed"
+                raise RuntimeError(msg)
+
+            def stop(self):
+                events.append("stop")
+
+        monkeypatch.setattr(
+            SchedulerService, "from_settings", lambda *_a, **_k: Failing()
+        )
+        settings = Settings(database_path=tmp_path / "fl.db", scheduler_enabled=True)
+        with (
+            pytest.raises(RuntimeError, match="start failed"),
+            TestClient(create_app(settings)),
+        ):
+            pass
+        assert events == ["start", "stop"]
+
     def test_a_configuration_error_stops_app_startup(self, tmp_path):
         settings = Settings(database_path=tmp_path / "fl.db", scheduler_enabled=True)
         app = create_app(settings)
@@ -843,6 +1174,22 @@ class TestWiring:
         problems = startup_problems(settings, upgrade_db=True)
         assert any("FL_CALDAV_USERNAME" in p for p in problems)
         assert any("FL_CHANGE_SCAN_MINUTES" in p for p in problems)
+
+    @pytest.mark.parametrize("provider", ["static", "google_routes"])
+    def test_serve_refuses_a_route_provider_the_scheduler_cannot_build(
+        self, tmp_path, provider
+    ):
+        settings = Settings(
+            ha_token="x" * 32,
+            database_path=tmp_path / "fl.db",
+            scheduler_enabled=True,
+            route_provider=provider,
+            caldav_username="morgan@example.invalid",
+            caldav_app_password=SAMPLE_CREDENTIAL,
+        )
+        problems = startup_problems(settings, upgrade_db=True)
+        assert len(problems) == 1
+        assert "FL_ROUTE_PROVIDER" in problems[0]
 
     def test_serve_ignores_scheduler_settings_when_disabled(self, tmp_path):
         settings = Settings(

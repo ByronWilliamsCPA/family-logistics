@@ -33,7 +33,8 @@ def _scheduler_lifespan(
     """Return a lifespan that runs the scheduler when ``FL_SCHEDULER_ENABLED``.
 
     A configuration error while building it stops startup; a crash in a job
-    never does. Off by default.
+    never does. A failed ``start`` still runs ``stop``, which closes the HTTP
+    clients the service opened. Off by default.
 
     Args:
         settings: Application settings.
@@ -49,8 +50,8 @@ def _scheduler_lifespan(
             yield
             return
         scheduler = SchedulerService.from_settings(settings, engine)
-        scheduler.start()
         try:
+            scheduler.start()
             yield
         finally:
             scheduler.stop()
