@@ -10,12 +10,23 @@ and nothing is silently dropped. External children are pseudonymized ("Passenger
 from __future__ import annotations
 
 import dataclasses
+import tempfile
+import threading
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from fl_engine import NOW as ENGINE_NOW
 from fl_engine import PEOPLE, activity, assessment, at, default, routes, school
 from fl_factories import FRIDAY_END, FRIDAY_START, key, notes, parse, trip
+from fl_on_demand import (
+    AUTH,
+    JOIN_SECONDS,
+    Rig,
+    StoringAssessor,
+    make_engine,
+    wait_until,
+)
 
 from family_logistics.adapters.routing.base import RouteConstraints, StaticRouteProvider
 from family_logistics.domain.change_impact import analyze_change_impact
@@ -185,17 +196,40 @@ def test_event_moved_to_new_time_single_occurrence_no_duplicate():
     assert analyze_change_impact(before, moved).removed_family_legs == ()
 
 
-M4 = "M4: needs HA endpoints"
-
-
 @pytest.mark.skip(
     reason="M5: LLM unavailable -> deterministic report without narrative"
 )
 def test_llm_unavailable(): ...
 
 
-@pytest.mark.skip(reason=f"{M4}: double on-demand press coalesced or idempotent")
-def test_on_demand_idempotent(): ...
+def test_on_demand_idempotent():
+    """A double press of the on-demand button is one run with one run id.
+
+    Takes no fixtures: ``test_notification_subjects_matrix`` calls every
+    scenario in this module without arguments, so the database is private here.
+    """
+    hold = threading.Event()
+    with tempfile.TemporaryDirectory() as directory:
+        engine = make_engine(Path(directory))
+        assessor = StoringAssessor(engine, hold=hold)
+        rig = Rig(engine, assessor)
+        try:
+            first = rig.client.post("/api/v1/assessments", headers=AUTH)
+            assert assessor.started.wait(JOIN_SECONDS)
+            second = rig.client.post("/api/v1/assessments", headers=AUTH)
+            hold.set()
+            assert (first.status_code, second.status_code) == (202, 202)
+            assert first.json()["run_id"] == second.json()["run_id"]
+            assert (first.json()["coalesced"], second.json()["coalesced"]) == (
+                False,
+                True,
+            )
+            assert wait_until(lambda: not rig.on_demand.in_flight())
+            assert assessor.run_ids == [first.json()["run_id"]]
+        finally:
+            hold.set()
+            rig.on_demand.stop()
+            engine.dispose()
 
 
 # --- M2 engine scenarios (handoff matrix 4-10, 12 and the Friday rule) -----

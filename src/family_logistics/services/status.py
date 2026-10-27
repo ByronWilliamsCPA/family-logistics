@@ -118,12 +118,11 @@ class StatusService:
     def card(self) -> StatusCard:
         """Build the card.
 
+        A store read that fails propagates as ``sqlalchemy.exc.SQLAlchemyError``;
+        the caller must answer "unavailable", never a card.
+
         Returns:
             The card.
-
-        Raises:
-            sqlalchemy.exc.SQLAlchemyError: A store read failed; the caller must
-                answer "unavailable", never a card.
         """
         now = self._clock()
         in_flight = self._on_demand.in_flight()

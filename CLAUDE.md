@@ -57,13 +57,15 @@ audit log, the Apprise client and notification service, structured logging and
 startup checks, the Home Assistant school snapshot ingest
 (`POST /api/v1/ingest/ha-snapshot`), the route providers with their factory
 (the null provider and `ha_relay`, with the route cache and the Home Assistant
-relay routes `GET /api/v1/route-requests` and `POST /api/v1/route-results`), and
+relay routes `GET /api/v1/route-requests` and `POST /api/v1/route-results`),
 the scheduler (`services/scheduler.py`: scan, daily, weekly, purge and the one
-urgent retry; shadow mode by default). The scheduler ships disabled
-(`FL_SCHEDULER_ENABLED=false`), so `collect --once` and the three Home
-Assistant routes are the only production paths until the owner enables it;
-nothing runs an assessment in production before then. `google_routes` and the
-rest of the Home Assistant API and UI are still to come (M3, M4). Plan: [docs/project/roadmap.md](docs/project/roadmap.md).
+urgent retry; shadow mode by default) and the M4 status and assessment API
+(`GET /api/v1/status`, `POST /api/v1/assessments`,
+`GET /api/v1/assessments/{run_id}`; on-demand runs share the scheduler's
+pipeline lock, which is process-local, so run one `serve`). The scheduler ships
+disabled (`FL_SCHEDULER_ENABLED=false`), so `collect --once` and the Home
+Assistant routes are the only production paths until the owner enables it.
+`google_routes` and the registry UI are still to come (M3, M4). Plan: [docs/project/roadmap.md](docs/project/roadmap.md).
 **Distribution**: container image `ghcr.io/byronwilliamscpa/family-logistics`
 only. Not published to PyPI.
 
@@ -139,7 +141,7 @@ uv run family-logistics migrate            # schema to head (serve refuses an ol
 ```text
 src/family_logistics/
 ├── adapters/      # caldav (read-only transport), routing, apprise, home_assistant, llama_cpp
-├── api/           # FastAPI app, /healthz, Home Assistant routes (snapshot ingest, route relay; M4 adds the rest)
+├── api/           # FastAPI app, /healthz, Home Assistant routes (snapshot ingest, route relay, status and assessments; M4 adds the UI)
 ├── core/          # config, crypto, database, exceptions
 ├── db/            # schema, audit log, migrations_api, Alembic migrations/
 ├── domain/        # models, events, parser, confirmation, change_impact,

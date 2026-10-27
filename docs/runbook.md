@@ -109,6 +109,42 @@ incomplete run is dispatched like any other; nothing is reported as clear on a
 failure. A crash in one tick is logged by exception class only and counted; the
 scheduler keeps running.
 
+## On-demand runs
+
+`POST /api/v1/assessments` (the Home Assistant button) starts one assessment of
+what is stored, with the latest school snapshot, and answers 202 with a
+`run_id`; `GET /api/v1/assessments/{run_id}` reports it and
+`GET /api/v1/status` is the family-wide card. Reference:
+[API reference](api-reference.md#status-and-assessment-routes).
+
+- **One `serve` process only.** The pipeline lock the scheduler and the
+  on-demand runs share is process-local. A second `serve`, or `collect --once`
+  while a run executes, is not excluded; the database-level write lock is
+  issue #22 and is still open. The lock is held whether or not
+  `FL_SCHEDULER_ENABLED` is set, so a button press during a scheduled run waits
+  or joins it, never overlaps it.
+- **A double press is one run.** A second press while a run is queued, or while
+  a scheduled run is executing, returns the same `run_id` with
+  `coalesced: true`.
+- **It does not collect.** The run judges the calendars as last collected; if
+  they are stale it reports DATA-011 (incomplete), not clear. Run
+  `collect --once`, or wait for the next scheduled scan, then press again.
+- **How a bad outcome reads.** A queued run that waits 30 minutes for the lock,
+  a run that raises, and a run whose process died all read as `finished` with
+  status `failed`. The status card shows `failed` with reason `run_interrupted`
+  for a started run that never finished while nothing is executing. None of
+  them is ever clear. A run still queued when the service stops leaves no row,
+  so its `run_id` answers 404 after a restart; press again.
+- **Stale or missing data on the card.** `analysis_stale` appears when the
+  latest finished run is older than `FL_SOURCE_MAX_STALENESS_MINUTES`;
+  `school_snapshot_stale` appears after 26 hours without a snapshot. Either
+  turns an otherwise clear card into `incomplete`.
+- **Shutdown.** Stopping `serve` waits for an executing run to finish and
+  abandons a queued one.
+- **Route provider.** The provider is built when the run starts, so
+  `FL_ROUTE_PROVIDER=google_routes` (not built yet) makes each on-demand run
+  fail rather than stopping the app at start.
+
 Two operating rules follow from the single in-process lock:
 
 - Do not run `family-logistics collect --once` against a live `serve` that has

@@ -491,4 +491,4 @@ clear.
 Roadmap:
 
 - **M3 (scheduler)**: every scheduled run passes `school=repo.latest()`.
-- **M4 (on-demand API)**: every on-demand run passes `school=repo.latest()`.
+- **M4 (on-demand API, built)**: every on-demand run passes `school=repo.latest()`; `GET /api/v1/status` reports the snapshot's fetch time and flags it stale after 26 hours.
