@@ -204,6 +204,8 @@ class AssessmentService:
         self,
         trigger: str = "on_demand",
         school: SchoolSnapshot | None = None,
+        *,
+        run_id: str | None = None,
     ) -> RunOutcome:
         """Run one assessment and store its outcome.
 
@@ -211,6 +213,8 @@ class AssessmentService:
             trigger: What started the run (one of ``TRIGGERS``).
             school: School schedules from Home Assistant. ``None`` means no snapshot
                 has arrived: DATA-011 is raised and the run is never clear.
+            run_id: An ID already handed to a caller (the on-demand API answers
+                before the run starts); a new one is made when None.
 
         Returns:
             The stored run and its result. A run that raised is failed, keeps
@@ -221,15 +225,14 @@ class AssessmentService:
                 written).
         """
         # #CRITICAL: Concurrency: ``begin_run``, ``load_history`` and
-        # ``complete_run`` are three separate transactions and runs are not
-        # serialized. Two overlapping runs (scheduler plus on-demand) can each
-        # read the same history, and the one that finishes last overwrites the
-        # findings and trip snapshot with its own, possibly older, data even if
-        # the other run started later. The serialization or ordering policy is
-        # an open design decision deferred to the scheduler milestone (M3,
-        # docs/project/roadmap.md); no locking exists today.
-        # #VERIFY: no test pins this behavior. The scheduler (M3) work must add
-        # a test for overlapping runs together with the chosen policy.
+        # ``complete_run`` are three separate transactions with no database
+        # lock across them (issue #22, still open). Within one process the
+        # scheduler and the on-demand API serialize runs through the shared
+        # ``PipelineCoordinator`` lock (services/pipeline.py), so a caller that
+        # skips the lock, or a second process on the same database, can still
+        # overlap two runs and let the older overwrite the newer findings.
+        # #VERIFY: tests/unit/test_on_demand.py (TestSharedLock) pins the
+        # in-process lock; nothing pins the cross-process case.
         if trigger not in TRIGGERS:
             msg = f"unknown trigger {trigger!r}; allowed: {', '.join(TRIGGERS)}"
             raise ValueError(msg)
@@ -241,7 +244,7 @@ class AssessmentService:
         # the error must propagate loudly instead of being swallowed.
         # #VERIFY: tests/unit/test_assessment_service.py::TestFailedRuns.
         run_id = self._repo.begin_run(
-            trigger, start, end, now, rules_version=RULES_VERSION
+            trigger, start, end, now, rules_version=RULES_VERSION, run_id=run_id
         )
         history: StoredHistory | None = None
         trips: tuple[Trip, ...] = ()

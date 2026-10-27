@@ -148,6 +148,81 @@ class TestRuns:
         assert len(record.error) == 500
 
 
+class TestPreAllocatedRunId:
+    def test_a_given_run_id_is_stored_and_returned(self, repo):
+        given = "0f6c2a64-35b4-4f5e-8f55-5d8a1a2c0001"
+        stored = repo.begin_run(
+            "on_demand", *WINDOW, T0, rules_version="m2.1", run_id=given
+        )
+        assert stored == given
+        run = repo.get_run(given)
+        assert run is not None
+        assert run.status is RunStatus.FAILED
+
+    def test_a_run_id_already_stored_is_refused(self, repo):
+        first = begin(repo)
+        with pytest.raises(IntegrityError):
+            repo.begin_run("on_demand", *WINDOW, T1, rules_version="m2.1", run_id=first)
+        assert len(repo.recent_runs()) == 1
+
+
+class TestLatestFinished:
+    def test_none_without_a_finished_run(self, repo):
+        assert repo.latest_finished_run() is None
+        begin(repo)
+        assert repo.latest_finished_run() is None
+
+    def test_a_newer_unfinished_run_does_not_hide_the_finished_one(self, repo):
+        done = begin(repo, T0)
+        repo.complete_run(done, result(status=RunStatus.CLEAR), T1, ())
+        begin(repo, T2)
+        latest = repo.latest_finished_run()
+        assert latest is not None
+        assert latest.run_id == done
+        assert repo.latest_run().run_id != done
+
+    def test_recent_runs_can_leave_out_unfinished_runs(self, repo):
+        done = begin(repo, T0)
+        repo.complete_run(done, result(status=RunStatus.CLEAR), T1, ())
+        begin(repo, T2)
+        assert [r.run_id for r in repo.recent_runs(finished_only=True)] == [done]
+        assert len(repo.recent_runs()) == 2
+
+
+class TestOpenLifecycleCounts:
+    def test_zero_filled_when_nothing_is_open(self, repo):
+        assert repo.open_lifecycle_counts() == {"new": 0, "ongoing": 0, "regressed": 0}
+
+    def test_counts_open_findings_per_state_and_leaves_resolved_out(self, repo):
+        first = begin(repo, T0)
+        repo.complete_run(
+            first,
+            result(
+                [
+                    (item(key="a"), Lifecycle.NEW),
+                    (item(key="b"), Lifecycle.NEW),
+                    (item(key="c"), Lifecycle.NEW),
+                ]
+            ),
+            T0,
+            (),
+        )
+        second = begin(repo, T1)
+        repo.complete_run(
+            second,
+            result(
+                [
+                    (item(key="a"), Lifecycle.ONGOING),
+                    (item(key="b"), Lifecycle.REGRESSED),
+                ],
+                resolved=[item(key="c")],
+            ),
+            T1,
+            (),
+        )
+        assert repo.open_lifecycle_counts() == {"new": 0, "ongoing": 1, "regressed": 1}
+
+
 class TestFindingState:
     def test_new_finding_is_stored_open(self, repo):
         run_id = begin(repo)

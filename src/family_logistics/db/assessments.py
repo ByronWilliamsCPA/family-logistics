@@ -12,11 +12,12 @@ transaction, so a process that dies mid-run can never leave a clear result.
 that a failed result leaves findings and the trip snapshot untouched.
 
 #CRITICAL: Concurrency: ``begin_run``, ``load_history`` and ``complete_run``
-are separate transactions and runs are not serialized, so overlapping runs can
-overwrite a newer run's findings and snapshot with older data. The ordering
-policy is an open decision for the scheduler milestone (M3); see the marker on
-``services.assessments.AssessmentService.run``.
-#VERIFY: no test pins this; the scheduler work must add one.
+are separate transactions with no database lock across them (issue #22, still
+open). One process serializes runs through the shared ``PipelineCoordinator``
+lock (services/pipeline.py); a second process on the same database can still
+overlap two runs. See the marker on ``AssessmentService.run``.
+#VERIFY: tests/unit/test_on_demand.py (TestSharedLock) pins the in-process lock;
+nothing pins the cross-process case.
 """
 
 from __future__ import annotations
@@ -26,10 +27,11 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
-from sqlalchemy import Integer, delete, insert, literal_column, select, update
+from sqlalchemy import Integer, delete, func, insert, literal_column, select, update
 
 from family_logistics.db.schema import analysis_run, finding, trip_snapshot
 from family_logistics.db.sources import MAX_ERROR_LENGTH
+from family_logistics.domain.lifecycle import Lifecycle
 from family_logistics.domain.models import Finding, RunStatus, Severity
 from family_logistics.domain.trip_codec import trip_from_json, trip_to_json
 
@@ -146,6 +148,7 @@ class AssessmentRepository:
         started_at: datetime,
         *,
         rules_version: str,
+        run_id: str | None = None,
     ) -> str:
         """Record a run as started, with the safe placeholder status ``failed``.
 
@@ -155,11 +158,14 @@ class AssessmentRepository:
             window_end: Window end (UTC).
             started_at: Start time (UTC).
             rules_version: Rule semantics version in force.
+            run_id: An ID the caller already handed out (the on-demand API
+                returns it before the run starts); a new UUID when None. An ID
+                already stored raises the database's integrity error.
 
         Returns:
-            The new run ID.
+            The run ID.
         """
-        run_id = str(uuid.uuid4())
+        run_id = run_id or str(uuid.uuid4())
         with self._engine.begin() as connection:
             connection.execute(
                 insert(analysis_run).values(
@@ -309,6 +315,36 @@ class AssessmentRepository:
         runs = self.recent_runs(1)
         return runs[0] if runs else None
 
+    def latest_finished_run(self) -> RunRecord | None:
+        """Return the most recently started run that has a finish time.
+
+        A run that is still running, or died before it was stored, has none.
+
+        Returns:
+            The run, or None when no run ever finished.
+        """
+        runs = self.recent_runs(1, finished_only=True)
+        return runs[0] if runs else None
+
+    def open_lifecycle_counts(self) -> dict[str, int]:
+        """Count the open findings per lifecycle state.
+
+        Returns:
+            ``new``, ``ongoing`` and ``regressed`` to their counts, zeros
+            included. Resolved findings are not counted.
+        """
+        with self._engine.connect() as connection:
+            rows = cast(
+                "Sequence[tuple[str, int]]",
+                connection.execute(
+                    select(finding.c.lifecycle, func.count())
+                    .where(finding.c.lifecycle != _RESOLVED)
+                    .group_by(finding.c.lifecycle)
+                ).all(),
+            )
+        tally = dict(rows)
+        return {state.value: tally.get(state.value, 0) for state in Lifecycle}
+
     def get_run(self, run_id: str) -> RunRecord | None:
         """Return one run.
 
@@ -328,27 +364,31 @@ class AssessmentRepository:
             )
         return _record_from_row(_mapping(row)) if row is not None else None
 
-    def recent_runs(self, limit: int = 20) -> tuple[RunRecord, ...]:
+    def recent_runs(
+        self, limit: int = 20, *, finished_only: bool = False
+    ) -> tuple[RunRecord, ...]:
         """Return the latest runs, newest first.
 
         Args:
             limit: Maximum number of runs.
+            finished_only: Leave out runs with no finish time.
 
         Returns:
             The runs.
         """
+        query = select(analysis_run)
+        if finished_only:
+            query = query.where(analysis_run.c.finished_at.is_not(None))
         with self._engine.connect() as connection:
             rows = (
                 connection.execute(
-                    select(analysis_run)
-                    .order_by(
+                    query.order_by(
                         analysis_run.c.started_at.desc(),
                         # rowid grows with insertion (analysis_run is a rowid
                         # table), so equal started_at still orders newest first.
                         literal_column("analysis_run.rowid", Integer).desc(),
                         analysis_run.c.run_id,
-                    )
-                    .limit(limit)
+                    ).limit(limit)
                 )
                 .mappings()
                 .all()

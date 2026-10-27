@@ -14,7 +14,9 @@ Obligations (ADR 0008 D6, D11):
   collection to dispatch (the watermark is checked at claim time only).
   ``max_instances=1`` and ``coalesce`` stop a job overlapping itself; a scan
   that finds the lock busy is skipped, the other jobs wait ``lock_wait``. The
-  M4 on-demand API must take the lock too;
+  lock comes from the shared ``PipelineCoordinator`` (``services/pipeline.py``)
+  that ``create_app`` also gives the on-demand API, so the two exclude each
+  other; a scheduler built without one has a private lock;
 - a crash in a tick is caught, counted and logged by exception class only; only
   a configuration error at construction or start stops startup;
 - the scan interval must exceed ``CLAIM_TTL`` (``scheduler_problems``) and a
@@ -85,6 +87,7 @@ if TYPE_CHECKING:
     from family_logistics.services.assessments import RunOutcome
     from family_logistics.services.collector import CollectionRun
     from family_logistics.services.notifications import DispatchReport
+    from family_logistics.services.pipeline import PipelineCoordinator
 
 logger = get_logger(__name__)
 
@@ -342,6 +345,8 @@ class SchedulerService:
             ``FL_TIMEZONE`` when None.
         lock_wait: How long a waiting tick waits for a running pipeline.
         on_stop: Cleanups run by ``stop`` after the scheduler has shut down.
+        lock: The pipeline lock to share with the on-demand API
+            (``PipelineCoordinator.lock``); a private one when None.
 
     Raises:
         ConfigurationError: ``scheduler_problems`` found something.
@@ -361,6 +366,7 @@ class SchedulerService:
         scheduler: BackgroundScheduler | None = None,
         lock_wait: timedelta = LOCK_WAIT,
         on_stop: Sequence[Callable[[], None]] = (),
+        lock: threading.Lock | None = None,
     ) -> None:
         problems = scheduler_problems(settings, now=clock())
         if problems:
@@ -377,7 +383,7 @@ class SchedulerService:
         self._aps = scheduler or BackgroundScheduler(timezone=self._zone)
         self._lock_wait = lock_wait
         self._on_stop = tuple(on_stop)
-        self._lock = threading.Lock()
+        self._lock = lock if lock is not None else threading.Lock()
         self._guard = threading.Lock()
         self._stopping = threading.Event()
         self._stats: dict[str, JobStats] = {}
@@ -391,6 +397,7 @@ class SchedulerService:
         engine: Engine,
         *,
         clock: Callable[[], datetime] = _utc_now,
+        coordinator: PipelineCoordinator | None = None,
     ) -> SchedulerService:
         """Build the service and the objects it drives from settings.
 
@@ -401,6 +408,9 @@ class SchedulerService:
             settings: Application settings (CalDAV credentials required).
             engine: Database engine at the schema head.
             clock: The current aware time (replaceable in tests).
+            coordinator: Shared with the on-demand API: its lock becomes the
+                pipeline lock and every run the scheduler makes is marked as
+                executing. A private lock and no marks when None.
 
         Returns:
             The service, not started; ``stop`` closes its HTTP clients.
@@ -424,17 +434,21 @@ class SchedulerService:
             raise
         cipher = None if settings.data_key is None else AddressCipher(settings.data_key)
         try:
+            service = AssessmentService(
+                engine, settings, provider, cipher=cipher, clock=clock
+            )
             return cls(
                 settings,
                 engine,
                 collector=collector,
-                assessor=AssessmentService(
-                    engine, settings, provider, cipher=cipher, clock=clock
-                ),
+                assessor=service
+                if coordinator is None
+                else coordinator.tracked(service),
                 school=SchoolSnapshotRepository(engine),
                 notifier=notifier,
                 clock=clock,
                 on_stop=(http.close, notifier.close),
+                lock=None if coordinator is None else coordinator.lock,
             )
         except ConfigurationError:
             http.close()
@@ -502,7 +516,7 @@ class SchedulerService:
 
     @property
     def pipeline_lock(self) -> threading.Lock:
-        """Return the lock a pipeline holds (the on-demand API must take it)."""
+        """Return the lock a pipeline holds (shared with the on-demand API)."""
         return self._lock
 
     def run_scan(self) -> TickReport:
