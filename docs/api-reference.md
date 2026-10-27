@@ -18,8 +18,8 @@ token (a missing or wrong token is a 401 with a fixed body, throttled like the
 other Home Assistant routes). Answers carry counts, times and fixed strings
 only: no child names, addresses, calendar identifiers or finding text. Every
 error body is `{"detail": "<fixed sentence>"}` and never echoes the request; the
-disabled-gate 503 of `POST /api/v1/assessments` also carries a machine-readable
-`code` (below).
+disabled-gate and start-failure 503s of `POST /api/v1/assessments` also carry a
+machine-readable `code` (below).
 
 ### `GET /api/v1/status`
 
@@ -72,7 +72,11 @@ One run is queued or executing at a time. A second request while one is queued
 gets the same `run_id` with `coalesced: true`; so does a request that arrives
 while a scheduled run is executing. If the scheduler is collecting (it holds the
 pipeline lock but has not started a run), the request queues behind it. A
-request during shutdown is a 503 (`Service is shutting down`).
+request during shutdown is a 503 (`Service is shutting down`, no `code`). If the
+process cannot start the run's thread, the answer is a 503 `{"detail": "Could
+not start the run", "code": "on_demand_start_failed"}`: no run was queued and no
+id was issued, so a retry starts a new run. The body never carries the cause
+and there is no `Retry-After`.
 
 Known risk, not built: a button pressed repeatedly after each run finishes can
 queue back to back and starve the scheduler's scans of the pipeline lock (a scan

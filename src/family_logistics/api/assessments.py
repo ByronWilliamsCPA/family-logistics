@@ -39,7 +39,10 @@ from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 
 from family_logistics.api.ha import ErrorBody
-from family_logistics.services.on_demand import OnDemandStoppedError
+from family_logistics.services.on_demand import (
+    OnDemandStartError,
+    OnDemandStoppedError,
+)
 from family_logistics.services.status import (  # noqa: TC001 - pydantic needs it
     StatusReason,
 )
@@ -61,6 +64,10 @@ ON_DEMAND_DISABLED: Final = "On-demand runs are disabled"
 """Fixed 503 text for ``POST /assessments`` while ``FL_ON_DEMAND_ENABLED`` is off."""
 ON_DEMAND_DISABLED_CODE: Final = "on_demand_disabled"
 """Machine-readable ``code`` of that 503."""
+ON_DEMAND_START_FAILED: Final = "Could not start the run"
+"""Fixed 503 text when the run's thread could not be started."""
+ON_DEMAND_START_FAILED_CODE: Final = "on_demand_start_failed"
+"""Machine-readable ``code`` of that 503; a retry gets a new run."""
 RUN_NOT_FOUND: Final = "Run not found"
 """Fixed 404 text for an unknown run id."""
 INVALID_RUN_ID: Final = "Invalid run id"
@@ -190,6 +197,17 @@ def _store_failed(event: str, exc: SQLAlchemyError) -> JSONResponse:
     return _fixed(status.HTTP_503_SERVICE_UNAVAILABLE, STORE_UNAVAILABLE)
 
 
+def _start_failed(exc: OnDemandStartError) -> JSONResponse:
+    """Log a failed thread start by class only and answer the fixed 503."""
+    # The message and the chained cause stay out of the log and the body.
+    logger.error("assessments.start_failed", error=type(exc).__name__)
+    return _fixed(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        ON_DEMAND_START_FAILED,
+        ON_DEMAND_START_FAILED_CODE,
+    )
+
+
 def _card_answer(status_service: StatusService) -> StatusBody | JSONResponse:
     try:
         card = status_service.card()
@@ -211,6 +229,8 @@ def _start_answer(
         ticket = on_demand.request()
     except OnDemandStoppedError:
         return _fixed(status.HTTP_503_SERVICE_UNAVAILABLE, STOPPING)
+    except OnDemandStartError as exc:
+        return _start_failed(exc)
     logger.info(
         "assessments.requested", run_id=ticket.run_id, coalesced=ticket.coalesced
     )
@@ -259,7 +279,10 @@ def register_assessment_routes(
             "description": (
                 "Not accepted. With code on_demand_disabled the setting is off "
                 "and retrying cannot succeed until the owner enables it; "
-                "otherwise the service is shutting down, so retry once it is back"
+                "with code on_demand_start_failed no run was started (the "
+                "process could not start its thread) and a retry gets a new "
+                "run; with no code the service is shutting down, so retry "
+                "once it is back"
             ),
         }
     }

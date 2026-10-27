@@ -28,11 +28,14 @@ from family_logistics.api.assessments import AssessmentBody, StatusBody
 from family_logistics.db.assessments import AssessmentRepository
 from family_logistics.domain.models import RunStatus
 from family_logistics.services import status as status_service
+from family_logistics.services.on_demand import OnDemandStartError
 
 pytestmark = pytest.mark.unit
 
 URL = "/api/v1/assessments"
 UNKNOWN = "00000000-0000-4000-8000-000000000000"
+START_FAILED = {"detail": "Could not start the run", "code": "on_demand_start_failed"}
+SECRET = "distinctive-thread-detail-7731"
 
 
 @pytest.fixture
@@ -127,6 +130,67 @@ class TestPost:
         assert response.status_code == 503
         assert response.json() == {"detail": "Service is shutting down"}
         assert assessor.run_ids == []
+
+
+class TestStartFailure:
+    """A thread that cannot start is a fixed 503, never a 500 or an echo."""
+
+    def refuse_first_start(self, monkeypatch):
+        real_start = threading.Thread.start
+        refused = []
+
+        def start(thread):
+            if thread.name == "on-demand-run" and not refused:
+                refused.append(thread)
+                raise RuntimeError(SECRET)
+            real_start(thread)
+
+        monkeypatch.setattr(threading.Thread, "start", start)
+        return refused
+
+    def test_it_is_a_fixed_503_and_a_retry_gets_a_new_run(
+        self, engine, monkeypatch, caplog
+    ):
+        rig, assessor = make_rig(engine)
+        refused = self.refuse_first_start(monkeypatch)
+        with caplog.at_level("DEBUG"):
+            response = rig.client.post(URL, headers=AUTH)
+        assert len(refused) == 1
+        assert response.status_code == 503
+        assert response.json() == START_FAILED
+        assert "Retry-After" not in response.headers
+        assert SECRET not in response.text + caplog.text
+        assert "assessments.start_failed" in caplog.text
+        assert "OnDemandStartError" in caplog.text
+        assert assessor.run_ids == []
+        assert not rig.on_demand.in_flight()
+        retry = rig.client.post(URL, headers=AUTH)
+        assert retry.status_code == 202
+        assert retry.json()["coalesced"] is False
+        assert settled(rig, retry.json()["run_id"])["status"] == "clear"
+        rig.on_demand.stop()
+
+    def test_the_status_route_still_answers(self, engine, monkeypatch):
+        rig, _ = make_rig(engine)
+        self.refuse_first_start(monkeypatch)
+        assert rig.client.post(URL, headers=AUTH).status_code == 503
+        response = rig.client.get("/api/v1/status", headers=AUTH)
+        assert response.status_code == 200
+        assert response.json()["run_in_flight"] is False
+        rig.on_demand.stop()
+
+    def test_nothing_from_the_exception_is_echoed(self, engine, monkeypatch, caplog):
+        rig, _ = make_rig(engine)
+
+        def refuse():
+            raise OnDemandStartError(SECRET)
+
+        monkeypatch.setattr(rig.on_demand, "request", refuse)
+        with caplog.at_level("DEBUG"):
+            response = rig.client.post(URL, headers=AUTH)
+        assert response.status_code == 503
+        assert response.json() == START_FAILED
+        assert SECRET not in response.text + caplog.text
 
 
 class TestDisabled:
@@ -243,6 +307,7 @@ class TestResponseSchema:
         post = describe("/api/v1/assessments", "post")
         assert "on_demand_disabled" in post
         assert "cannot succeed" in post
+        assert "on_demand_start_failed" in post
         for read in (
             describe("/api/v1/status", "get"),
             describe("/api/v1/assessments/{run_id}", "get"),

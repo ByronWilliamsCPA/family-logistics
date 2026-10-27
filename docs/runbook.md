@@ -143,6 +143,12 @@ what is stored, with the latest school snapshot, and answers 202 with a
 - **A double press is one run.** A second press while a run is queued, or while
   a scheduled run is executing, returns the same `run_id` with
   `coalesced: true`.
+- **A press that could not start a run.** A 503 with `code`
+  `on_demand_start_failed` means the process could not start the run's thread
+  (a resource limit such as too many threads). Nothing was queued and no
+  `run_id` was issued; press again, and check the process's thread and memory
+  limits if it repeats. The log line `assessments.start_failed` carries the
+  exception class only.
 - **It does not collect.** The run judges the calendars as last collected; if
   they are stale it reports DATA-011 (incomplete), not clear, and the status
   card adds `calendar_stale`. With the scheduler enabled, wait for the next
