@@ -26,9 +26,12 @@ schema. M3 has started: the Home Assistant school snapshot ingest
 (`POST /api/v1/ingest/ha-snapshot`), the null and `ha_relay` route providers
 with the Home Assistant relay routes, and the notification service are merged.
 The scheduler (collect, assess and notify on a schedule, in shadow mode by
-default) exists but ships disabled (`FL_SCHEDULER_ENABLED=false`): nothing runs
-an assessment in production until the owner enables it. `google_routes` and the
-Home Assistant UI are still to come (M3 and M4); see the
+default) exists but ships disabled (`FL_SCHEDULER_ENABLED=false`). The M4
+status and assessment API adds a second way to start an assessment,
+`POST /api/v1/assessments`, which ships refused (`FL_ON_DEMAND_ENABLED=false`).
+Nothing runs an assessment in production until the owner enables the scheduler
+or on-demand runs. `google_routes` and the Home Assistant UI are still to come
+(M3 and M4); see the
 [roadmap](docs/project/roadmap.md). Production notifications stay off
 (`FL_NOTIFICATION_MODE=shadow`) until the household approves the defaults and
 the M3 shadow gate is met: 7 consecutive days in shadow mode with zero

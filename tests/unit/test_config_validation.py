@@ -34,6 +34,13 @@ class TestDefaults:
     def test_the_scheduler_is_off_by_default(self):
         assert Settings().scheduler_enabled is False
 
+    def test_on_demand_runs_are_off_by_default(self):
+        assert Settings().on_demand_enabled is False
+
+    def test_on_demand_runs_are_enabled_by_the_environment(self, monkeypatch):
+        monkeypatch.setenv("FL_ON_DEMAND_ENABLED", "true")
+        assert Settings().on_demand_enabled is True
+
     def test_default_tags_are_the_dedicated_tags(self):
         settings = Settings()
         assert [getattr(settings, name) for name in DEDICATED_TAG_FIELDS] == [

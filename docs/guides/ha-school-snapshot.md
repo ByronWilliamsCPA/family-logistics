@@ -471,12 +471,14 @@ re-post of the purged snapshot answers 409 rather than "unchanged".
 
 ## Using the snapshot in an assessment
 
-!!! note "Revise when the scheduler lands (M3)"
-    This section describes the gap that closes with M3 and M4; see the
-    [roadmap](../project/roadmap.md) for the current state.
+!!! note "Current behavior (M4)"
+    The scheduler and the on-demand API both pass the latest school snapshot
+    to an assessment. Each is off by default (`FL_SCHEDULER_ENABLED`,
+    `FL_ON_DEMAND_ENABLED`), so nothing runs an assessment until the owner
+    enables one. See the [roadmap](../project/roadmap.md) for the history.
 
-Today the snapshot is stored and nothing more: nothing in the app yet passes
-it to an assessment. Each run must be given it explicitly:
+The snapshot is stored by the ingest route and read by those two paths. A run
+must be given it explicitly:
 
 ```python
 repo = SchoolSnapshotRepository(engine)
@@ -491,4 +493,4 @@ clear.
 Roadmap:
 
 - **M3 (scheduler)**: every scheduled run passes `school=repo.latest()`.
-- **M4 (on-demand API)**: every on-demand run passes `school=repo.latest()`.
+- **M4 (on-demand API, built)**: every on-demand run passes `school=repo.latest()`; `GET /api/v1/status` reports the snapshot's fetch time and flags it stale after 26 hours.

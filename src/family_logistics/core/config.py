@@ -301,6 +301,7 @@ FIELD_STATUS: dict[str, str] = {
     "daily_cron": CONSUMED,
     "change_scan_minutes": CONSUMED,
     "scheduler_enabled": CONSUMED,
+    "on_demand_enabled": CONSUMED,
     "notification_mode": CONSUMED,
     "quiet_hours_start": CONSUMED,
     "quiet_hours_end": CONSUMED,
@@ -403,6 +404,12 @@ class Settings(BaseSettings):
             weekly jobs and the retention purges). Off by default: the M3
             blockers in docs/project/roadmap.md must close before a scheduler
             becomes the first production caller of ``AssessmentService.run``.
+        on_demand_enabled: Let ``POST /api/v1/assessments`` start on-demand
+            runs. Off by default, for the same reason as the scheduler: it makes
+            the process a production caller of ``AssessmentService.run`` before
+            the M3 blockers (issues #19 to #23) close. ``GET /api/v1/status``
+            and ``GET /api/v1/assessments/{run_id}`` are read-only and stay
+            available either way.
         notification_mode: ``shadow`` (default) is the safe mode: every push,
             ops alerts included, goes to the shadow tag only (ADR 0008, D1).
             ``production`` is a deliberate operator decision taken jointly
@@ -514,6 +521,13 @@ class Settings(BaseSettings):
     # #VERIFY: tests/unit/test_config_validation.py asserts the default is
     # False; the roadmap's M3 blockers close before it is switched on.
     scheduler_enabled: bool = False
+    # #CRITICAL: Safety: on-demand runs are off by default. Enabling them makes
+    # the process a production caller of ``AssessmentService.run`` (through
+    # ``POST /api/v1/assessments``) before issues #19 to #23 are closed, exactly
+    # as the scheduler does. A disabled POST starts nothing and allocates no id.
+    # #VERIFY: tests/unit/test_config_validation.py asserts the default is
+    # False; tests/unit/test_assessments_api.py (TestDisabled) pins the 503.
+    on_demand_enabled: bool = False
 
     # #CRITICAL: Safety: shadow mode is the default. Switching to production is
     # a process decision (both parents, after the M3 shadow gate in

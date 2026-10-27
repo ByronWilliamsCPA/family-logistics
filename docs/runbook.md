@@ -109,6 +109,97 @@ incomplete run is dispatched like any other; nothing is reported as clear on a
 failure. A crash in one tick is logged by exception class only and counted; the
 scheduler keeps running.
 
+## On-demand runs
+
+`POST /api/v1/assessments` (the Home Assistant button) starts one assessment of
+what is stored, with the latest school snapshot, and answers 202 with a
+`run_id`; `GET /api/v1/assessments/{run_id}` reports it and
+`GET /api/v1/status` is the family-wide card. Reference:
+[API reference](api-reference.md#status-and-assessment-routes).
+
+- **Off by default.** `POST /api/v1/assessments` is refused with a 503 (`code`
+  `on_demand_disabled`) until `FL_ON_DEMAND_ENABLED=true` and `serve` restarts.
+  Enabling it, like enabling the scheduler, makes the first production
+  assessment run, so the open correctness blockers must be closed first:
+  [#19](https://github.com/ByronWilliamsCPA/family-logistics/issues/19)
+  (retained confirmed legs),
+  [#20](https://github.com/ByronWilliamsCPA/family-logistics/issues/20)
+  (trip snapshot content),
+  [#21](https://github.com/ByronWilliamsCPA/family-logistics/issues/21)
+  (an incomplete run must not resolve findings),
+  [#22](https://github.com/ByronWilliamsCPA/family-logistics/issues/22)
+  (run serialization) and
+  [#23](https://github.com/ByronWilliamsCPA/family-logistics/issues/23)
+  (corrupt snapshot healing); see the
+  [roadmap](project/roadmap.md#m3-blockers).
+  The status and run-lookup routes are always available.
+
+- **One `serve` process only.** The pipeline lock the scheduler and the
+  on-demand runs share is process-local. A second `serve`, or `collect --once`
+  while a run executes, is not excluded; the database-level write lock is
+  issue #22 and is still open. The lock is held whether or not
+  `FL_SCHEDULER_ENABLED` is set, so a button press during a scheduled run waits
+  or joins it, never overlaps it.
+- **A double press is one run.** A second press while a run is queued, or while
+  a scheduled run is executing, returns the same `run_id` with
+  `coalesced: true`.
+- **A press that could not start a run.** A 503 with `code`
+  `on_demand_start_failed` means the process could not start the run's thread
+  (a resource limit such as too many threads). Nothing was queued and no
+  `run_id` was issued; press again, and check the process's thread and memory
+  limits if it repeats. The log line `assessments.start_failed` carries the
+  exception class only.
+- **It does not collect.** The run judges the calendars as last collected; if
+  they are stale it reports DATA-011 (incomplete), not clear, and the status
+  card adds `calendar_stale`. With the scheduler enabled, wait for the next
+  scheduled scan, then press again. With the scheduler disabled, run
+  `collect --once` first (nothing else collects), then press again.
+- **How a bad outcome reads.** A queued run that waits 30 minutes for the lock,
+  a run that raises, and a run whose process died all read as `finished` with
+  status `failed`. The status card shows `failed` with reason `run_interrupted`
+  for a started run that never finished while nothing is executing. None of
+  them is ever clear. A run still queued when the service stops leaves no row,
+  so its `run_id` answers 404 after a restart; press again.
+- **Stale or missing data on the card.** The card carries three stale flags
+  (`analysis_stale`, `calendar_stale`, `school_snapshot_stale`) and a list of
+  `reasons`; any reason turns an otherwise clear card into `incomplete`.
+  `analysis_stale` and the reason of the same name mean the latest finished
+  run is older than `FL_SOURCE_MAX_STALENESS_MINUTES`; with no run at all the
+  reason is `no_run` (and `analysis_stale` is still true). `calendar_stale`
+  means the oldest successful calendar collection is older than that same limit,
+  or no calendar was ever collected. `school_snapshot_stale` is true after 26
+  hours without a snapshot, and the reason is `school_snapshot_stale`; with no
+  snapshot at all the reason is `school_snapshot_missing` (the flag is true
+  either way).
+- **Failed press, unchanged card.** A run that failed without leaving a database
+  row (it never got the lock, the route provider could not be built, or it was
+  abandoned at shutdown) shows `failed` on `GET /api/v1/assessments/{run_id}`,
+  but `GET /api/v1/status` keeps the previous verdict, possibly `clear`, until
+  that analysis is older than `FL_SOURCE_MAX_STALENESS_MINUTES` (default 120).
+  The card is the last stored analysis, so this is by design (design rule 4 is
+  not broken). Home Assistant should poll the run id after a press and treat
+  `failed` there as authoritative for that press.
+- **`run_in_flight`.** True while an on-demand run is queued or executing, and
+  also while any pipeline holds the lock: a scheduled collect, assess and
+  notify, or the nightly purge. It means "the lock is busy", not only "a button
+  run exists".
+- **Failed runs are remembered 32 deep.** A run that failed before it wrote a
+  row (for example one that never got the lock) reads `finished` / `failed`
+  from an in-memory list of the last 32; past that, or after a restart, its
+  `run_id` answers 404.
+- **Shutdown.** Stopping `serve` first stops accepting and starting on-demand
+  runs, then stops the scheduler (which waits for its running pipeline), then
+  waits for an on-demand run that is executing. A queued run is abandoned and
+  never starts during shutdown.
+- **Known risk: scan starvation.** Presses that follow one another can keep the
+  pipeline lock busy so the scheduler's scans are skipped (a scan that finds
+  the lock held does not run). There is no cooldown yet; if the card shows
+  `analysis_stale` or `calendar_stale` while someone is pressing the button,
+  stop pressing and let a scan run. A cooldown is future work.
+- **Route provider.** The provider is built when the run starts, so
+  `FL_ROUTE_PROVIDER=google_routes` (not built yet) makes each on-demand run
+  fail rather than stopping the app at start.
+
 Two operating rules follow from the single in-process lock:
 
 - Do not run `family-logistics collect --once` against a live `serve` that has
