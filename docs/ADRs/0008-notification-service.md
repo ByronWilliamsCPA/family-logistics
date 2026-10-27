@@ -177,6 +177,12 @@ Every push has a **kind**; the kind alone decides the production tag. v1 has fiv
 | `report` | `fl-report` | A completed `weekly` run (clear, attention required or incomplete) |
 | `ops` | `fl-ops` | One per failed episode; one per incomplete episode |
 
+> **Deferred, 2026-10-27:** the M4 on-demand service (`services/on_demand.py`) runs the assessment and stores it but
+> does not call `NotificationService`, so an `on_demand` run produces no `status` push yet; the rows below that name
+> `on_demand` describe the intended behaviour. The caller sees the result through `GET /api/v1/assessments/{run_id}`
+> and the status card. Wiring the dispatch (and its shadow-mode and episode rules) is recorded in the
+> [roadmap](../project/roadmap.md) as an M4 gap.
+
 Per-finding decision table (completed runs; a failed run is D4):
 
 | Rule and `Finding.severity` | Imminent (D7) | Kind | Production tag |

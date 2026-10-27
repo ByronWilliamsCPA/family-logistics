@@ -63,8 +63,10 @@ urgent retry; shadow mode by default) and the M4 status and assessment API
 (`GET /api/v1/status`, `POST /api/v1/assessments`,
 `GET /api/v1/assessments/{run_id}`; on-demand runs share the scheduler's
 pipeline lock, which is process-local, so run one `serve`). The scheduler ships
-disabled (`FL_SCHEDULER_ENABLED=false`), so `collect --once` and the Home
-Assistant routes are the only production paths until the owner enables it.
+disabled (`FL_SCHEDULER_ENABLED=false`) and `POST /api/v1/assessments` ships
+refused (`FL_ON_DEMAND_ENABLED=false`, a 503), so `collect --once` and the Home
+Assistant routes are the only production paths, and nothing runs an assessment
+in production until the owner enables the scheduler or on-demand runs.
 `google_routes` and the registry UI are still to come (M3, M4). Plan: [docs/project/roadmap.md](docs/project/roadmap.md).
 **Distribution**: container image `ghcr.io/byronwilliamscpa/family-logistics`
 only. Not published to PyPI.

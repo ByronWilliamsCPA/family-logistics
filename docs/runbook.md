@@ -117,6 +117,23 @@ what is stored, with the latest school snapshot, and answers 202 with a
 `GET /api/v1/status` is the family-wide card. Reference:
 [API reference](api-reference.md#status-and-assessment-routes).
 
+- **Off by default.** `POST /api/v1/assessments` is refused with a 503 (`code`
+  `on_demand_disabled`) until `FL_ON_DEMAND_ENABLED=true` and `serve` restarts.
+  Enabling it, like enabling the scheduler, makes the first production
+  assessment run, so the open correctness blockers must be closed first:
+  [#19](https://github.com/ByronWilliamsCPA/family-logistics/issues/19)
+  (retained confirmed legs),
+  [#20](https://github.com/ByronWilliamsCPA/family-logistics/issues/20)
+  (trip snapshot content),
+  [#21](https://github.com/ByronWilliamsCPA/family-logistics/issues/21)
+  (an incomplete run must not resolve findings),
+  [#22](https://github.com/ByronWilliamsCPA/family-logistics/issues/22)
+  (run serialization) and
+  [#23](https://github.com/ByronWilliamsCPA/family-logistics/issues/23)
+  (corrupt snapshot healing); see the
+  [roadmap](project/roadmap.md#m3-blockers).
+  The status and run-lookup routes are always available.
+
 - **One `serve` process only.** The pipeline lock the scheduler and the
   on-demand runs share is process-local. A second `serve`, or `collect --once`
   while a run executes, is not excluded; the database-level write lock is
@@ -127,8 +144,10 @@ what is stored, with the latest school snapshot, and answers 202 with a
   a scheduled run is executing, returns the same `run_id` with
   `coalesced: true`.
 - **It does not collect.** The run judges the calendars as last collected; if
-  they are stale it reports DATA-011 (incomplete), not clear. Run
-  `collect --once`, or wait for the next scheduled scan, then press again.
+  they are stale it reports DATA-011 (incomplete), not clear, and the status
+  card adds `calendar_stale`. With the scheduler enabled, wait for the next
+  scheduled scan, then press again. With the scheduler disabled, run
+  `collect --once` first (nothing else collects), then press again.
 - **How a bad outcome reads.** A queued run that waits 30 minutes for the lock,
   a run that raises, and a run whose process died all read as `finished` with
   status `failed`. The status card shows `failed` with reason `run_interrupted`
@@ -139,8 +158,23 @@ what is stored, with the latest school snapshot, and answers 202 with a
   latest finished run is older than `FL_SOURCE_MAX_STALENESS_MINUTES`;
   `school_snapshot_stale` appears after 26 hours without a snapshot. Either
   turns an otherwise clear card into `incomplete`.
-- **Shutdown.** Stopping `serve` waits for an executing run to finish and
-  abandons a queued one.
+- **`run_in_flight`.** True while an on-demand run is queued or executing, and
+  also while any pipeline holds the lock: a scheduled collect, assess and
+  notify, or the nightly purge. It means "the lock is busy", not only "a button
+  run exists".
+- **Failed runs are remembered 32 deep.** A run that failed before it wrote a
+  row (for example one that never got the lock) reads `finished` / `failed`
+  from an in-memory list of the last 32; past that, or after a restart, its
+  `run_id` answers 404.
+- **Shutdown.** Stopping `serve` first stops accepting and starting on-demand
+  runs, then stops the scheduler (which waits for its running pipeline), then
+  waits for an on-demand run that is executing. A queued run is abandoned and
+  never starts during shutdown.
+- **Known risk: scan starvation.** Presses that follow one another can keep the
+  pipeline lock busy so the scheduler's scans are skipped (a scan that finds
+  the lock held does not run). There is no cooldown yet; if the card shows
+  `analysis_stale` or `calendar_stale` while someone is pressing the button,
+  stop pressing and let a scan run. A cooldown is future work.
 - **Route provider.** The provider is built when the run starts, so
   `FL_ROUTE_PROVIDER=google_routes` (not built yet) makes each on-demand run
   fail rather than stopping the app at start.
