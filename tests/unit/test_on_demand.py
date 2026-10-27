@@ -7,6 +7,7 @@ fictional; the assessor is a fake that stores real run rows.
 from __future__ import annotations
 
 import threading
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -27,8 +28,10 @@ from fl_service import make_settings
 
 from family_logistics.db.assessments import AssessmentRepository
 from family_logistics.domain.models import RunStatus
+from family_logistics.services import on_demand as on_demand_module
 from family_logistics.services.on_demand import (
     OnDemandService,
+    OnDemandStartError,
     OnDemandStoppedError,
 )
 from family_logistics.services.pipeline import (
@@ -746,3 +749,60 @@ class TestShutdown:
         service.stop()
         with pytest.raises(OnDemandStoppedError):
             service.request()
+
+
+class TestStartFailure:
+    @staticmethod
+    def fail_first_start(monkeypatch):
+        """Make the first on-demand thread refuse to start; return its ids."""
+        real_start = threading.Thread.start
+        refused = []
+
+        def start(thread):
+            if thread.name == "on-demand-run" and not refused:
+                refused.append(thread)
+                msg = "can't start new thread"
+                raise RuntimeError(msg)
+            real_start(thread)
+
+        monkeypatch.setattr(threading.Thread, "start", start)
+        return refused
+
+    def test_a_thread_that_cannot_start_queues_nothing(self, engine, monkeypatch):
+        assessor = StoringAssessor(engine)
+        service, coordinator = build(engine, assessor)
+        refused = self.fail_first_start(monkeypatch)
+        with pytest.raises(OnDemandStartError):
+            service.request()
+        assert len(refused) == 1
+        assert not service.in_flight()
+        assert not coordinator.lock.locked()
+        service.stop()
+
+    def test_the_next_request_starts_a_new_run_not_a_dead_one(
+        self, engine, monkeypatch
+    ):
+        assessor = StoringAssessor(engine)
+        service, _ = build(engine, assessor)
+        self.fail_first_start(monkeypatch)
+        with pytest.raises(OnDemandStartError):
+            service.request()
+        ticket = service.request()
+        assert not ticket.coalesced
+        progress = finished(service, ticket.run_id)
+        assert progress.status is RunStatus.CLEAR
+        assert assessor.run_ids == [ticket.run_id]
+        assert not service.in_flight()
+        service.stop()
+
+    def test_the_run_id_that_never_started_is_unknown_not_queued(
+        self, engine, monkeypatch
+    ):
+        service, _ = build(engine, StoringAssessor(engine))
+        self.fail_first_start(monkeypatch)
+        issued = uuid.UUID(int=41)
+        monkeypatch.setattr(on_demand_module.uuid, "uuid4", lambda: issued)
+        with pytest.raises(OnDemandStartError):
+            service.request()
+        assert service.progress(str(issued)) is None
+        service.stop()

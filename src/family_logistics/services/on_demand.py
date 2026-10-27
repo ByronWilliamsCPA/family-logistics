@@ -45,6 +45,15 @@ to run a single ``serve`` process lands with the routes pull request (#42).
 #EDGE: Timing: a queued run that never started when the process stopped has no
 row, so after a restart its id answers 404; the caller posts again.
 #VERIFY: tests/unit/test_on_demand.py (TestShutdown).
+#CRITICAL: Concurrency: ``request`` publishes ``_pending`` and ``_thread`` only
+after the thread has started, and does both under ``_state``. A thread that
+cannot start (``RuntimeError: can't start new thread``) would otherwise leave a
+queued id that no thread will ever run, so every later request would join it,
+its progress would read ``queued`` forever and ``in_flight`` would stay true.
+Publishing after the start needs no rollback, and a thread that finishes at once
+cannot race it: its first touch of ``_state`` is ``_clear_pending``, which waits
+for ``request`` to release the lock, by which time the id is published.
+#VERIFY: tests/unit/test_on_demand.py (TestStartFailure).
 #CRITICAL: Concurrency: shutdown must stop a queued run before the scheduler
 releases the pipeline lock, or the queued run starts during shutdown. The app
 calls ``begin_stop`` first, then stops the scheduler, then ``stop``. ``_acquire``
@@ -102,6 +111,10 @@ _FINISHED: Final = "finished"
 
 class OnDemandStoppedError(BusinessLogicError):
     """The service is shutting down and takes no new runs."""
+
+
+class OnDemandStartError(BusinessLogicError):
+    """The run's thread could not be started; no run was queued."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +254,10 @@ class OnDemandService:
 
         Raises:
             OnDemandStoppedError: The service is stopping.
+            OnDemandStartError: The run's thread could not be started. Nothing
+                was queued and no id was handed out: the state is as it was
+                before the call, so the next request tries again with a new id
+                and ``progress`` of the id that was never issued is unknown.
         """
         with self._state:
             if self._stopping.is_set():
@@ -257,11 +274,20 @@ class OnDemandService:
                 # remembered as failed before its mark is cleared.
                 return OnDemandTicket(active, coalesced=True)
             run_id = str(uuid.uuid4())
-            self._pending = run_id
-            self._thread = threading.Thread(
+            thread = threading.Thread(
                 target=self._work, args=(run_id,), name="on-demand-run", daemon=True
             )
-            self._thread.start()
+            # #CRITICAL: Concurrency: publish only a thread that started. The
+            # thread cannot clear the id before this block ends: ``_work`` takes
+            # ``_state`` to do so, and this block holds it.
+            # #VERIFY: tests/unit/test_on_demand.py (TestStartFailure).
+            try:
+                thread.start()
+            except RuntimeError as exc:
+                msg = "the on-demand run could not be started"
+                raise OnDemandStartError(msg) from exc
+            self._pending = run_id
+            self._thread = thread
         return OnDemandTicket(run_id, coalesced=False)
 
     def progress(self, run_id: str) -> RunProgress | None:
