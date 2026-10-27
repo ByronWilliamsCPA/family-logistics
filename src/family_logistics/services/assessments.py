@@ -86,7 +86,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-TRIGGERS = ("weekly", "daily", "incremental", "on_demand")
+ON_DEMAND_TRIGGER = "on_demand"
+"""``analysis_run.trigger`` of a run the API starts, and the ``run`` default."""
+TRIGGERS = ("weekly", "daily", "incremental", ON_DEMAND_TRIGGER)
 """Values of ``analysis_run.trigger``."""
 
 
@@ -111,7 +113,7 @@ class RunOutcome:
 
     run_id: str
     result: AssessmentResult
-    trigger: str = "on_demand"
+    trigger: str = ON_DEMAND_TRIGGER
     rides: RideIndex | None = None
 
 
@@ -202,7 +204,7 @@ class AssessmentService:
 
     def run(
         self,
-        trigger: str = "on_demand",
+        trigger: str = ON_DEMAND_TRIGGER,
         school: SchoolSnapshot | None = None,
         *,
         run_id: str | None = None,
@@ -444,6 +446,7 @@ class AssessmentService:
 
 
 __all__ = [
+    "ON_DEMAND_TRIGGER",
     "TRIGGERS",
     "AssessmentService",
     "RunOutcome",

@@ -49,13 +49,48 @@ def wait_until(predicate, seconds: float = JOIN_SECONDS) -> bool:
 
 
 class FakeSchool:
-    """The school snapshot store: no snapshot, and a record of lookups."""
-
-    def __init__(self) -> None:
-        self.lookups = 0
+    """The school snapshot store: no snapshot has arrived."""
 
     def latest(self):
-        self.lookups += 1
+        return None
+
+
+class ProbeLock:
+    """A pipeline lock that tells a test when a thread waits and when one lets go.
+
+    ``waiting`` is set once a thread tries to take the lock while it is held.
+    ``on_release(thread_name, hook)`` runs ``hook`` once, in the named thread,
+    just before that thread releases the lock, so a test can look at the
+    service in the moment after a run ends and before the lock is free.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._hooks: dict[str, object] = {}
+        self.waiting = threading.Event()
+
+    def on_release(self, thread_name: str, hook) -> None:
+        self._hooks[thread_name] = hook
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if self._lock.locked():
+            self.waiting.set()
+        return self._lock.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        hook = self._hooks.pop(threading.current_thread().name, None)
+        if hook is not None:
+            hook()
+        self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    def __enter__(self) -> bool:
+        return self.acquire()
+
+    def __exit__(self, *_exc) -> None:
+        self.release()
 
 
 class StoringAssessor:

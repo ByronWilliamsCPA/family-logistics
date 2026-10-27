@@ -1,5 +1,9 @@
 """On-demand assessment runs for the Home Assistant button (ADR 0007).
 
+Nothing calls this module yet: the status and assessment routes and the
+application wiring that start it arrive in the next pull request, so it is
+exercised only by its tests until then.
+
 ``POST /api/v1/assessments`` calls ``OnDemandService.request``, which answers
 at once with a run id and does the work on one background thread. The id is
 allocated before the run exists (``AssessmentRepository.begin_run`` accepts it),
@@ -14,17 +18,28 @@ Two pipelines never run at once: the thread takes the shared lock first.
 An on-demand run assesses what is stored; it does not collect. A stale calendar
 shows up as DATA-011 in the run, never as a clear result.
 
+``in_flight`` is true while an on-demand run is queued or executing and while
+any pipeline holds the shared lock: a scheduled collect, assess and notify, or
+a purge. The executing-run mark covers only the assessment itself, so the lock
+is the signal that covers the rest.
+
 #CRITICAL: Timing: a request answered with a run id must always be able to
-learn how that run ended. A run that raises, never gets the lock within
-``LOCK_WAIT``, or is abandoned at shutdown is remembered as failed (bounded,
-in memory) when it left no row; one that left a row is read from the database.
-Neither reads as clear.
-#VERIFY: tests/unit/test_on_demand.py (TestFailures, TestShutdown).
+learn how that run ended. A run that raises (scheduled or on demand), never
+gets the lock within ``LOCK_WAIT``, or is abandoned at shutdown is remembered
+as failed by the ``PipelineCoordinator`` (bounded, in memory) when it left no
+row; one that left a row is read from the database. Neither reads as clear.
+#VERIFY: tests/unit/test_on_demand.py (TestFailures, TestFailureMemory,
+TestShutdown).
 #ASSUME: Concurrency: one process serves the API, so the in-memory ``_pending``
 id and the coordinator's lock describe every run this app starts.
 #VERIFY: docs/runbook.md (On-demand runs): run a single ``serve`` process.
 #EDGE: Timing: a queued run that never started when the process stopped has no
 row, so after a restart its id answers 404; the caller posts again.
+#VERIFY: tests/unit/test_on_demand.py (TestShutdown).
+#CRITICAL: Concurrency: shutdown must stop a queued run before the scheduler
+releases the pipeline lock, or the queued run starts during shutdown. The app
+calls ``begin_stop`` first, then stops the scheduler, then ``stop``. ``_acquire``
+re-checks the stop flag after it gets the lock for the same reason.
 #VERIFY: tests/unit/test_on_demand.py (TestShutdown).
 """
 
@@ -33,7 +48,6 @@ from __future__ import annotations
 import threading
 import time
 import uuid
-from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, Literal
@@ -44,7 +58,10 @@ from family_logistics.core.exceptions import BusinessLogicError
 from family_logistics.db.assessments import AssessmentRepository
 from family_logistics.db.school_snapshots import SchoolSnapshotRepository
 from family_logistics.domain.models import RunStatus
-from family_logistics.services.assessments import AssessmentService
+from family_logistics.services.assessments import (
+    ON_DEMAND_TRIGGER,
+    AssessmentService,
+)
 from family_logistics.services.scheduler import LOCK_WAIT
 from family_logistics.utils.logging import get_logger
 
@@ -61,14 +78,12 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-TRIGGER: Final = "on_demand"
+TRIGGER: Final = ON_DEMAND_TRIGGER
 """``analysis_run.trigger`` of a run the API starts."""
 ON_DEMAND_LOCK_WAIT: Final = LOCK_WAIT
 """How long a queued run waits for the scheduler's pipeline before it fails."""
 _POLL_SECONDS: Final = 0.25
 """Lock wait slice, so a stop is noticed within this long."""
-_REMEMBERED_FAILURES: Final = 32
-"""Failed runs with no row that ``progress`` still answers for."""
 
 RunState = Literal["queued", "running", "finished"]
 
@@ -132,7 +147,7 @@ class OnDemandService:
         lock_wait: How long a queued run waits for the pipeline lock.
     """
 
-    # Keyword-only collaborators are injected so tests can replace each one.
+    # The collaborators are injected so tests can replace each one.
     def __init__(  # noqa: PLR0913
         self,
         coordinator: PipelineCoordinator,
@@ -151,7 +166,6 @@ class OnDemandService:
         self._stopping = threading.Event()
         self._pending: str | None = None
         self._thread: threading.Thread | None = None
-        self._failed: OrderedDict[str, None] = OrderedDict()
 
     @classmethod
     def from_settings(
@@ -190,10 +204,17 @@ class OnDemandService:
         )
 
     def in_flight(self) -> bool:
-        """Report whether any run is queued or executing in this process."""
+        """Report whether a run is queued or a pipeline is executing here.
+
+        True while an on-demand run is queued, while a run executes, and while
+        any pipeline holds the shared lock (a scheduled collect, assess and
+        notify, or a purge), so a scan that is still collecting counts.
+        """
         with self._state:
             return (
-                self._pending is not None or self._coordinator.active_run_id is not None
+                self._pending is not None
+                or self._coordinator.active_run_id is not None
+                or self._coordinator.lock.locked()
             )
 
     def active_run_id(self) -> str | None:
@@ -213,8 +234,11 @@ class OnDemandService:
             if self._stopping.is_set():
                 msg = "on-demand runs are stopping"
                 raise OnDemandStoppedError(msg)
-            if self._pending is not None:
-                return OnDemandTicket(self._pending, coalesced=True)
+            pending = self._pending
+            if pending is not None and not self._coordinator.has_failed(pending):
+                # A pending run that already failed is only waiting for its
+                # thread to clear the id; joining it would hand out a dead run.
+                return OnDemandTicket(pending, coalesced=True)
             active = self._coordinator.active_run_id
             if active is not None:
                 return OnDemandTicket(active, coalesced=True)
@@ -235,26 +259,27 @@ class OnDemandService:
         Returns:
             The progress, or None when no such run is known.
         """
-        # In-memory state is read before the row: the executing mark is cleared
-        # only after the run's outcome is stored, so "not executing" plus an
-        # unfinished row means the run died.
+        # In-memory state is read before the row, and in this order: the failure
+        # memory is written before the executing mark and the pending id are
+        # cleared, so a reader that finds neither also finds the failure.
         active = self._coordinator.active_run_id
         with self._state:
             pending = self._pending
-            failed = run_id in self._failed
+        failed = self._coordinator.has_failed(run_id)
         row = self._repo.get_run(run_id)
-        if run_id == active:
-            return _running(run_id, row)
-        if run_id == pending:
-            return RunProgress(run_id, "queued")
-        if failed:
-            return RunProgress(run_id, "finished", status=RunStatus.FAILED)
-        if row is None:
+        if row is None or row.finished_at is None:
+            # A run whose row has a finish time is never live, even while the
+            # marks are still being cleared, so no caller reads "running" or
+            # "queued" for a run that has ended.
+            if run_id == active:
+                return _running(run_id, row)
+            if failed or row is not None:
+                # Remembered as failed, or never finished and not executing:
+                # the process that began the row died.
+                return _failed(run_id, row)
+            if run_id == pending:
+                return RunProgress(run_id, "queued")
             return None
-        if row.finished_at is None:
-            return RunProgress(
-                run_id, "finished", row.trigger, RunStatus.FAILED, None, row.started_at
-            )
         return RunProgress(
             run_id,
             "finished",
@@ -265,16 +290,32 @@ class OnDemandService:
             row.finished_at,
         )
 
+    def begin_stop(self) -> None:
+        """Refuse new runs and abandon a queued one, without waiting.
+
+        Call it before anything that releases the pipeline lock at shutdown (the
+        scheduler's ``stop``), so a queued run is never started by that release.
+        An executing run is not interrupted; ``stop`` waits for it.
+        """
+        with self._state:
+            self._stopping.set()
+
     def stop(self) -> None:
         """Refuse new runs, abandon a queued one and wait for an executing one.
 
         Safe to call more than once and before any request.
         """
+        self.begin_stop()
         with self._state:
-            self._stopping.set()
             thread = self._thread
         if thread is not None:
             thread.join()
+
+    def _clear_pending(self, run_id: str) -> None:
+        """Forget ``run_id`` as queued; a newer pending run is left alone."""
+        with self._state:
+            if self._pending == run_id:
+                self._pending = None
 
     def _acquire(self) -> bool:
         """Take the pipeline lock; False on timeout or when stopping."""
@@ -284,7 +325,11 @@ class OnDemandService:
             if remaining <= 0:
                 return False
             if self._coordinator.lock.acquire(timeout=min(_POLL_SECONDS, remaining)):
-                return True
+                if not self._stopping.is_set():
+                    return True
+                # The stop began while this thread waited; a lock released by
+                # the shutting-down scheduler must not start a run.
+                self._coordinator.lock.release()
         return False
 
     def _work(self, run_id: str) -> None:
@@ -297,12 +342,11 @@ class OnDemandService:
                 "on_demand.run_failed", run_id=run_id, error=type(exc).__name__
             )
         finally:
-            with self._state:
-                self._pending = None
-                if not stored:
-                    self._failed[run_id] = None
-                    while len(self._failed) > _REMEMBERED_FAILURES:
-                        self._failed.popitem(last=False)
+            # The failure is remembered before the pending id is cleared, so a
+            # reader that no longer finds the run queued finds it failed.
+            if not stored:
+                self._coordinator.remember_failed(run_id)
+            self._clear_pending(run_id)
 
     def _run_locked(self, run_id: str) -> bool:
         """Wait for the lock, then run; True when the run's outcome was stored."""
@@ -313,9 +357,22 @@ class OnDemandService:
             assessor = self._assessor_factory()
             with self._coordinator.tracking(run_id):
                 assessor.run(TRIGGER, self._school.latest(), run_id=run_id)
+                # The row is stored: the run is no longer queued. Clearing the
+                # id here, still marked as executing, leaves no moment in which
+                # a reader sees it queued or a request joins a finished run.
+                self._clear_pending(run_id)
         finally:
             self._coordinator.lock.release()
         return True
+
+
+def _failed(run_id: str, row: RunRecord | None) -> RunProgress:
+    """Describe a run that failed or died; it is never clear."""
+    if row is None:
+        return RunProgress(run_id, "finished", status=RunStatus.FAILED)
+    return RunProgress(
+        run_id, "finished", row.trigger, RunStatus.FAILED, None, row.started_at
+    )
 
 
 def _running(run_id: str, row: RunRecord | None) -> RunProgress:

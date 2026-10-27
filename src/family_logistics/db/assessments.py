@@ -165,7 +165,8 @@ class AssessmentRepository:
         Returns:
             The run ID.
         """
-        run_id = run_id or str(uuid.uuid4())
+        if run_id is None:
+            run_id = str(uuid.uuid4())
         with self._engine.begin() as connection:
             connection.execute(
                 insert(analysis_run).values(

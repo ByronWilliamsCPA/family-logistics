@@ -7,7 +7,7 @@ fictional; the assessor is a fake that stores real run rows.
 from __future__ import annotations
 
 import threading
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fl_notification_service import Clock
@@ -17,6 +17,7 @@ from fl_on_demand import (
     FakeSchool,
     NoAps,
     Notifier,
+    ProbeLock,
     StoringAssessor,
     in_thread,
     make_engine,
@@ -30,7 +31,10 @@ from family_logistics.services.on_demand import (
     OnDemandService,
     OnDemandStoppedError,
 )
-from family_logistics.services.pipeline import PipelineCoordinator
+from family_logistics.services.pipeline import (
+    REMEMBERED_FAILURES,
+    PipelineCoordinator,
+)
 from family_logistics.services.scheduler import SCAN_JOB, SchedulerService
 
 pytestmark = pytest.mark.unit
@@ -56,10 +60,45 @@ def build(engine, assessor, *, coordinator=None, **options):
 
 
 def finished(service, run_id):
-    assert wait_until(lambda: not service.in_flight()), "the run never ended"
+    def ended():
+        progress = service.progress(run_id)
+        return progress is not None and progress.state == "finished"
+
+    assert wait_until(ended), "the run never ended"
     progress = service.progress(run_id)
     assert progress is not None
     return progress
+
+
+def make_scheduler(engine, coordinator, assessor, on_run=None):
+    """A scheduler that shares the coordinator's lock and tracks its runs."""
+    return SchedulerService(
+        make_settings(),
+        engine,
+        collector=FakeCollector(on_run),
+        assessor=coordinator.tracked(assessor),
+        school=FakeSchool(),
+        notifier=Notifier(),
+        clock=Clock(),
+        scheduler=NoAps(),
+        lock=coordinator.lock,
+    )
+
+
+class RaisesWhenReleased:
+    """A scheduled assessor that raises before any run row exists."""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.run_id: str | None = None
+
+    def run(self, trigger, school=None, *, run_id=None):
+        self.run_id = run_id
+        self.started.set()
+        assert self.release.wait(JOIN_SECONDS), "the test never released the run"
+        msg = "database busy before the run began"
+        raise RuntimeError(msg)
 
 
 class TestCoalescing:
@@ -140,18 +179,7 @@ class TestCoalescing:
 class TestSharedLock:
     """One lock covers scheduled and on-demand runs, scheduler on or off."""
 
-    def scheduler(self, engine, coordinator, assessor, on_run=None):
-        return SchedulerService(
-            make_settings(),
-            engine,
-            collector=FakeCollector(on_run),
-            assessor=coordinator.tracked(assessor),
-            school=FakeSchool(),
-            notifier=Notifier(),
-            clock=Clock(),
-            scheduler=NoAps(),
-            lock=coordinator.lock,
-        )
+    scheduler = staticmethod(make_scheduler)
 
     def test_the_scheduler_uses_the_coordinator_lock(self, engine):
         coordinator = PipelineCoordinator()
@@ -303,6 +331,185 @@ class TestFailures:
         service.stop()
 
 
+class TestFailureMemory:
+    """A run id that was handed out resolves even when the run left no row."""
+
+    def test_a_joined_scheduled_run_that_fails_before_its_row_is_failed(self, engine):
+        assessor = RaisesWhenReleased()
+        service, coordinator = build(engine, assessor)
+        scheduler = make_scheduler(engine, coordinator, assessor)
+        scan, scan_result = in_thread(scheduler.run_scan)
+        assert assessor.started.wait(JOIN_SECONDS)
+        ticket = service.request()
+        assert ticket.coalesced
+        assert ticket.run_id == coordinator.active_run_id
+        assessor.release.set()
+        scan.join(JOIN_SECONDS)
+        assert [r.outcome for r in scan_result] == ["unavailable"]
+        assert AssessmentRepository(engine).get_run(ticket.run_id) is None
+        progress = service.progress(ticket.run_id)
+        assert progress is not None, "a handed-out run id must always resolve"
+        assert (progress.state, progress.status) == ("finished", RunStatus.FAILED)
+        service.stop()
+
+    def test_a_tracked_run_that_raises_is_remembered_and_the_error_passes_on(
+        self, engine
+    ):
+        coordinator = PipelineCoordinator()
+        assessor = RaisesWhenReleased()
+        assessor.release.set()
+        with coordinator.lock, pytest.raises(RuntimeError):
+            coordinator.tracked(assessor).run("daily")
+        assert coordinator.active_run_id is None
+        assert assessor.run_id is not None
+        assert coordinator.has_failed(assessor.run_id)
+
+    def test_a_tracked_run_that_succeeds_is_not_remembered_as_failed(self, engine):
+        coordinator = PipelineCoordinator()
+        assessor = StoringAssessor(engine)
+        with coordinator.lock:
+            outcome = coordinator.tracked(assessor).run("daily")
+        assert not coordinator.has_failed(outcome.run_id)
+
+    def test_the_memory_is_bounded_and_forgets_the_oldest_first(self):
+        coordinator = PipelineCoordinator()
+        for number in range(REMEMBERED_FAILURES + 1):
+            coordinator.remember_failed(f"run-{number}")
+        assert not coordinator.has_failed("run-0")
+        assert coordinator.has_failed("run-1")
+        assert coordinator.has_failed(f"run-{REMEMBERED_FAILURES}")
+
+    def test_remembering_a_run_again_keeps_it_the_newest(self):
+        coordinator = PipelineCoordinator()
+        coordinator.remember_failed("first")
+        for number in range(REMEMBERED_FAILURES - 1):
+            coordinator.remember_failed(f"run-{number}")
+        coordinator.remember_failed("first")
+        coordinator.remember_failed("last")
+        assert coordinator.has_failed("first")
+
+
+class TestProgressBranches:
+    """The answers for runs that no in-memory mark describes."""
+
+    def seed_unfinished_row(self, engine, run_id):
+        now = datetime.now(UTC)
+        AssessmentRepository(engine).begin_run(
+            "daily", now, now, now, rules_version="test", run_id=run_id
+        )
+
+    def test_an_unfinished_row_nothing_is_executing_is_a_dead_run(self, engine):
+        service, _ = build(engine, StoringAssessor(engine))
+        self.seed_unfinished_row(engine, "died-before-a-restart")
+        progress = service.progress("died-before-a-restart")
+        assert progress is not None
+        assert (progress.state, progress.status) == ("finished", RunStatus.FAILED)
+        assert progress.trigger == "daily"
+        assert progress.counts is None
+        assert progress.started_at is not None
+        assert progress.finished_at is None
+
+    def test_an_unfinished_row_that_is_executing_reads_as_running(self, engine):
+        service, coordinator = build(engine, StoringAssessor(engine))
+        self.seed_unfinished_row(engine, "executing")
+        with coordinator.lock, coordinator.tracking("executing"):
+            progress = service.progress("executing")
+        assert progress is not None
+        assert (progress.state, progress.status) == ("running", None)
+        assert progress.trigger == "daily"
+
+    def test_a_run_tracked_before_its_row_exists_reads_as_running(self, engine):
+        service, coordinator = build(engine, StoringAssessor(engine))
+        with coordinator.lock, coordinator.tracking("no-row-yet"):
+            progress = service.progress("no-row-yet")
+        assert progress is not None
+        assert (progress.state, progress.trigger) == ("running", None)
+        assert progress.started_at is None
+
+    def test_a_run_with_a_finish_time_is_never_running_while_still_marked(self, engine):
+        assessor = StoringAssessor(engine)
+        service, coordinator = build(engine, assessor)
+        with coordinator.lock:
+            outcome = assessor.run("daily")
+            with coordinator.tracking(outcome.run_id):
+                progress = service.progress(outcome.run_id)
+        assert progress is not None
+        assert (progress.state, progress.status) == ("finished", RunStatus.CLEAR)
+
+
+class TestSettling:
+    """No stale answer in the moment a run has ended but its lock is not free."""
+
+    def settle(self, engine, assessor):
+        probe = ProbeLock()
+        service, coordinator = build(engine, assessor)
+        coordinator.lock = probe
+        seen: dict[str, object] = {}
+        probe.acquire()
+        ticket = service.request()
+        assert probe.waiting.wait(JOIN_SECONDS)
+
+        def look():
+            seen["progress"] = service.progress(ticket.run_id)
+            seen["next"] = service.request()
+
+        probe.on_release("on-demand-run", look)
+        probe.release()
+        assert wait_until(lambda: "next" in seen), "the run never ended"
+        service.stop()
+        return ticket, seen
+
+    def test_a_finished_run_is_not_queued_and_is_not_joined(self, engine):
+        ticket, seen = self.settle(engine, StoringAssessor(engine))
+        progress = seen["progress"]
+        assert (progress.state, progress.status) == ("finished", RunStatus.CLEAR)
+        assert seen["next"].run_id != ticket.run_id
+        assert not seen["next"].coalesced
+
+    def test_a_failed_run_is_not_queued_and_is_not_joined(self, engine):
+        ticket, seen = self.settle(
+            engine, StoringAssessor(engine, fail_at="before_begin")
+        )
+        progress = seen["progress"]
+        assert (progress.state, progress.status) == ("finished", RunStatus.FAILED)
+        assert seen["next"].run_id != ticket.run_id
+        assert not seen["next"].coalesced
+
+
+class TestInFlight:
+    def test_idle_means_nothing_in_flight(self, engine):
+        service, _ = build(engine, StoringAssessor(engine))
+        assert not service.in_flight()
+
+    def test_a_scheduled_pipeline_that_is_still_collecting_is_in_flight(self, engine):
+        entered, release = threading.Event(), threading.Event()
+        assessor = StoringAssessor(engine)
+        service, coordinator = build(engine, assessor)
+        scheduler = make_scheduler(
+            engine,
+            coordinator,
+            assessor,
+            on_run=lambda: (entered.set(), release.wait(JOIN_SECONDS)),
+        )
+        scan, _ = in_thread(scheduler.run_scan)
+        assert entered.wait(JOIN_SECONDS)
+        assert coordinator.active_run_id is None
+        assert service.in_flight()
+        release.set()
+        scan.join(JOIN_SECONDS)
+        assert not service.in_flight()
+
+    def test_a_queued_run_is_in_flight_until_it_ends(self, engine):
+        service, coordinator = build(engine, StoringAssessor(engine))
+        coordinator.lock.acquire()
+        ticket = service.request()
+        assert service.in_flight()
+        coordinator.lock.release()
+        finished(service, ticket.run_id)
+        assert not service.in_flight()
+        service.stop()
+
+
 class TestShutdown:
     def test_stop_waits_for_the_run_that_is_executing(self, engine):
         hold = threading.Event()
@@ -332,6 +539,41 @@ class TestShutdown:
         progress = service.progress(ticket.run_id)
         assert progress is not None
         assert progress.status is RunStatus.FAILED
+
+    def test_a_queued_run_never_starts_once_the_stop_has_begun(self, engine):
+        probe = ProbeLock()
+        assessor = StoringAssessor(engine)
+        service, coordinator = build(engine, assessor)
+        coordinator.lock = probe
+        probe.acquire()
+        ticket = service.request()
+        assert probe.waiting.wait(JOIN_SECONDS), "the run never began to wait"
+        service.begin_stop()
+        probe.release()
+        assert wait_until(lambda: not service.in_flight()), "the run never ended"
+        assert assessor.run_ids == []
+        progress = service.progress(ticket.run_id)
+        assert progress is not None
+        assert progress.status is RunStatus.FAILED
+        service.stop()
+
+    def test_begin_stop_refuses_new_requests_but_does_not_wait(self, engine):
+        hold = threading.Event()
+        assessor = StoringAssessor(engine, hold=hold)
+        service, coordinator = build(engine, assessor)
+        ticket = service.request()
+        assert assessor.started.wait(JOIN_SECONDS)
+        stopper, _ = in_thread(service.begin_stop)
+        stopper.join(JOIN_SECONDS)
+        assert not stopper.is_alive(), "begin_stop waited for the run"
+        with pytest.raises(OnDemandStoppedError):
+            service.request()
+        hold.set()
+        service.stop()
+        progress = service.progress(ticket.run_id)
+        assert progress is not None
+        assert progress.status is RunStatus.CLEAR
+        assert not coordinator.lock.locked()
 
     def test_no_request_is_taken_after_stop(self, engine):
         service, _ = build(engine, StoringAssessor(engine))
