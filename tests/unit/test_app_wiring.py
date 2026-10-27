@@ -9,6 +9,7 @@ import threading
 from typing import ClassVar
 
 import pytest
+import structlog
 from fastapi.testclient import TestClient
 from fl_on_demand import (
     AUTH,
@@ -21,7 +22,9 @@ from fl_on_demand import (
     wait_until,
 )
 from fl_service import make_settings
+from structlog.testing import capture_logs
 
+from family_logistics.api import app as app_module
 from family_logistics.api.app import create_app
 from family_logistics.db.assessments import AssessmentRepository
 from family_logistics.services.on_demand import OnDemandService
@@ -163,6 +166,31 @@ class TestOnDemandGate:
             assert client.post(URL, headers=AUTH).status_code == 202
 
 
+class TestStartupLog:
+    """Enabling on-demand runs is visible in the log at startup."""
+
+    @staticmethod
+    def started(wiring, monkeypatch):
+        with capture_logs() as events:
+            monkeypatch.setattr(
+                app_module, "logger", structlog.get_logger("app-wiring-test")
+            )
+            with TestClient(wiring.app()):
+                pass
+        return [e for e in events if e["event"] == "on_demand.enabled"]
+
+    def test_enabled_runs_are_logged_once_without_secrets(self, wire, monkeypatch):
+        wiring = wire(scheduler_enabled=False, on_demand_enabled=True)
+        (event,) = self.started(wiring, monkeypatch)
+        assert event["log_level"] == "info"
+        assert event["scheduler_enabled"] is False
+        assert TOKEN not in repr(event)
+
+    def test_disabled_runs_are_not_announced(self, wire, monkeypatch):
+        wiring = wire(scheduler_enabled=False, on_demand_enabled=False)
+        assert self.started(wiring, monkeypatch) == []
+
+
 class TestSharedLock:
     def test_the_scheduler_and_the_on_demand_service_share_one_coordinator(self, wire):
         wiring = wire(scheduler_enabled=True)
@@ -212,16 +240,16 @@ class TestShutdownOrder:
     def test_on_demand_stops_even_when_the_scheduler_fails_to_start(self, wire):
         wiring = wire(scheduler_enabled=True)
         wiring.scheduler_start_error = RuntimeError("start failed")
-        app = wiring.app()
-        with pytest.raises(RuntimeError, match="start failed"), TestClient(app):
+        client = TestClient(wiring.app())
+        with pytest.raises(RuntimeError, match="start failed"), client:
             pass
         assert wiring.events == self.ORDER
 
     def test_on_demand_stops_even_when_the_scheduler_cannot_be_built(self, wire):
         wiring = wire(scheduler_enabled=True)
         wiring.scheduler_build_error = ValueError("no credentials")
-        app = wiring.app()
-        with pytest.raises(ValueError, match="no credentials"), TestClient(app):
+        client = TestClient(wiring.app())
+        with pytest.raises(ValueError, match="no credentials"), client:
             pass
         assert wiring.events == ["on_demand.stop"]
 

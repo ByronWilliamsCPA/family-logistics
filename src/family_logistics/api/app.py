@@ -24,6 +24,7 @@ from family_logistics.services.pipeline import PipelineCoordinator
 from family_logistics.services.scheduler import SchedulerService
 from family_logistics.services.school_snapshot import SchoolSnapshotIngest
 from family_logistics.services.status import StatusService
+from family_logistics.utils.logging import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
@@ -32,6 +33,8 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
     from family_logistics.core.config import Settings
+
+logger = get_logger(__name__)
 
 
 def _scheduler_lifespan(
@@ -64,6 +67,12 @@ def _scheduler_lifespan(
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         try:
+            if settings.on_demand_enabled:
+                # Logged so an operator can see from the log that the Home
+                # Assistant button can start runs (the setting ships off).
+                logger.info(
+                    "on_demand.enabled", scheduler_enabled=settings.scheduler_enabled
+                )
             if not settings.scheduler_enabled:
                 yield
                 return
@@ -100,7 +109,7 @@ def create_app(settings: Settings) -> FastAPI:
     engine = create_sqlite_engine(settings.database_path)
     # #CRITICAL: Concurrency: ONE coordinator, and so one pipeline lock, serves
     # the scheduler and the on-demand API whether or not the scheduler is enabled.
-    # #VERIFY: tests/unit/test_on_demand.py (TestSharedLock).
+    # #VERIFY: tests/unit/test_app_wiring.py (TestSharedLock).
     coordinator = PipelineCoordinator()
     on_demand = OnDemandService.from_settings(settings, engine, coordinator)
     app = FastAPI(
