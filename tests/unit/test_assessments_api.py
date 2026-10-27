@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import threading
 import uuid
+from datetime import UTC, datetime
+from typing import Literal, get_args, get_origin
 from urllib.parse import quote
 
 import pytest
@@ -22,6 +24,7 @@ from fl_on_demand import (
 )
 from sqlalchemy.exc import OperationalError
 
+from family_logistics.api.assessments import AssessmentBody
 from family_logistics.db.assessments import AssessmentRepository
 from family_logistics.domain.models import RunStatus
 
@@ -40,7 +43,7 @@ def engine(tmp_path):
 
 def make_rig(engine, **options):
     assessor = StoringAssessor(engine, **options)
-    rig = Rig(engine, assessor)
+    rig = Rig(engine, assessor, on_demand_enabled=True)
     return rig, assessor
 
 
@@ -123,6 +126,79 @@ class TestPost:
         assert response.status_code == 503
         assert response.json() == {"detail": "Service is shutting down"}
         assert assessor.run_ids == []
+
+
+class TestDisabled:
+    """``FL_ON_DEMAND_ENABLED`` is off by default: POST starts nothing."""
+
+    def disabled_rig(self, engine):
+        assessor = StoringAssessor(engine)
+        return Rig(engine, assessor), assessor
+
+    def test_the_default_configuration_is_disabled(self, engine):
+        rig, _ = self.disabled_rig(engine)
+        assert rig.settings.on_demand_enabled is False
+
+    def test_post_is_a_fixed_503_that_starts_nothing_and_allocates_no_id(
+        self, engine, monkeypatch
+    ):
+        rig, assessor = self.disabled_rig(engine)
+        threads: list[object] = []
+        original = threading.Thread.start
+
+        def counting(thread):
+            threads.append(thread)
+            original(thread)
+
+        monkeypatch.setattr(threading.Thread, "start", counting)
+        response = rig.client.post(URL, headers=AUTH)
+        assert response.status_code == 503
+        assert response.json() == {
+            "detail": "On-demand runs are disabled",
+            "code": "on_demand_disabled",
+        }
+        assert "run_id" not in response.text
+        assert not any(t.name == "on-demand-run" for t in threads)
+        assert rig.on_demand.active_run_id() is None
+        assert not rig.on_demand.in_flight()
+        assert assessor.run_ids == []
+        assert rig.runs.latest_run() is None
+
+    def test_repeated_posts_never_start_a_run(self, engine):
+        rig, assessor = self.disabled_rig(engine)
+        codes = [rig.client.post(URL, headers=AUTH).status_code for _ in range(3)]
+        assert codes == [503, 503, 503]
+        assert assessor.run_ids == []
+        assert not rig.on_demand.in_flight()
+
+    def test_the_token_is_still_checked_first(self, engine):
+        rig, _ = self.disabled_rig(engine)
+        assert rig.client.post(URL).status_code == 401
+
+    def test_the_read_routes_stay_available(self, engine):
+        rig, _ = self.disabled_rig(engine)
+        assert rig.client.get("/api/v1/status", headers=AUTH).status_code == 200
+        response = rig.client.get(f"{URL}/{UNKNOWN}", headers=AUTH)
+        assert response.status_code == 404
+
+    def test_a_run_started_elsewhere_can_still_be_read(self, engine):
+        rig, _ = self.disabled_rig(engine)
+        now = datetime.now(UTC)
+        run_id = rig.runs.begin_run(
+            "daily", now, now, now, rules_version="test", run_id=UNKNOWN
+        )
+        body = rig.client.get(f"{URL}/{run_id}", headers=AUTH).json()
+        assert body["run_id"] == UNKNOWN
+        assert body["state"] == "finished"
+
+
+class TestResponseSchema:
+    def test_the_status_values_are_exactly_the_run_statuses(self):
+        annotation = AssessmentBody.model_fields["status"].annotation
+        members = get_args(annotation)
+        literal = next(m for m in members if get_origin(m) is Literal)
+        assert set(get_args(literal)) == {status.value for status in RunStatus}
+        assert type(None) in members, "status is null until the run finishes"
 
 
 class TestGetAssessment:

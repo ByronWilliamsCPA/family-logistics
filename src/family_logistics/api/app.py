@@ -16,6 +16,7 @@ from family_logistics.core.database import create_sqlite_engine
 from family_logistics.db.assessments import AssessmentRepository
 from family_logistics.db.route_relay import RouteRelayRepository
 from family_logistics.db.school_snapshots import SchoolSnapshotRepository
+from family_logistics.db.sources import CalendarSourceRepository
 from family_logistics.middleware.correlation import CorrelationMiddleware
 from family_logistics.middleware.security import SecurityHeadersMiddleware
 from family_logistics.services.on_demand import OnDemandService
@@ -43,9 +44,12 @@ def _scheduler_lifespan(
 
     A configuration error while building it stops startup; a crash in a job
     never does. A failed ``start`` still runs ``stop``, which closes the HTTP
-    clients the service opened. Off by default. Shutdown always stops the
-    on-demand runs first (a queued one is abandoned at once, an executing one
-    is waited for), then the scheduler, so neither outlives the app.
+    clients the service opened. Off by default. Shutdown first tells the
+    on-demand service to begin stopping (a queued run is abandoned, no new one
+    is taken), then stops the scheduler, which waits for its running pipeline
+    and so releases the shared lock, and last waits for an executing on-demand
+    run, so neither outlives the app and the lock the scheduler releases never
+    starts a queued run.
 
     Args:
         settings: Application settings.
@@ -70,8 +74,15 @@ def _scheduler_lifespan(
                 scheduler.start()
                 yield
             finally:
+                # #CRITICAL: Concurrency: a run queued behind the scheduler's
+                # pipeline waits on the shared lock, and ``scheduler.stop()``
+                # releases that lock when its pipeline ends. The stop flag must
+                # already be set, or the queued run starts during shutdown.
+                # #VERIFY: tests/unit/test_app_wiring.py (TestShutdownOrder).
+                on_demand.begin_stop()
                 scheduler.stop()
         finally:
+            # Also reached when the scheduler cannot be built or started.
             on_demand.stop()
 
     return lifespan
@@ -109,10 +120,16 @@ def create_app(settings: Settings) -> FastAPI:
     register_route_relay_routes(ha_router, settings, RouteRelayRepository(engine))
     status_service = StatusService(
         settings,
-        AssessmentRepository(engine),
-        SchoolSnapshotRepository(engine),
-        on_demand,
+        runs=AssessmentRepository(engine),
+        schools=SchoolSnapshotRepository(engine),
+        sources=CalendarSourceRepository(engine),
+        on_demand=on_demand,
     )
-    register_assessment_routes(ha_router, status_service, on_demand)
+    register_assessment_routes(
+        ha_router,
+        status_service,
+        on_demand,
+        on_demand_enabled=settings.on_demand_enabled,
+    )
     app.include_router(ha_router)
     return app

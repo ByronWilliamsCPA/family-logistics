@@ -6,10 +6,18 @@ starts (or joins) an on-demand run and answers 202 with its ``run_id``, and
 on the router from ``build_ha_router``, so the bearer-token dependency applies
 at router level and cannot be forgotten here.
 
+``POST /api/v1/assessments`` is gated by ``FL_ON_DEMAND_ENABLED`` (off by
+default): while it is off the route answers a fixed 503 and starts nothing. The
+two GET routes only read, so they stay available either way.
+
 Answers carry counts, times and fixed strings only: no child names, addresses,
 calendar ids or finding text (privacy spec, section 4). An error body is a fixed
 sentence and never echoes the path or any input.
 
+#CRITICAL: Safety: a disabled POST must not allocate a run id or start a
+thread, because an enabled one makes the process a production caller of
+``AssessmentService.run`` before the M3 blockers (issues #19 to #23) close.
+#VERIFY: tests/unit/test_assessments_api.py (TestDisabled).
 #CRITICAL: Data integrity: a store error is a 503, never a card, so Home
 Assistant cannot read an unreadable store as "clear" (design rule 4).
 #VERIFY: tests/unit/test_status_api.py (TestStoreFailure).
@@ -46,6 +54,10 @@ STORE_UNAVAILABLE: Final = "Status store unavailable"
 """Fixed 503 text for a store error; it never carries SQL detail."""
 STOPPING: Final = "Service is shutting down"
 """Fixed 503 text for a request that arrives during shutdown."""
+ON_DEMAND_DISABLED: Final = "On-demand runs are disabled"
+"""Fixed 503 text for ``POST /assessments`` while ``FL_ON_DEMAND_ENABLED`` is off."""
+ON_DEMAND_DISABLED_CODE: Final = "on_demand_disabled"
+"""Machine-readable ``code`` of that 503."""
 RUN_NOT_FOUND: Final = "Run not found"
 """Fixed 404 text for an unknown run id."""
 INVALID_RUN_ID: Final = "Invalid run id"
@@ -60,16 +72,23 @@ class StatusBody(BaseModel):
 
     Attributes:
         status: ``clear``, ``attention_required``, ``incomplete`` or ``failed``.
-        reasons: Why an otherwise clear card is not: ``no_run``,
-            ``run_interrupted``, ``analysis_stale``, ``school_snapshot_missing``
-            or ``school_snapshot_stale``.
+        reasons: Every condition that limits how far the card can be trusted,
+            whatever the status: ``no_run``, ``run_interrupted``,
+            ``analysis_stale``, ``calendar_stale``, ``school_snapshot_missing``
+            or ``school_snapshot_stale``. A clear run with any reason is
+            reported ``incomplete``; the reasons of other statuses (for example
+            ``attention_required`` with ``school_snapshot_stale``) explain what
+            else is out of date.
         counts: Open findings per severity; null without a finished run.
         lifecycle: Open findings per lifecycle state; null without a run.
         last_analysis_at: When the latest finished run finished.
         last_school_sync_at: The school snapshot's fetch time.
         analysis_stale: The latest finished run is too old, or there is none.
+        calendar_stale: The calendar data the run read is too old, or no
+            calendar has ever been collected.
         school_snapshot_stale: The snapshot is too old or missing.
-        run_in_flight: A run is queued or executing.
+        run_in_flight: A run is queued, or a pipeline (a scheduled collect,
+            assess and notify, or a purge) holds the pipeline lock.
         generated_at: When this answer was built.
     """
 
@@ -80,6 +99,7 @@ class StatusBody(BaseModel):
     last_analysis_at: datetime | None
     last_school_sync_at: datetime | None
     analysis_stale: bool
+    calendar_stale: bool
     school_snapshot_stale: bool
     run_in_flight: bool
     generated_at: datetime
@@ -106,7 +126,7 @@ class AssessmentBody(BaseModel):
         state: ``queued``, ``running`` or ``finished``.
         trigger: What started the run, once it has begun.
         status: The run status, only when finished; a run that died is
-            ``failed``. Null while queued or running, never ``clear`` by default.
+            ``failed``. Null while queued or running.
         counts: Open findings per severity, for a finished run with a row.
         started_at: When it began.
         finished_at: When it finished.
@@ -115,16 +135,17 @@ class AssessmentBody(BaseModel):
     run_id: str
     state: Literal["queued", "running", "finished"]
     trigger: str | None
-    status: str | None
+    status: Literal["clear", "attention_required", "incomplete", "failed"] | None
     counts: dict[str, int] | None
     started_at: datetime | None
     finished_at: datetime | None
 
 
-def _fixed(code: int, detail: str) -> JSONResponse:
+def _fixed(code: int, detail: str, reason: str | None = None) -> JSONResponse:
     """Build an error answer with a fixed sentence and nothing from the input."""
     return JSONResponse(
-        status_code=code, content=ErrorBody(detail=detail).model_dump(exclude_none=True)
+        status_code=code,
+        content=ErrorBody(detail=detail, code=reason).model_dump(exclude_none=True),
     )
 
 
@@ -137,6 +158,7 @@ def _status_body(card: StatusCard) -> StatusBody:
         last_analysis_at=card.last_analysis_at,
         last_school_sync_at=card.last_school_sync_at,
         analysis_stale=card.analysis_stale,
+        calendar_stale=card.calendar_stale,
         school_snapshot_stale=card.school_snapshot_stale,
         run_in_flight=card.run_in_flight,
         generated_at=card.generated_at,
@@ -156,7 +178,11 @@ def _assessment_body(run: RunProgress) -> AssessmentBody:
 
 
 def register_assessment_routes(
-    router: APIRouter, status_service: StatusService, on_demand: OnDemandService
+    router: APIRouter,
+    status_service: StatusService,
+    on_demand: OnDemandService,
+    *,
+    on_demand_enabled: bool,
 ) -> None:
     """Register the status and assessment routes on the authenticated HA router.
 
@@ -164,6 +190,8 @@ def register_assessment_routes(
         router: The router from ``build_ha_router`` (token check at router level).
         status_service: Builds the status card.
         on_demand: Starts and reports on-demand runs.
+        on_demand_enabled: ``FL_ON_DEMAND_ENABLED``; False makes the POST route
+            a fixed 503 that starts nothing.
     """
     unavailable: dict[int | str, dict[str, object]] = {
         status.HTTP_503_SERVICE_UNAVAILABLE: {
@@ -190,6 +218,12 @@ def register_assessment_routes(
     )
     def post_assessment() -> AssessmentStartedBody | JSONResponse:
         """Start an on-demand run, or join the one already queued or running."""
+        if not on_demand_enabled:
+            return _fixed(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                ON_DEMAND_DISABLED,
+                ON_DEMAND_DISABLED_CODE,
+            )
         try:
             ticket = on_demand.request()
         except OnDemandStoppedError:

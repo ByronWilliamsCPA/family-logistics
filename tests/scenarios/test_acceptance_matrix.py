@@ -212,7 +212,7 @@ def test_on_demand_idempotent():
     with tempfile.TemporaryDirectory() as directory:
         engine = make_engine(Path(directory))
         assessor = StoringAssessor(engine, hold=hold)
-        rig = Rig(engine, assessor)
+        rig = Rig(engine, assessor, on_demand_enabled=True)
         try:
             first = rig.client.post("/api/v1/assessments", headers=AUTH)
             assert assessor.started.wait(JOIN_SECONDS)

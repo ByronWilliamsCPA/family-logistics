@@ -22,7 +22,8 @@ from fl_on_demand import (
 from sqlalchemy.exc import OperationalError
 
 from family_logistics.db.assessments import AssessmentRepository
-from family_logistics.domain.engine import AssessmentResult
+from family_logistics.domain.engine import AssessmentResult, failed_result
+from family_logistics.domain.events import CalendarKind
 from family_logistics.domain.lifecycle import Lifecycle, TrackedFinding
 from family_logistics.domain.models import Finding, RunStatus, Severity
 
@@ -32,6 +33,7 @@ URL = "/api/v1/status"
 PRIVATE = "private_marker_text"
 FRESH_SCHOOL = NOW - timedelta(hours=1)
 RECENT = NOW - timedelta(minutes=10)
+FRESH_CALENDAR = NOW - timedelta(minutes=5)
 
 
 @pytest.fixture
@@ -44,6 +46,7 @@ def engine(tmp_path):
 @pytest.fixture
 def rig(engine):
     rig = Rig(engine, StoringAssessor(engine))
+    rig.collect_calendar(FRESH_CALENDAR)
     yield rig
     rig.on_demand.stop()
 
@@ -145,6 +148,7 @@ class TestCard:
             "last_analysis_at",
             "last_school_sync_at",
             "analysis_stale",
+            "calendar_stale",
             "school_snapshot_stale",
             "run_in_flight",
             "generated_at",
@@ -173,25 +177,24 @@ class TestNeverClear:
         assert card(rig)["status"] == status.value
 
     def test_a_failed_run_still_shows_the_findings_it_kept_open(self, rig):
+        kept = finding()
         seed_run(
             rig,
             RunStatus.ATTENTION_REQUIRED,
             RECENT - timedelta(minutes=30),
-            findings=[(finding(), Lifecycle.NEW)],
+            findings=[(kept, Lifecycle.NEW)],
         )
         failed = rig.runs.begin_run(
             "daily", RECENT, RECENT, RECENT, rules_version="test"
         )
-        rig.runs.complete_run(
-            failed,
-            AssessmentResult(RunStatus.FAILED, (), (), (), RECENT, error="boom"),
-            RECENT,
-            (),
-        )
+        # The production failed result: previous findings stay open.
+        rig.runs.complete_run(failed, failed_result(RECENT, "boom", [kept]), RECENT, ())
         seed_school(rig)
         body = card(rig)
         assert body["status"] == "failed"
-        assert body["counts"] == {"critical": 0, "warning": 0, "incomplete": 0}
+        assert body["counts"] == {"critical": 1, "warning": 0, "incomplete": 0}
+        assert body["lifecycle"] == {"new": 1, "ongoing": 0, "regressed": 0}
+        assert sum(body["lifecycle"].values()) == sum(body["counts"].values())
 
     def test_a_clear_run_without_a_school_snapshot_is_incomplete(self, rig):
         seed_run(rig, RunStatus.CLEAR)
@@ -262,6 +265,7 @@ class TestStale:
 
     def test_the_limit_follows_the_staleness_setting(self, engine):
         rig = Rig(engine, StoringAssessor(engine), source_max_staleness_minutes=30)
+        rig.collect_calendar(NOW - timedelta(minutes=1))
         seed_run(rig, RunStatus.CLEAR, NOW - timedelta(minutes=31))
         seed_school(rig)
         assert card(rig)["analysis_stale"] is True
@@ -289,7 +293,107 @@ class TestStale:
         assert body["analysis_stale"] is True
 
 
+class TestCalendarStale:
+    """A fresh run on old calendar data is not evidence (M3 in the review)."""
+
+    def test_a_run_a_minute_old_on_data_130_minutes_old_is_not_clear(self, rig):
+        rig.collect_calendar(NOW - timedelta(minutes=130))
+        seed_run(rig, RunStatus.CLEAR, NOW - timedelta(minutes=1))
+        seed_school(rig)
+        body = card(rig)
+        assert body["status"] == "incomplete"
+        assert body["analysis_stale"] is False
+        assert body["calendar_stale"] is True
+        assert body["reasons"] == ["calendar_stale"]
+
+    def test_data_exactly_at_the_limit_is_not_stale(self, rig):
+        limit = timedelta(minutes=rig.settings.source_max_staleness_minutes)
+        rig.collect_calendar(NOW - limit)
+        seed_run(rig, RunStatus.CLEAR)
+        seed_school(rig)
+        body = card(rig)
+        assert (body["status"], body["calendar_stale"]) == ("clear", False)
+
+    def test_data_one_second_past_the_limit_is_stale(self, rig):
+        limit = timedelta(minutes=rig.settings.source_max_staleness_minutes)
+        rig.collect_calendar(NOW - limit - timedelta(seconds=1))
+        seed_run(rig, RunStatus.CLEAR)
+        seed_school(rig)
+        assert card(rig)["calendar_stale"] is True
+
+    def test_the_card_ages_with_the_clock_not_with_the_run(self, engine):
+        clock = {"now": NOW}
+        rig = Rig(engine, StoringAssessor(engine), clock=lambda: clock["now"])
+        rig.collect_calendar(NOW - timedelta(minutes=5))
+        later = NOW + timedelta(minutes=118)
+        seed_run(rig, RunStatus.CLEAR, later - timedelta(minutes=1))
+        seed_school(rig, later - timedelta(hours=1))
+        clock["now"] = NOW + timedelta(minutes=100)
+        assert card(rig)["status"] == "clear"
+        clock["now"] = later
+        stale = card(rig)
+        assert stale["analysis_stale"] is False
+        assert stale["calendar_stale"] is True
+        assert stale["status"] == "incomplete"
+        rig.on_demand.stop()
+
+    def test_no_calendar_collected_yet_is_stale_never_clear(self, engine):
+        rig = Rig(engine, StoringAssessor(engine))
+        seed_run(rig, RunStatus.CLEAR)
+        seed_school(rig)
+        body = card(rig)
+        assert (body["status"], body["calendar_stale"]) == ("incomplete", True)
+        assert body["reasons"] == ["calendar_stale"]
+        rig.on_demand.stop()
+
+    def test_a_calendar_that_never_succeeded_is_stale(self, engine):
+        rig = Rig(engine, StoringAssessor(engine))
+        rig.sources.ensure(
+            "cal-transport-sample",
+            rig.settings.caldav_transport_calendar,
+            CalendarKind.TRANSPORT,
+        )
+        seed_run(rig, RunStatus.CLEAR)
+        seed_school(rig)
+        assert card(rig)["status"] == "incomplete"
+        rig.on_demand.stop()
+
+    def test_the_oldest_calendar_decides(self, engine):
+        rig = Rig(engine, StoringAssessor(engine), caldav_calendars="Sample Extra")
+        rig.collect_calendar(NOW - timedelta(minutes=5))
+        rig.sources.ensure("cal-extra-sample", "Sample Extra", CalendarKind.TRANSPORT)
+        rig.sources.record_success("cal-extra-sample", NOW - timedelta(minutes=200))
+        seed_run(rig, RunStatus.CLEAR)
+        seed_school(rig)
+        assert card(rig)["calendar_stale"] is True
+        rig.on_demand.stop()
+
+    def test_a_calendar_the_collector_does_not_read_is_ignored(self, rig):
+        rig.sources.ensure(
+            "cal-other-sample", "Sample Unselected", CalendarKind.TRANSPORT
+        )
+        seed_run(rig, RunStatus.CLEAR)
+        seed_school(rig)
+        body = card(rig)
+        assert (body["status"], body["calendar_stale"]) == ("clear", False)
+
+    def test_an_attention_card_stays_attention_and_flags_the_calendar(self, rig):
+        rig.collect_calendar(NOW - timedelta(hours=5))
+        seed_run(rig, RunStatus.ATTENTION_REQUIRED)
+        seed_school(rig)
+        body = card(rig)
+        assert body["status"] == "attention_required"
+        assert body["reasons"] == ["calendar_stale"]
+
+
 class TestRunInFlight:
+    def test_a_pipeline_holding_the_lock_is_in_flight(self, rig):
+        seed_run(rig, RunStatus.CLEAR)
+        seed_school(rig)
+        with rig.coordinator.lock:
+            assert card(rig)["run_in_flight"] is True
+        assert card(rig)["run_in_flight"] is False
+
     def test_a_queued_on_demand_run_is_in_flight(self, rig):
         seed_run(rig, RunStatus.CLEAR)
         seed_school(rig)

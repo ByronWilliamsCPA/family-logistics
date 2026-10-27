@@ -23,7 +23,9 @@ from family_logistics.core.database import create_sqlite_engine
 from family_logistics.db import migrations_api
 from family_logistics.db.assessments import AssessmentRepository
 from family_logistics.db.school_snapshots import SchoolSnapshotRepository
+from family_logistics.db.sources import CalendarSourceRepository
 from family_logistics.domain.engine import AssessmentResult
+from family_logistics.domain.events import CalendarKind
 from family_logistics.domain.models import RunStatus
 from family_logistics.services.assessments import RunOutcome
 from family_logistics.services.collector import CollectionRun
@@ -217,26 +219,46 @@ class Rig:
         status: The status service.
         runs: The run repository.
         schools: The school snapshot store.
+        sources: The calendar source store.
         settings: The settings the app was built with.
     """
 
-    def __init__(self, engine, assessor, *, clock=None, **settings) -> None:
-        self.settings = make_settings(ha_token=TOKEN, **settings)
+    def __init__(
+        self, engine, assessor, *, clock=None, on_demand_enabled=False, **settings
+    ) -> None:
+        self.settings = make_settings(
+            ha_token=TOKEN, on_demand_enabled=on_demand_enabled, **settings
+        )
         self.coordinator = PipelineCoordinator()
         self.runs = AssessmentRepository(engine)
         self.schools = SchoolSnapshotRepository(engine)
+        self.sources = CalendarSourceRepository(engine)
         self.on_demand = OnDemandService(
             self.coordinator, lambda: assessor, FakeSchool(), self.runs
         )
         self.status = StatusService(
             self.settings,
-            self.runs,
-            self.schools,
-            self.on_demand,
+            runs=self.runs,
+            schools=self.schools,
+            sources=self.sources,
+            on_demand=self.on_demand,
             clock=clock or (lambda: NOW),
         )
         router = build_ha_router(self.settings, throttle=HaAuthThrottle())
-        register_assessment_routes(router, self.status, self.on_demand)
+        register_assessment_routes(
+            router,
+            self.status,
+            self.on_demand,
+            on_demand_enabled=self.settings.on_demand_enabled,
+        )
         app = FastAPI()
         app.include_router(router)
         self.client = TestClient(app, client=("192.0.2.1", 50000))
+
+    def collect_calendar(self, collected_at: datetime) -> None:
+        """Record a complete collection of the transport calendar at that time."""
+        calendar_id = "cal-transport-sample"
+        self.sources.ensure(
+            calendar_id, self.settings.caldav_transport_calendar, CalendarKind.TRANSPORT
+        )
+        self.sources.record_success(calendar_id, collected_at)
