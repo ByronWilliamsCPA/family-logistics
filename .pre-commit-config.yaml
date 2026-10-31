@@ -165,7 +165,7 @@ repos:
         stages: [pre-commit]
 
   - repo: https://github.com/python-jsonschema/check-jsonschema
-    rev: 0494aa7fa1314e98913a41227d8f0a515b2c1049  # 0.38.2  # pragma: allowlist secret
+    rev: a76b92851fc9eede9f9bc4073eb55202f34eb0df  # 0.39.0  # pragma: allowlist secret
     hooks:
       - id: check-github-workflows
         stages: [pre-commit]
@@ -222,7 +222,7 @@ repos:
   # Markdown and house style
   # ============================================================================
   - repo: https://github.com/igorshubovych/markdownlint-cli
-    rev: 5b5dddc4fb0f83c3ea1fc5616fa63e115dce83e0  # v0.49.1  # pragma: allowlist secret
+    rev: cbcdc463be5464e25e3e955a511599a67b9b987f  # v0.50.0  # pragma: allowlist secret
     hooks:
       - id: markdownlint
         stages: [pre-commit]
