@@ -23,7 +23,7 @@ jobs:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_repository.full_name == github.repository
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-qlty-coverage.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-qlty-coverage.yml@82ce497cae146787ea65bf892aedfe3262a4638e  # main
     permissions:
       contents: read
       actions: read

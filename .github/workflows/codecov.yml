@@ -30,7 +30,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-codecov.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-codecov.yml@82ce497cae146787ea65bf892aedfe3262a4638e  # main
     with:
       artifact-name: 'coverage-reports'
       coverage-files: '*.xml'

@@ -62,7 +62,7 @@ permissions:
 jobs:
   image:
     name: Build Image
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-docker.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-docker.yml@82ce497cae146787ea65bf892aedfe3262a4638e  # main
     permissions:
       contents: read
       packages: write
