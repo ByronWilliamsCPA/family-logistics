@@ -33,7 +33,7 @@ jobs:
       contents: read
       pages: write
       id-token: write
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-docs.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-docs.yml@82ce497cae146787ea65bf892aedfe3262a4638e  # main
     with:
       python-version: '3.12'
       # Build-only until GitHub Pages is enabled for the repository (an admin

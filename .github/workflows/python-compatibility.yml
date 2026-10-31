@@ -37,7 +37,7 @@ jobs:
     name: Python Compatibility Matrix
     permissions:
       contents: read
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-compatibility.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-compatibility.yml@82ce497cae146787ea65bf892aedfe3262a4638e  # main
     with:
       # requires-python is >=3.12,<3.14; the app ships as a Linux container.
       python-versions: '["3.12", "3.13"]'

@@ -35,7 +35,7 @@ permissions:
 jobs:
   security:
     name: Security Scan
-    uses: ByronWilliamsCPA/.github/.github/workflows/python-security-analysis.yml@74cfc8e9d1ea1f6babc40bea102b3071af620942  # main
+    uses: ByronWilliamsCPA/.github/.github/workflows/python-security-analysis.yml@82ce497cae146787ea65bf892aedfe3262a4638e  # main
     permissions:
       contents: read
       pull-requests: read
