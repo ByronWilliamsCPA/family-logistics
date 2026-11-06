@@ -149,7 +149,7 @@ repos:
   # Conventional Commits Enforcement
   # ============================================================================
   - repo: https://github.com/compilerla/conventional-pre-commit
-    rev: 91ab4bf57e58b32adf1a122681f6ebe164d081c8  # v4.4.0  # pragma: allowlist secret
+    rev: 33b50eb042bee26eac0ee96ad84aa9c1b4dccdd8  # v4.5.0  # pragma: allowlist secret
     hooks:
       - id: conventional-pre-commit
         stages: [commit-msg]
