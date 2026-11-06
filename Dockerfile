@@ -23,7 +23,7 @@
 # Digests refreshed 2026-10-21 (3.12-debian13-dev / 3.12-debian13) for fixed
 # HIGH CVEs in sqlite, openssl and util-linux.
 # -----------------------------------------------------------------------------
-FROM ghcr.io/byronwilliamscpa/dhi-python:3.12-debian13-dev@sha256:0fcab0988969f71b4f9c37bf2aba768b5717d1104a3f24b0222fecd4cc3f5b6d AS builder
+FROM ghcr.io/byronwilliamscpa/dhi-python:3.12-debian13-dev@sha256:5c375e646798a76f53ac1de460603494521767a5c5d209e1de01f2e857395515 AS builder
 
 WORKDIR /build
 COPY --from=ghcr.io/astral-sh/uv:0.8.17@sha256:e4644cb5bd56fdc2c5ea3ee0525d9d21eed1603bccd6a21f887a938be7e85be1 /uv /usr/local/bin/uv
