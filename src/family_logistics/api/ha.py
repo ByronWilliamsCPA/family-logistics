@@ -353,8 +353,10 @@ def _client_key(request: Request) -> str:
     # a proxy every client would share one throttle bucket.
     # #VERIFY: tests/unit/test_app_cli_config.py asserts serve passes
     # proxy_headers=False; if HA is ever routed through the proxy, key on the
-    # trusted-proxy client IP (as the security middleware does) instead of
-    # request.client.host, and do not re-enable uvicorn proxy headers for it.
+    # client IP the trusted proxy reports instead of request.client.host (no
+    # such code exists yet: middleware/security.py adds headers and CORS only,
+    # and FL_PROXY_TRUSTED_CIDRS is not read), and do not re-enable uvicorn
+    # proxy headers for it.
     client = request.client
     return client.host if client is not None else UNKNOWN_CLIENT
 

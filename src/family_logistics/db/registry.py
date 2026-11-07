@@ -606,7 +606,7 @@ class RegistryStore:
         Args:
             item: The passenger.
             inactive_since: Day the passenger became inactive (drives the
-                90-day removal rule); ignored while active.
+                180-day removal rule); ignored while active.
         """
         values = {
             "passenger_id": item.passenger_id,
