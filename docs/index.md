@@ -48,7 +48,7 @@ docker pull ghcr.io/byronwilliamscpa/family-logistics:<tag>
 - [Configuration](guides/configuration.md): every `FL_` setting
 - [Usage](guides/usage.md): running the CLI and API locally
 - [Runbook](runbook.md): operating, rotating keys and restoring
-- [Architecture decisions](ADRs/README.md): ADRs 0001 to 0007
+- [Architecture decisions](ADRs/README.md): ADRs 0001 to 0008
 - [Privacy and retention](privacy/privacy-and-retention-spec.md): handling of
   children's and other families' data
 

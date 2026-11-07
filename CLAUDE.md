@@ -50,7 +50,7 @@ passed to the template team out-of-band.
 iCloud ride commitments before a child is stranded.
 **Author**: Byron Williams
 **Repository**: <https://github.com/ByronWilliamsCPA/family-logistics>
-**Status**: between M2 and M3 (as of 2026-10-26). Implemented: the domain
+**Status**: between M2 and M3 (as of 2026-11-07). Implemented: the domain
 core, the read-only CalDAV collector, the rule engine and the assessment
 orchestrator, the SQLite schema with Alembic migrations and an append-only
 audit log, the Apprise client and notification service, structured logging and
@@ -118,7 +118,8 @@ Never commit directly to `main`. Branch first: `feat/`, `fix/`, `docs/`,
 `refactor/`, `perf/`, `test/`, `build/`, `ci/`, `chore/`, followed by a
 descriptive slug. Commits use Conventional Commits (types: feat, fix, docs,
 style, refactor, perf, test, build, ci, chore, revert); python-semantic-release
-derives versions and the changelog from them.
+reads them to derive versions. `release.yml` delegates the release steps to the
+organization's reusable workflow.
 
 ## Quick Start Commands
 
@@ -134,7 +135,7 @@ uv run pip-audit
 uv run pre-commit run --all-files
 uv run mkdocs build --strict               # docs
 
-uv run family-logistics --help             # serve | migrate | verify-db | healthcheck | config
+uv run family-logistics --help             # serve | migrate | verify-db | healthcheck | config | registry | collect
 uv run family-logistics migrate            # schema to head (serve refuses an old schema)
 ```
 
@@ -149,7 +150,8 @@ src/family_logistics/
 ├── domain/        # models, events, parser, confirmation, change_impact,
 │                  # capacity, stop_order, registry, rules, run_status
 ├── middleware/    # correlation IDs, security headers
-├── services/      # collector, assessments, school_snapshot; scheduler, notifications (M1-M3)
+├── services/      # collector, assessments, scheduler, notifications, on_demand, pipeline, status,
+│                  # school_snapshot, wiring, registry_seed
 ├── utils/         # structured logging
 └── cli.py
 tests/
@@ -210,4 +212,4 @@ Always skip `CLAUDE.md`, `REUSE.toml`, `docs/template_feedback.md`,
 
 ---
 
-**Last Updated**: 2026-10-26
+**Last Updated**: 2026-11-07
