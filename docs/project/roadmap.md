@@ -144,7 +144,7 @@ that must land before go-live, listed in Step 3.
 | #6 `feat/m2-engine` | Merged | M2 engine: location timeline, coverage, driver and feasibility rules, finding lifecycle, `assess()` |
 | #17 `feat(assessments)` | Merged | Assessment orchestrator: collected rows to parsed rides, `assess()` and a stored run; run and finding persistence; the previous run's rides persisted (migration `0003_trip_snapshot`) so PASS-003 and CONF-008 work across runs. A run that raises is stored as failed and never reads as clear. |
 | #18 `docs(roadmap)` | Merged | The Path to MVP section of this page |
-| #26 `fix(assessments)` | Merged | A run without a school snapshot is never CLEAR (DATA-011 makes it INCOMPLETE) instead of silently skipping school checks. |
+| #26 `fix(assessments)` | Merged | A run without a school snapshot is never CLEAR (DATA-011 prevents CLEAR) instead of silently skipping school checks. |
 | #8, #9, #10, #11, #15, #16, #31 Renovate | Merged | Dependency hygiene (base image digest, GitHub Actions, pre-commit hooks, validate-pyproject, the lockfile). #11 is a major bump of `pre-commit-hooks` (v6 drops two hooks) and `conventional-pre-commit` (v4 skips merge commits by default). |
 
 Open items that block the M0, M1 and M2 exit gates:
