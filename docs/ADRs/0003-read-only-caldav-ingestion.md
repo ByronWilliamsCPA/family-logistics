@@ -73,6 +73,26 @@ analysis and could show green.
    diagnosis, then cleared; the `summary`, normalised records and raw hash
    persist (see the privacy spec, section 7).
 
+## Implementation note (2026-11-07)
+
+This note corrects facts in Decisions 1 and 4 to match the code. It changes no decision and no status.
+
+- **Decision 1, exception name.** The exception is `ReadOnlyViolationError`
+  (`adapters/caldav/readonly_transport.py`), not `WriteAttemptBlocked`; that name exists only in the M0 scripts under
+  `tools/m0/`.
+- **Decision 1, allow-list.** The allowed methods are `PROPFIND`, `REPORT`, `GET`, `HEAD` and `OPTIONS`
+  (`ALLOWED_METHODS` includes `HEAD`, a read-only method). `tests/unit/test_readonly_transport.py` asserts that
+  twelve methods are refused, not nine: `PUT`, `DELETE`, `MOVE`, `COPY`, `POST`, `PATCH`, `PROPPATCH`, `MKCALENDAR`,
+  `MKCOL`, `LOCK`, `UNLOCK` and `ACL`. No test sends `HEAD`.
+- **Decision 1, extra checks.** The same wrapper also refuses a request, before any network I/O, whose URL is not HTTPS
+  or embeds credentials (`InsecureTransportError`), and one whose host, or the host of a redirect hop, is outside the
+  allow-list (`DisallowedHostError`). The list is `FL_CALDAV_ALLOWED_HOSTS` and defaults to `icloud.com`.
+- **Decision 4, window.** No run extends the window to the next Monday to Sunday. The standalone collector uses
+  `FL_COLLECT_DAYS_BACK` (default 2) and `FL_COLLECT_DAYS_AHEAD` (default 14). Every assessment run, weekly included,
+  evaluates the stored events from today through `FL_COLLECT_DAYS_AHEAD` days ahead
+  (`collection_window(now, zone, 0, ...)` in `services/assessments.py`). A weekly run therefore covers the next Monday
+  to Sunday only because the 14-day default reaches that far; a smaller `FL_COLLECT_DAYS_AHEAD` shortens it.
+
 ## Alternatives Considered
 
 | Option | Assessment |
