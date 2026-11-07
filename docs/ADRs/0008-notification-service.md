@@ -914,6 +914,14 @@ Six PRs, each with its own tests and kept reviewable (about 500 lines or fewer w
 6. **Post-gate, before production**: reminders, a per-tag delivery-failure counter and ops alert, scheduler ops events
    (`report_ops`), mode-switch burst handling, an urgent cooldown for flapping findings.
 
+**Implementation status (2026-11-07).** Items 2 to 5 merged as #35 to #38, and the scheduler PR that item 5 leaves to
+wire the service merged as #40 (`services/scheduler.py` calls `dispatch` and `dispatch_unavailable`; the scheduler ships
+disabled, `FL_SCHEDULER_ENABLED=false`, and notifications default to shadow mode). So "`services/notifications.py` is a
+stub" (Problem Statement) and "the service sends nothing until the scheduler PR calls `dispatch`" (Consequences,
+Neutral 2) are design-time statements that no longer describe the code, and nothing sends while the scheduler is off.
+Item 6 is not built: reminders, the per-tag delivery-failure counter and ops alert, `report_ops`, mode-switch burst
+handling and the urgent cooldown. This note changes no decision.
+
 ### Follow-up edits
 
 PR 1 makes the first two; PR 5 makes the rest. This revision makes none of them.

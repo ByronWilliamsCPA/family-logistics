@@ -415,6 +415,19 @@ Routing ships as three stacked PRs:
    /api/v1/route-requests` returns an empty list.
 3. **PR 3:** `google_routes` and the monthly budget counter.
 
+**Implementation note (2026-11-07).** This note corrects two design-time statements above; it changes no decision and
+no status.
+
+- The statement that no job calls the two purge functions yet is out of date. The scheduler's nightly purge job calls
+  `purge_expired_route_requests` and `purge_expired_route_cache` (`_PURGES` in `services/scheduler.py`), but only while
+  `FL_SCHEDULER_ENABLED=true`, which ships `false`.
+- The statement that nothing queues a request until a service builds the provider is out of date. The scheduler
+  (`services/scheduler.py`) and the on-demand run (`services/on_demand.py`) call `build_route_provider`. Both are behind
+  flags that ship off (`FL_SCHEDULER_ENABLED=false`, `FL_ON_DEMAND_ENABLED=false`), so nothing queues a request in a
+  deployment until the owner enables one of them. The scheduler also refuses to start unless `FL_ROUTE_PROVIDER` is
+  `ha_relay`.
+- PR 3 is still open: `google_routes` raises `RouteProviderUnavailableError` and there is no budget counter.
+
 ## Alternatives Considered
 
 | Option | Assessment |

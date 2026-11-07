@@ -72,6 +72,13 @@ initiates a connection to Home Assistant:
   registry's location records, which are the only home of coordinates (privacy
   spec).
 
+**Implementation note (2026-11-07).** Every route in the table above is now implemented: `GET /healthz`, the snapshot
+ingest (#27 to #29), the route relay routes (#32), and the status and assessment routes (#41 and #42, M4;
+`api/assessments.py`). This corrects the "Implementation Target" line, which predates the M4 merges. The on-demand
+route `POST /api/v1/assessments` ships refused (a 503) until `FL_ON_DEMAND_ENABLED=true`. This note changes no decision
+and no status: the ADR stays `proposed` until the owner accepts it. The routes are listed in the
+[API reference](../api-reference.md).
+
 ## Snapshot Contract
 
 Implemented for `POST /api/v1/ingest/ha-snapshot`; the full guide, with an

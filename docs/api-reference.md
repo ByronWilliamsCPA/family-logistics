@@ -11,6 +11,21 @@ tags:
 
 Complete API documentation for Family Logistics.
 
+## Endpoints
+
+| Route | Auth | Purpose | Documented in |
+|-------|------|---------|---------------|
+| `GET /healthz` | none | liveness and database reachability | [Runbook, Health](runbook.md#health) |
+| `POST /api/v1/ingest/ha-snapshot` | `FL_HA_TOKEN` bearer | Home Assistant pushes the school snapshot | [School snapshot guide](guides/ha-school-snapshot.md) |
+| `GET /api/v1/route-requests` | `FL_HA_TOKEN` bearer | Home Assistant polls for legs to price | [Route relay guide](guides/ha-route-relay.md) |
+| `POST /api/v1/route-results` | `FL_HA_TOKEN` bearer | Home Assistant posts the travel times | [Route relay guide](guides/ha-route-relay.md) |
+| `GET /api/v1/status` | `FL_HA_TOKEN` bearer | family-wide status card | [below](#get-apiv1status) |
+| `POST /api/v1/assessments` | `FL_HA_TOKEN` bearer | start an on-demand run (ships refused, a 503) | [below](#post-apiv1assessments) |
+| `GET /api/v1/assessments/{run_id}` | `FL_HA_TOKEN` bearer | poll one run | [below](#get-apiv1assessmentsrun_id) |
+
+Every route except `/healthz` is for Home Assistant only; the app never initiates a connection to Home Assistant
+([ADR-007](ADRs/0007-ha-initiated-data-exchange.md)).
+
 ## Status and assessment routes
 
 Three routes on the Home Assistant router, all behind the `FL_HA_TOKEN` bearer
@@ -85,9 +100,18 @@ work, and the runbook says what to watch.
 
 ### `GET /api/v1/assessments/{run_id}`
 
-Reports one run: `state` is `queued` (waiting for the pipeline lock), `running`
-or `finished`. `status`, `counts` and `finished_at` are set only once finished,
-so a queued or running run never reads as clear. A run that raised, never got
+| Field | Meaning |
+|-------|---------|
+| `run_id` | the run |
+| `state` | `queued` (waiting for the pipeline lock), `running` or `finished` |
+| `trigger` | what started the run, once it has begun; otherwise `null` |
+| `status` | the run status (`clear`, `attention_required`, `incomplete` or `failed`), only when finished; `null` while queued or running |
+| `counts` | open findings per severity, for a finished run that has a row; otherwise `null` |
+| `started_at` | when the run began; `null` until it has |
+| `finished_at` | when the run finished; `null` until it has |
+
+`status`, `counts` and `finished_at` are set only once finished, so a queued or running run never reads as
+clear. A run that raised, never got
 the lock within 30 minutes, or died with its process is `finished` with status
 `failed`. An unknown id is a 404 (`Run not found`); a value that is not a run
 id (a lower-case UUID) is a 422 (`Invalid run id`); a store error is a 503.
