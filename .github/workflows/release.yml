@@ -1,10 +1,11 @@
 ---
 # Semantic Release
 # After CI passes on main, python-semantic-release derives the next version
-# from Conventional Commits, tags it and writes the GitHub release and
-# changelog. A released version then publishes the container image with that
-# version as an extra tag (container-image.yml). Nothing is published to PyPI:
-# the app ships only as a GHCR image.
+# from Conventional Commits. The release steps run in the organization's
+# reusable release workflow, which this file pins by commit SHA. When a release
+# is made, the container image is published with that version as an extra tag
+# (container-image.yml). Nothing is published to PyPI: the app ships only as a
+# GHCR image.
 #
 # Triggered by workflow_run rather than push: the reusable workflow re-attaches
 # HEAD to the branch only for workflow_run events, and python-semantic-release

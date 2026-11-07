@@ -15,19 +15,19 @@ tags:
 src/family_logistics/
 ├── adapters/
 │   ├── caldav/        # read-only HTTP transport (rejects write methods)
-│   ├── routing/       # RouteProvider protocol and the static provider
+│   ├── routing/       # RouteProvider protocol, null and static providers, the ha_relay provider and the build_route_provider factory
 │   ├── apprise/       # notification client (dedicated fl-* tags only)
 │   ├── home_assistant/
 │   └── llama_cpp/     # narrative LLM client (M5)
-├── api/               # FastAPI app, /healthz, Home Assistant routes (snapshot ingest, route relay; M4 adds the rest)
+├── api/               # FastAPI app, /healthz, Home Assistant routes (snapshot ingest, route relay, status and assessments; M4 adds the registry UI)
 ├── core/              # settings, address encryption, SQLite, exceptions
 ├── db/                # table definitions, Alembic migrations, audit log
 ├── domain/            # models, notes parser, confirmation codes, change
 │                      # impact, capacity, stop ordering, rules, run status
 ├── middleware/        # correlation IDs, security headers
-├── services/          # collector, scheduler, assessments, notifications
+├── services/          # collector, scheduler, assessments, notifications, on_demand, pipeline, status, school_snapshot, wiring, registry_seed
 ├── utils/             # structured logging
-└── cli.py             # serve, migrate, verify-db, healthcheck, config
+└── cli.py             # serve, migrate, verify-db, healthcheck, config, registry, collect
 ```
 
 ## Design principles

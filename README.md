@@ -114,6 +114,8 @@ private deployment repository.
 | `family-logistics verify-db PATH` | Read-only integrity and schema-revision check of a database file (for restored backups) |
 | `family-logistics collect discover` | List the collector account's calendars by opaque ID (copy IDs into the private registry seed); flags any calendar shared with write access |
 | `family-logistics collect --once` | Read the configured calendars once and store their occurrences (prints IDs and counts only) |
+| `family-logistics registry load [PATH] [--dry-run]` | Validate the private registry seed and apply it in one audited transaction (`PATH` defaults to `FL_REGISTRY_SEED`) |
+| `family-logistics registry show` | List people, passengers, places, vehicles and calendars (never addresses) |
 | `family-logistics healthcheck` | Probe the local `/healthz`; used by the container healthcheck |
 | `family-logistics config` | Print non-secret configuration |
 
@@ -122,14 +124,14 @@ private deployment repository.
 ```text
 src/family_logistics/
 ├── adapters/      # caldav (read-only transport), routing, apprise, home_assistant, llama_cpp
-├── api/           # FastAPI app, /healthz, Home Assistant routes (snapshot ingest, route relay; M4 adds the rest)
+├── api/           # FastAPI app, /healthz, Home Assistant routes (snapshot ingest, route relay, status and assessments; M4 adds the registry UI)
 ├── core/          # settings, crypto (address encryption), database, exceptions
 ├── db/            # table definitions, Alembic migrations, audit log repository
 ├── domain/        # models, notes parser, confirmation, change impact, rules, run status
 ├── middleware/    # correlation IDs, security headers
-├── services/      # collector, scheduler, assessments, notifications (M1 to M3)
+├── services/      # collector, scheduler, assessments, notifications, on_demand, pipeline, status, school_snapshot, wiring, registry_seed
 └── utils/         # structured logging
-tests/             # unit/ and scenarios/ (acceptance matrix, Friday regression)
+tests/             # unit/, integration/ and scenarios/ (acceptance matrix, Friday regression); fixtures/synthetic
 tools/m0/          # M0 discovery checks
 docs/              # MkDocs site: guides, ADRs, privacy spec, runbook
 ```
@@ -139,7 +141,7 @@ docs/              # MkDocs site: guides, ADRs, privacy spec, runbook
 | Document | Purpose |
 |----------|---------|
 | [Documentation site](https://byronwilliamscpa.github.io/family-logistics/) | Guides, ADRs and runbook |
-| [Architecture decisions](docs/ADRs/README.md) | ADRs 0001 to 0007 |
+| [Architecture decisions](docs/ADRs/README.md) | ADRs 0001 to 0008 |
 | [Privacy and retention spec](docs/privacy/privacy-and-retention-spec.md) | Handling of minors' and other families' data |
 | [Runbook](docs/runbook.md) | Operating, rotating keys and restoring |
 | [M0 validation kit](tools/m0/README.md) | Discovery checks with scripts and protocols |
@@ -157,7 +159,8 @@ uv run pre-commit run --all-files
 ```
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/);
-python-semantic-release derives versions and the changelog from them.
+python-semantic-release reads them to derive versions. `release.yml` delegates the release
+steps to the organization's reusable workflow.
 
 ## Security
 

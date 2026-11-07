@@ -398,7 +398,7 @@ Your project includes several GitHub Actions workflows:
 | PR Validation | `pr-validation.yml` | Conventional Commits PR title check and an advisory documentation link check |
 | OpenSSF Scorecard | `scorecard.yml` | Supply chain security assessment |
 | SBOM & Security Scan | `sbom.yml` | Software Bill of Materials generation |
-| Release | `release.yml` | Semantic versioning, changelog and the GHCR container image |
+| Release | `release.yml` | Semantic versioning and the GHCR container image |
 | Documentation | `docs.yml` | Build MkDocs (deploy to GitHub Pages stays off until Pages is enabled) |
 | REUSE Compliance | `reuse.yml` | License compliance checking |
 | SonarCloud | `sonarcloud.yml` | Code quality analysis |
@@ -613,10 +613,11 @@ reuse addheader --license MIT --copyright "Byron Williams" <file>
 
 ### Release Process
 
-Releases are automated. python-semantic-release reads Conventional Commit
-messages on `main`, bumps the version, updates `CHANGELOG.md`, tags the release
-and triggers the container image build. Do not edit the version or changelog
-by hand.
+python-semantic-release reads Conventional Commit messages on `main` to derive
+the next version, and `release.yml` triggers the container image build when a
+release is made. The release steps themselves run in the organization's
+reusable release workflow, which `release.yml` pins by commit SHA; read that
+workflow for what it commits or publishes.
 
 ### Dependency Updates
 
