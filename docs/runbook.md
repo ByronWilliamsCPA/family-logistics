@@ -23,9 +23,12 @@ The container runs one process with one SQLite writer.
   `family-logistics serve`. The process refuses to start (exit 2) when
   `FL_HA_TOKEN` is missing or shorter than 32 characters, when `FL_DATA_KEY`,
   `FL_AUDIT_KEY` or `FL_APPRISE_URL` is missing in production mode, when
-  `FL_SCHEDULER_ENABLED=true` without CalDAV credentials or with
-  `FL_CHANGE_SCAN_MINUTES` of 15 or less, when the schema is behind
-  head (without `--upgrade-db`), when the schema is newer than the image (see
+  `FL_SCHEDULER_ENABLED=true` without CalDAV credentials, with
+  `FL_CHANGE_SCAN_MINUTES` of 15 or less, with `FL_ROUTE_PROVIDER` set to
+  anything other than `ha_relay`, or with an `FL_DAILY_CRON` or `FL_WEEKLY_CRON`
+  that is not a valid five-field cron, never fires, or gives the day of week as
+  a number instead of a name (see [Scheduler](#scheduler)), when the schema is
+  behind head (without `--upgrade-db`), when the schema is newer than the image (see
   [Upgrading the image](#upgrading-the-image)), or when a setting fails
   validation; read the startup error and fix it. A refused start lists every
   problem it found and never creates or migrates the database.
@@ -256,6 +259,20 @@ daily status and weekly report arrive, that no `dispatch_failed` or `crashed`
 outcome repeats, and that no push would have disturbed quiet hours. Switch to
 `production` only with both parents' approval ([Notification modes](#notification-modes)).
 
+Keep an evidence log for the gate: one row per run that ended `failed` or
+`incomplete` during the 7 days. The table below is a blank template with
+placeholder values only. The filled log lives in the private deployment
+repository, never here. A day counts toward the 7 only once issues #19 to #23
+are closed. A table with rows does not by itself meet the gate: the owner
+decides whether the soak passed.
+
+| Run id | Trigger | Status | Rule ids seen | Cause class | Explained by |
+|--------|---------|--------|---------------|-------------|--------------|
+| `<run id>` | scan, daily, weekly or on-demand | `failed` or `incomplete` | for example DATA-011, ROUTE-010, CAP-014 | for example stale source, route miss, run raised | `<role>` on `<date>` |
+
+A day with no failed or incomplete run still needs its ticks checked as above;
+an empty log is not evidence that nothing was missed.
+
 ## Rotating secrets
 
 ### `FL_HA_TOKEN`
@@ -338,7 +355,15 @@ deployment. To restore:
    upgraded by `serve --upgrade-db` at start. A newer revision needs the newer
    image.
 4. Start the container and confirm `/healthz` returns `200`.
-5. Run an on-demand assessment and confirm the status card is not stale.
+5. Run an assessment and confirm `GET /api/v1/status` is not stale. With
+   `FL_ON_DEMAND_ENABLED=true`, press the button (`POST /api/v1/assessments`),
+   then read the card. With it off, that request is refused with a 503
+   (`on_demand_disabled`) and nothing runs; the card then stays
+   `analysis_stale` until the scheduler (`FL_SCHEDULER_ENABLED=true`) completes
+   a scan. `collect --once` alone only refreshes the calendar data (it clears
+   `calendar_stale`, not `analysis_stale`), so a deployment with both flags off
+   cannot show a fresh card: check that `collect --once` exits 0 and treat the
+   stale card as expected, not as clear.
 
 Test a restore at least monthly.
 

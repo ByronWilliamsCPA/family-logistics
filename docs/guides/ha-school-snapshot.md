@@ -464,7 +464,8 @@ zones are never stored. Each accepted post, including an identical re-post
 (`unchanged`), writes one audit row whose hashed state holds counts, freshness and the
 `location_id`s of schools without days only. Every ingest replaces all school-day rows, so past days leave
 the table at the next push; days that ended more than 30 days ago are deleted
-by a purge that has no caller until the scheduler lands (M3; proposed, see the
+by the scheduler's nightly purge (03:30 local, and only while
+`FL_SCHEDULER_ENABLED=true`; the 30 day period is proposed, see the
 [privacy spec](../privacy/privacy-and-retention-spec.md)). When retention
 purges rows, the stored day count and content hash are updated with them, so a
 re-post of the purged snapshot answers 409 rather than "unchanged".
@@ -492,5 +493,5 @@ clear.
 
 Roadmap:
 
-- **M3 (scheduler)**: every scheduled run passes `school=repo.latest()`.
+- **M3 (scheduler, built)**: every scheduled run passes `school=repo.latest()`.
 - **M4 (on-demand API, built)**: every on-demand run passes `school=repo.latest()`; `GET /api/v1/status` reports the snapshot's fetch time and flags it stale after 26 hours.

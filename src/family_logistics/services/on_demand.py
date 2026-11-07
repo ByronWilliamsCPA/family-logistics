@@ -1,10 +1,7 @@
 """On-demand assessment runs for the Home Assistant button (ADR 0007).
 
-Nothing calls this module yet: the status and assessment routes and the
-application wiring that start it arrive in the next pull request, so it is
-exercised only by its tests until then.
-
-``POST /api/v1/assessments`` calls ``OnDemandService.request``, which answers
+``POST /api/v1/assessments`` (``api/assessments.py``; the service is built and
+wired in ``api/app.py``) calls ``OnDemandService.request``, which answers
 at once with a run id and does the work on one background thread. The id is
 allocated before the run exists (``AssessmentRepository.begin_run`` accepts it),
 so the caller can poll ``progress`` while the run waits for the pipeline lock.
@@ -41,7 +38,7 @@ TestShutdown).
 #ASSUME: Concurrency: one process serves the API, so the in-memory ``_pending``
 id and the coordinator's lock describe every run this app starts.
 #VERIFY: tests/unit/test_on_demand.py (TestSharedLock). The operator guidance
-to run a single ``serve`` process lands with the routes pull request (#42).
+to run a single ``serve`` process is in the runbook, "On-demand runs".
 #EDGE: Timing: a queued run that never started when the process stopped has no
 row, so after a restart its id answers 404; the caller posts again.
 #VERIFY: tests/unit/test_on_demand.py (TestShutdown).

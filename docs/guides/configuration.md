@@ -54,8 +54,8 @@ shows non-secret values only.
 |----------|---------|---------|
 | `FL_HA_TOKEN` | unset | **Secret.** Bearer token Home Assistant presents; at least 32 characters; `serve` refuses to start without it |
 | `FL_HA_SCHOOLS` | empty | JSON list of schools whose schedules Home Assistant pushes to `POST /api/v1/ingest/ha-snapshot`. Each entry has `location_id` (registry location), `person_ids` (registry people who attend it, 1 to 16; a person belongs to one school), `bell_calendars` and `district_calendars` (`calendar.*` entity IDs, up to 8 each, at least one in total). A bell calendar belongs to one school; only a district calendar may serve several. A repeated JSON key is rejected rather than silently dropped. Only listed calendars are accepted; empty accepts none and the ingest answers 503. At most 8 schools. Keep real entity IDs in the private deployment repository. See [Home Assistant school snapshot](ha-school-snapshot.md) |
-| `FL_PROXY_TRUSTED_CIDRS` | empty | Reverse-proxy addresses whose identity headers are believed; empty trusts none |
-| `FL_UI_ALLOWED_USERS` | empty | Single sign-on usernames allowed into the registry UI; empty denies everyone |
+| `FL_PROXY_TRUSTED_CIDRS` | empty | Reverse-proxy addresses whose identity headers will be believed; empty trusts none. Reserved for the M4 registry UI: no code reads it yet, so it has no effect today |
+| `FL_UI_ALLOWED_USERS` | empty | Single sign-on usernames that will be allowed into the registry UI; empty denies everyone. Reserved for the M4 registry UI: no code reads it yet, so it has no effect today |
 | `FL_DATA_KEY` | unset | **Secret.** Fernet key encrypting protected addresses at rest; required before any address is stored, and `serve` refuses to start without it when `FL_NOTIFICATION_MODE=production` |
 | `FL_AUDIT_KEY` | unset | **Secret.** HMAC-SHA256 key for the audit-log state hashes: 32 random bytes as url-safe base64 (44 characters, `python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"`); must differ from `FL_DATA_KEY`; no audit row is written without it, and `serve` refuses to start without it when `FL_NOTIFICATION_MODE=production` |
 | `FL_AUDIT_KEY_VERSION` | `1` | Version stored with every audit row so a key rotation can be told apart; at least 1 |
@@ -70,7 +70,7 @@ shows non-secret values only.
 | `FL_APPRISE_TAG_STATUS` | `fl-status` | Completed daily or on-demand run summary |
 | `FL_APPRISE_TAG_WARNING` | `fl-warning` | Non-urgent findings |
 | `FL_APPRISE_TAG_URGENT` | `fl-urgent` | Critical or unverifiable imminent ride; one quiet-hours push per episode |
-| `FL_APPRISE_TAG_OPS` | `fl-ops` | Operator alerts: one per failed or incomplete episode, and (with the scheduler) collection failures, the routing budget and an unreachable database |
+| `FL_APPRISE_TAG_OPS` | `fl-ops` | Operator alerts: one per failed or incomplete episode, sent by the notification service. Collection failures, the routing budget and an unreachable database do not raise an operator alert yet (see [Ops alerting](../runbook.md#ops-alerting)) |
 | `FL_APPRISE_TAG_SHADOW` | `fl-shadow` | All output while in shadow mode |
 | `FL_NOTIFICATION_MODE` | `shadow` | `shadow` or `production`; production needs both parents' approval |
 | `FL_QUIET_HOURS_START` | `22:00` | Start of quiet hours (local time); only an urgent push bypasses them, once per episode (CAP-014 never does) |
@@ -98,9 +98,9 @@ used.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `FL_ROUTE_PROVIDER` | `ha_relay` | `ha_relay`, `google_routes` or `static`. `ha_relay` reads travel times Home Assistant posted to `POST /api/v1/route-results` and queues the legs it is missing at `GET /api/v1/route-requests` (ADR 0006; see the [route relay guide](ha-route-relay.md)); a miss is unknown (ROUTE-010, run incomplete), never a guessed duration. Leg endpoints are zone entity ids; a zone-less location falls back to its decrypted address, except another family's home, which is withheld and needs a zone (privacy spec section 5), so `FL_DATA_KEY` is needed for those fallbacks. The scheduler builds the provider from this setting through the factory, so it takes effect when `FL_SCHEDULER_ENABLED=true` or `FL_ON_DEMAND_ENABLED=true` (the on-demand API builds the provider when a run starts); no other path calls the factory. `google_routes` is refused as not implemented, and `static` is for tests and needs an explicit travel-time table; with the scheduler enabled, any value other than `ha_relay` is refused at startup. The relay uses `FL_HA_TOKEN`, `FL_TIMEZONE` and `FL_AUDIT_KEY` and adds no setting of its own |
-| `FL_GOOGLE_ROUTES_API_KEY` | unset | **Secret.** Optional paid routing key |
-| `FL_ROUTES_MONTHLY_BUDGET_USD` | `10` | Hard monthly cap enforced by the application |
-| `FL_ROUTES_BUDGET_WARN_USD` | `8` | Spend that triggers an operator warning |
+| `FL_GOOGLE_ROUTES_API_KEY` | unset | **Secret.** Optional paid routing key. Reserved for `google_routes`, which is not implemented: no code reads it yet |
+| `FL_ROUTES_MONTHLY_BUDGET_USD` | `10` | Intended hard monthly cap for paid routing. Reserved for `google_routes`: no code reads it yet, so no monthly cap is enforced today |
+| `FL_ROUTES_BUDGET_WARN_USD` | `8` | Intended spend that triggers an operator warning. Reserved for `google_routes`: no code reads it yet, so no budget warning is sent today |
 
 ## Scheduling
 

@@ -17,7 +17,7 @@ on-demand request that joined a scheduled run) still learn how it ended.
 database (the ``collect`` CLI, a second ``serve``) is not excluded, and issue
 #22 (one database write lock from history load to run completion) stays open.
 #VERIFY: tests/unit/test_on_demand.py (TestSharedLock). The operator guidance
-to run one ``serve`` only lands with the routes pull request (#42).
+to run one ``serve`` only is in the runbook, "On-demand runs".
 
 #CRITICAL: Timing: a run id that was handed to a caller must always resolve. A
 run that raises is recorded as failed BEFORE its executing mark is cleared, so

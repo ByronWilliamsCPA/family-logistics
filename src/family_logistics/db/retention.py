@@ -45,15 +45,17 @@ _NAIVE_NOW_MESSAGE = "now must be a timezone-aware datetime"
 # register, pending owner approval); the privacy spec lists no period for the
 # HA snapshot yet. Past school days serve no assessment (the window starts
 # today), so the period only bounds how long a stale snapshot lingers.
-# #VERIFY: owner approves the period; the scheduler (M3) must call
-# ``purge_expired_school_days`` with ``purge_raw_source_text``.
+# #VERIFY: owner approves the period; ``SchedulerService._purge`` calls
+# ``purge_expired_school_days`` with the other purges (only while
+# FL_SCHEDULER_ENABLED=true); tests/unit/test_scheduler.py (TestPurge).
 SCHOOL_DAY_RETENTION_DAYS = 30
 
 # #ASSUME: Data integrity: proposed retention for closed notification state rows
 # (ADR 0008, N9; owner-pending). A closed row only feeds the 4 hour notice
 # cooldown, so 90 days is far beyond any use; it bounds table growth.
-# #VERIFY: owner approves the period; the scheduler (M3 PR 6) must call
-# ``purge_expired_notification_state`` with the other purges.
+# #VERIFY: owner approves the period; ``SchedulerService._purge`` calls
+# ``purge_expired_notification_state`` with the other purges (only while
+# FL_SCHEDULER_ENABLED=true); tests/unit/test_scheduler.py (TestPurge).
 NOTIFICATION_STATE_RETENTION_DAYS = 90
 
 ROUTE_CACHE_RETENTION_DAYS = CACHE_VALIDITY.days
@@ -88,8 +90,10 @@ def purge_raw_source_text(connection: Connection, *, now: datetime) -> int:
         raise ValidationError(msg, field="now")
     # #CRITICAL: security: raw calendar notes may hold addresses and children's
     # data and must not outlive the retention period.
-    # #VERIFY: the scheduler (M3) must call this on every run; tests pin the
-    # 30-day boundary and that only location and description are cleared.
+    # #VERIFY: ``SchedulerService._purge`` calls this on its nightly run (only
+    # while FL_SCHEDULER_ENABLED=true; tests/unit/test_scheduler.py, TestPurge);
+    # tests pin the 30-day boundary and that only location and description are
+    # cleared.
     # #EDGE: data integrity: julianday returns NULL for text it cannot parse and
     # a NULL comparison never matches, so a row with an unparseable deleted_at
     # or end_utc is not purged. UtcDateTime writes always parse; only a raw SQL
@@ -163,8 +167,8 @@ def purge_expired_route_cache(connection: Connection, *, now: datetime) -> int:
     """Delete route cache entries observed more than 28 days before ``now``.
 
     An entry exactly 28 days old is kept: the provider still serves it. The
-    caller owns the transaction. Not scheduled yet; the scheduler (M3) must call
-    it with the other purges.
+    caller owns the transaction. ``SchedulerService._purge`` calls it with the
+    other purges, only while ``FL_SCHEDULER_ENABLED=true``.
 
     Args:
         connection: An open connection, normally inside ``engine.begin()``.
@@ -180,8 +184,9 @@ def purge_expired_route_cache(connection: Connection, *, now: datetime) -> int:
     # #ASSUME: Security: cached travel times between named places are
     # Confidential (privacy spec); the retention period equals the validity
     # window, so nothing is kept that could no longer be served.
-    # #VERIFY: the scheduler (M3) must call this on every run; tests pin the
-    # 28-day boundary.
+    # #VERIFY: ``SchedulerService._purge`` calls this on its nightly run (only
+    # while FL_SCHEDULER_ENABLED=true; tests/unit/test_scheduler.py, TestPurge);
+    # tests pin the 28-day boundary.
     _require_aware(now)
     cutoff = now - timedelta(days=ROUTE_CACHE_RETENTION_DAYS)
     table = schema.route_cache
@@ -195,8 +200,9 @@ def purge_expired_route_requests(connection: Connection, *, now: datetime) -> in
     """Delete route requests whose expiry has passed, answered or not.
 
     Answered rows only serve to recognise an identical re-post, which is moot
-    once the request has expired. The caller owns the transaction. Not
-    scheduled yet.
+    once the request has expired. The caller owns the transaction.
+    ``SchedulerService._purge`` calls it with the other purges, only while
+    ``FL_SCHEDULER_ENABLED=true``.
 
     Args:
         connection: An open connection, normally inside ``engine.begin()``.

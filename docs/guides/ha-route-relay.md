@@ -18,11 +18,12 @@ The app caches each result for the same weekday and 15-minute bucket for up to
 incomplete); the app never guesses a duration. See
 [ADR 0006](../ADRs/0006-route-provider-abstraction.md) for the decisions.
 
-!!! note "Not wired in yet"
-    The two routes below are live, but nothing in the application builds the
-    `ha_relay` provider yet (`build_route_provider` has no caller outside tests),
-    so no request is queued and `GET /api/v1/route-requests` returns an empty
-    list until the M3 wiring lands.
+!!! note "Queued only while a run executes"
+    Both routes below are live. The `ha_relay` provider is built by the
+    scheduler (`FL_SCHEDULER_ENABLED`) and by the on-demand run
+    (`FL_ON_DEMAND_ENABLED`), each when a run starts. Both are off by default,
+    so until the owner enables one, no run builds the provider, no request is
+    queued and `GET /api/v1/route-requests` returns an empty list.
 
 !!! warning "Observed behaviour, not a guarantee"
     `#ASSUME`: Home Assistant resolves a bare time-of-day `departure_time`
