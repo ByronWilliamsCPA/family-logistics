@@ -69,7 +69,7 @@ from family_logistics.services.collector import (
     enabled_selected_sources,
 )
 from family_logistics.services.wiring import collector_config
-from family_logistics.utils.logging import get_logger
+from family_logistics.utils.logging import get_logger, log_failure
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -260,9 +260,7 @@ class AssessmentService:
             result, trips, rides = self._assess(now, (start, end), history, school)
         except Exception as exc:  # noqa: BLE001 - any failure must be recorded as failed
             # Only the class name is kept: messages can carry addresses.
-            logger.error(  # noqa: TRY400 - a traceback can carry addresses
-                "assessment_failed", run_id=run_id, error=type(exc).__name__
-            )
+            log_failure(logger, "assessment_failed", exc, run_id=run_id)
             # The failed result carries the previous open findings on purpose,
             # so a failed run's counts show what is still open, not a clear
             # board. With no readable history there are none to carry.

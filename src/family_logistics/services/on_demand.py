@@ -78,7 +78,7 @@ from family_logistics.services.assessments import (
     AssessmentService,
 )
 from family_logistics.services.scheduler import LOCK_WAIT
-from family_logistics.utils.logging import get_logger
+from family_logistics.utils.logging import get_logger, log_failure
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -389,9 +389,7 @@ class OnDemandService:
         # A raised run must be remembered as failed, never lost.
         except Exception as exc:  # noqa: BLE001
             # Only the class name is logged: a traceback can carry household text.
-            logger.error(  # noqa: TRY400
-                "on_demand.run_failed", run_id=run_id, error=type(exc).__name__
-            )
+            log_failure(logger, "on_demand.run_failed", exc, run_id=run_id)
         finally:
             # The failure is remembered before the pending id is cleared, so a
             # reader that no longer finds the run queued finds it failed.

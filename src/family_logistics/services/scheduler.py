@@ -73,7 +73,7 @@ from family_logistics.services.notifications import (
     NotificationStateError,
 )
 from family_logistics.services.wiring import build_collector
-from family_logistics.utils.logging import get_logger
+from family_logistics.utils.logging import get_logger, log_failure
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -127,11 +127,6 @@ _MISSABLE: Final = {DAILY_JOB: "daily", WEEKLY_JOB: "weekly"}
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
-
-
-def _log_failure(event: str, exc: Exception, **fields: object) -> None:
-    """Log a failure by exception class only: a message may carry household text."""
-    logger.error(event, error=type(exc).__name__, **fields)
 
 
 class Collecting(Protocol):
@@ -630,7 +625,7 @@ class SchedulerService:
         try:
             report = body()
         except Exception as exc:  # noqa: BLE001 - a tick must never stop the scheduler
-            _log_failure("scheduler.job_crashed", exc, job=job)
+            log_failure(logger, "scheduler.job_crashed", exc, job=job)
             report = TickReport(job, "crashed")
         stats = self._record(report)
         logger.info(
@@ -749,7 +744,7 @@ class SchedulerService:
         try:
             outcome = self._assessor.run(trigger, self._school.latest())
         except Exception as exc:  # noqa: BLE001 - an unreadable run is never silence
-            _log_failure("scheduler.run_failed", exc, job=job)
+            log_failure(logger, "scheduler.run_failed", exc, job=job)
             return self._unverified(job, trigger, retry=retry, collection=collection)
         report, done = self._dispatch(
             lambda: self._notifier.dispatch(outcome), job, retry=retry
@@ -768,7 +763,7 @@ class SchedulerService:
         try:
             run = self._collector.run_once()
         except Exception as exc:  # noqa: BLE001 - the run still judges the sources
-            _log_failure("scheduler.collect_crashed", exc, job=job)
+            log_failure(logger, "scheduler.collect_crashed", exc, job=job)
             return "crashed"
         return "complete" if run.complete else "incomplete"
 
@@ -792,10 +787,10 @@ class SchedulerService:
             report = send()
         except NotificationStateError as exc:
             # The report says what was delivered before the state write failed.
-            _log_failure("scheduler.dispatch_failed", exc, job=job)
+            log_failure(logger, "scheduler.dispatch_failed", exc, job=job)
             report, done = exc.report, False
         except Exception as exc:  # noqa: BLE001 - includes NotificationTagError
-            _log_failure("scheduler.dispatch_failed", exc, job=job)
+            log_failure(logger, "scheduler.dispatch_failed", exc, job=job)
             report, done = None, False
         if retry and report is not None and report.urgent_failed:
             self._schedule_urgent_retry()
@@ -837,7 +832,7 @@ class SchedulerService:
                         counts[name] = purge(connection, now=now)
                 except Exception as exc:  # noqa: BLE001 - one purge must not stop the rest
                     failed = True
-                    _log_failure("scheduler.purge_failed", exc, table=name)
+                    log_failure(logger, "scheduler.purge_failed", exc, table=name)
             logger.info("scheduler.purged", **counts)
             outcome = "purge_failed" if failed else "ok"
             return TickReport(PURGE_JOB, outcome, counts=counts)

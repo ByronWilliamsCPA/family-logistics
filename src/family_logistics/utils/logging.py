@@ -168,6 +168,35 @@ def get_logger(name: str) -> BoundLogger:
     return cast("BoundLogger", structlog.get_logger(name))
 
 
+def log_failure(
+    logger: BoundLogger,
+    event: str,
+    exc: BaseException,
+    **fields: object,
+) -> None:
+    """Log a failure by exception class name only.
+
+    An exception message or traceback can carry household text (addresses,
+    names, ride notes), so neither is logged: the event carries
+    ``error=<ExceptionClassName>`` and the given fields, nothing else. Do not add
+    ``exc_info`` or ``str(exc)`` here.
+
+    Args:
+        logger: Structlog logger instance from get_logger().
+        event: The log event name.
+        exc: The exception that was caught; only its class name is logged.
+        **fields: Additional context key-value pairs to include in the log.
+
+    Example:
+        >>> logger = get_logger(__name__)
+        >>> try:
+        ...     risky()
+        ... except Exception as exc:
+        ...     log_failure(logger, "job_failed", exc, job="scan")
+    """
+    logger.error(event, error=type(exc).__name__, **fields)
+
+
 def log_performance(
     logger: BoundLogger,
     operation: str,
