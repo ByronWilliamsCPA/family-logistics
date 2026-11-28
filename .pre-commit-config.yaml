@@ -222,7 +222,7 @@ repos:
   # Markdown and house style
   # ============================================================================
   - repo: https://github.com/igorshubovych/markdownlint-cli
-    rev: cbcdc463be5464e25e3e955a511599a67b9b987f  # v0.50.0  # pragma: allowlist secret
+    rev: bf6d1792b8bc7f6cc93f10cc27735a4cb0c38e47  # v0.50.1  # pragma: allowlist secret
     hooks:
       - id: markdownlint
         stages: [pre-commit]
